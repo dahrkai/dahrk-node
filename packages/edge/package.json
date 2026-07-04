@@ -1,0 +1,23 @@
+{
+  "name": "@dahrk/edge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "The edge node's brain: the WebSocket client, the stage runner (Job -> runner invocation), policy evaluation around tool calls and at stage entry, and stage-boundary hooks.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@dahrk/contracts": "^0.1.0",
+    "@dahrk/executor-worktree": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@dahrk/edge-node",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Installable Dahrk edge node entrypoint (Mac / VPS). Dials out to the hub over WebSocket and runs stages in worktrees.",
+  "bin": { "dahrk-edge": "dist/main.js" },
+  "exports": { ".": "./src/main.ts" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js",
+    "start:docker": "tsx src/main.ts",
+    "dev": "tsx src/main.ts",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@dahrk/contracts": "^0.1.0",
+    "@dahrk/edge": "workspace:*",
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# env / secrets (real env files never committed; only *.env.example templates are)
+.env
+.env.*
+.env-*
+*.env
+!*.env.example
+!.env.example
+# direnv loader is personal/local, kept out of git (it just dotenvs .env)
+.envrc
+
+# Dahrk runtime scratch (worktree-local; never committed)
+.skakel/scratch/
+
+# logs / os
+*.log
+.DS_Store
+
+# editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
