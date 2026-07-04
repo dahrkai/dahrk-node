@@ -1,0 +1,28 @@
+/**
+ * @dahrk/edge - the edge node's brain (build spec sections 9, 11, 13).
+ *
+ *  - WebSocket client (`startEdgeNode`): dial OUT to the hub (no inbound ports),
+ *    advertise runtimes/repos, heartbeat, reconnect.
+ *  - Stage runner (`createStageRunner`): map one Job to one runner invocation in a
+ *    real git worktree, stream progress, write the normalised trace, report a result
+ *    keyed by jobId. Interactive stages and real inference arrive with M4.
+ *  - Policy evaluation (`evaluatePolicies`): the governance hook points around tool
+ *    actions and at stage entry; a deny surfaces as a tool error in the trace. The
+ *    Phase 1 policy builtins are M6.
+ *  - Stage-boundary hooks (R4): deterministic stage-exit checks run in the worktree.
+ *
+ * Built at M3 (mock Runner; +M4 real adapters, +M6 governance builtins).
+ */
+export { startEdgeNode } from "./ws-client.js";
+export type { EdgeOptions } from "./ws-client.js";
+export { createStageRunner } from "./stage-runner.js";
+export type {
+  StageRunner,
+  StageRunnerDeps,
+  TraceSink,
+  BlobPutRequestArgs,
+  RetentionPolicy,
+} from "./stage-runner.js";
+export { evaluatePolicies, denyToolRule } from "./policy.js";
+export type { PolicyEvent, PolicyRule } from "./policy.js";
+export { detectRuntimes } from "./detect-runtimes.js";

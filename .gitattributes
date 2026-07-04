@@ -1,0 +1,5 @@
+# pnpm-lock.yaml is regenerated, not line-merged.
+pnpm-lock.yaml -diff linguist-generated=true
+
+# Do NOT add `merge=union` to source files: it silently concatenates both sides
+# of a conflict and produces code that compiles but is wrong.

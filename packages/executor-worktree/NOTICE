@@ -1,0 +1,14 @@
+Dahrk
+Copyright 2026 Skakel Labs
+
+This product includes software adapted from Cyrus
+(https://github.com/cyrusagents/cyrus), Copyright the Cyrus authors,
+licensed under the Apache License, Version 2.0.
+
+Specifically, packages/executor-worktree adapts Cyrus's GitService
+worktree lifecycle (worktree create/teardown, base-branch resolution,
+and the sanitizeBranchName helper) and follows the SDK-to-activity
+mapping approach of Cyrus's AgentSessionManager for the runner adapters'
+normalised trace envelope. The adapted code has been substantially
+rewritten and stripped of Cyrus-core coupling; the original licence and
+attribution are preserved here per Apache-2.0 section 4.
