@@ -19,7 +19,7 @@
  * accepted as aliases), and `DAHRK_RUNTIMES`, `DAHRK_CREDENTIAL_MODE`, `DAHRK_NODE_ID`,
  * `DAHRK_TENANT_ID` still act as explicit overrides.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -30,6 +30,9 @@ import { parseCli, usage, type StartFlags } from "./cli.js";
 import { runDoctor } from "./doctor.js";
 
 const CLIENT_VERSION = process.env.npm_package_version ?? "0.0.0";
+
+/** Canonical hosted hub; used when neither DAHRK_HUB_URL nor --hub-url is set. */
+export const DEFAULT_HUB_URL = "wss://hub.dahrk.net";
 
 const list = (v: string | undefined): string[] =>
   (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -114,8 +117,9 @@ export async function resolveRuntimes(env: NodeJS.ProcessEnv): Promise<Runtime[]
  * and the node id / client version are left to the caller.
  */
 export function buildEdgeOptions(env: NodeJS.ProcessEnv, resolved?: ResolvedBoot): EdgeOptions {
-  const hubUrl = env.DAHRK_HUB_URL;
-  if (!hubUrl) throw new Error("set DAHRK_HUB_URL (e.g. ws://localhost:7071) or pass --hub-url");
+  // DAHRK_HUB_URL / --hub-url is now an override; unset falls back to the canonical hosted hub so the
+  // token-only install needs just an enrolment token.
+  const hubUrl = env.DAHRK_HUB_URL ?? DEFAULT_HUB_URL;
   // DAHRK_REPOS is now an OPTIONAL self-hosted allowlist of registry repoIds this node will serve
   // (a binding, not a definition); empty = serve any repo, cloning on demand (demoted from the
   // former list of pre-cloned local paths).
@@ -215,9 +219,9 @@ async function start(flags: StartFlags): Promise<void> {
  *  (it blocks on the socket); the others print and let the caller exit. */
 async function main(): Promise<void> {
   // The invoked program name for usage text. When run from source/dist the entry file is `main.*`,
-  // which is meaningless to an operator, so fall back to the published bin name `dahrk-node`.
+  // which is meaningless to an operator, so fall back to the published bin name `dahrk`.
   const invoked = basename(process.argv[1] ?? "");
-  const bin = !invoked || invoked.startsWith("main.") ? "dahrk-node" : invoked;
+  const bin = !invoked || invoked.startsWith("main.") ? "dahrk" : invoked;
   const parsed = parseCli(process.argv.slice(2));
   switch (parsed.kind) {
     case "error":
@@ -247,8 +251,19 @@ async function main(): Promise<void> {
 }
 
 // Only run the CLI when invoked as the process entrypoint; importing the module (e.g. from tests) is
-// side-effect-free.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// side-effect-free. Resolve argv[1] through any symlink first: an npm/Homebrew global install exposes
+// the bin as a symlink, so the raw path never equals the real module URL and main() would silently
+// never run (i.e. `dahrk --version` would print nothing).
+const invokedAsEntrypoint = ((): boolean => {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return pathToFileURL(realpathSync(argv1)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+})();
+if (invokedAsEntrypoint) {
   main().catch((err: unknown) => {
     // A fatal enrolment rejection (bad/missing token) rejects startEdgeNode before it ever connects.
     // The edge already set process.exitCode (78 = EX_CONFIG) so pm2 can stop rather than
