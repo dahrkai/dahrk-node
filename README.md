@@ -17,21 +17,39 @@ no dependency on the hub, sharing only the wire protocol and types published as
 |---|---|
 | [`packages/edge`](packages/edge) (`@dahrk/edge`) | The node's brain: the WebSocket client, the stage runner, tool/stage-entry policy, and stage-exit hooks. |
 | [`packages/executor-worktree`](packages/executor-worktree) (`@dahrk/executor-worktree`) | The worktree executor: runner adapters (Claude Agent SDK, Codex SDK, Pi), a vendored GitService for worktree lifecycle, and the trace producer. |
-| [`apps/edge-node`](apps/edge-node) (`@dahrk/edge-node`) | The installable entrypoint (`dahrk-node`). Dials out to the hub over WebSocket and runs stages in worktrees. No inbound ports. |
+| [`apps/edge-node`](apps/edge-node) (published as [`dahrk-node`](https://www.npmjs.com/package/dahrk-node)) | The installable entrypoint (command `dahrk`). Dials out to the hub over WebSocket and runs stages in worktrees. No inbound ports. |
 
-## Quick start
+## Install
+
+Three channels, all installing the same version and providing the `dahrk` command. They need
+**Node 22+** and a logged-in agent runtime (e.g. the `claude` CLI).
+
+```bash
+npm install -g dahrk-node                          # npm
+brew install dahrkai/tap/dahrk                     # Homebrew
+curl -fsSL https://dahrk.ai/install.sh | sh        # curl
+```
+
+Then connect a node with an enrolment token from [app.dahrk.ai](https://app.dahrk.ai):
+
+```bash
+dahrk --token <enrolment-token>
+```
+
+The node auto-detects which agent runtimes are installed (claude / codex / pi), mints and persists a
+stable node id under `~/.dahrk/node.json`, dials out to the hub, and waits for Jobs. It advertises no
+inbound ports; repositories are cloned on demand from each Job's git URL. To keep it running across
+reboots, put it under a process manager (see [pm2](#run-it-durably-pm2) below).
+
+## Run from source (development)
 
 Requires **Node 22+** and **pnpm 11+**.
 
 ```bash
 pnpm install
 pnpm build
-pnpm --filter @dahrk/edge-node dev --token <enrolment-token>
+pnpm --filter dahrk-node dev --token <enrolment-token>
 ```
-
-The node auto-detects which agent runtimes are installed (claude / codex / pi), mints and persists a
-stable node id under `~/.dahrk/node.json`, dials out to the hub, and waits for Jobs. It advertises no
-inbound ports; repositories are cloned on demand from each Job's git URL.
 
 ### Run it durably (pm2)
 
@@ -73,10 +91,27 @@ env var.
 ## Development
 
 ```bash
-pnpm build       # tsc across all packages
+pnpm build       # tsup bundles the `dahrk-node` client; tsc across the library packages
 pnpm typecheck   # type-check only
 pnpm test        # Node built-in test runner (no Docker, no network, no live models)
 ```
+
+## Releasing
+
+The `dahrk-node` client (in `apps/edge-node`) is published to npm on a git tag. Releases follow
+[Keep a Changelog](https://keepachangelog.com/) and [semver](https://semver.org/):
+
+1. Move the `## [Unreleased]` entries in [`CHANGELOG.md`](CHANGELOG.md) into a new `## [x.y.z]` section.
+2. Bump `version` in `apps/edge-node/package.json` to match.
+3. Commit, then tag and push:
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) then gates that the tag equals the
+package version, runs the CI checks, publishes to npm, bumps the Homebrew tap formula, and cuts a
+GitHub release from the changelog. See [`packaging/homebrew/README.md`](packaging/homebrew/README.md)
+for the tap, and the workflow header for the required secrets (`NPM_TOKEN`, `TAP_PUSH_TOKEN`).
 
 ## Attribution
 

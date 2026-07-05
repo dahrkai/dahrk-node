@@ -1,14 +1,40 @@
 {
-  "name": "@dahrk/edge-node",
+  "name": "dahrk-node",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "Installable Dahrk edge node entrypoint (Mac / VPS). Dials out to the hub over WebSocket and runs stages in worktrees.",
-  "bin": { "dahrk-node": "dist/main.js" },
-  "exports": { ".": "./src/main.ts" },
+  "description": "The Dahrk edge client: install it (npm / Homebrew / curl), run `dahrk` with an enrolment token, and it becomes a self-managed node that executes Dahrk workflow stages in a git worktree.",
+  "keywords": [
+    "dahrk",
+    "linear",
+    "agent",
+    "workflow",
+    "edge",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dahrkai/dahrk-node.git",
+    "directory": "apps/edge-node"
+  },
+  "homepage": "https://dahrk.ai",
+  "bugs": {
+    "url": "https://github.com/dahrkai/dahrk-node/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "dahrk": "dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": "./dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsup",
+    "prepack": "pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
     "start:docker": "tsx src/main.ts",
@@ -16,8 +42,16 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.183",
     "@dahrk/contracts": "^0.1.0",
+    "@openai/codex-sdk": "0.141.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
     "@dahrk/edge": "workspace:*",
+    "@dahrk/executor-worktree": "workspace:*",
+    "tsup": "^8.3.5",
     "tsx": "^4.19.0"
   }
 }

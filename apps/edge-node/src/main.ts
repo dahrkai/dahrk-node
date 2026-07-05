@@ -1,7 +1,7 @@
 /**
  * Installable edge node entrypoint (Mac / VPS). The streamlined install is token-only:
  *
- *   dahrk-node --token <enrolment-token>
+ *   dahrk --token <enrolment-token>
  *
  * Everything else is either auto-detected on the node or pushed from the hub. On boot the node
  * probes which runtimes are installed (claude / codex / pi), reads or mints a stable node id
@@ -15,7 +15,7 @@
  * accepted as aliases), and `DAHRK_RUNTIMES`, `DAHRK_CREDENTIAL_MODE`, `DAHRK_NODE_ID`,
  * `DAHRK_TENANT_ID` still act as explicit overrides.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -182,17 +182,45 @@ function applyEnvAliases(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return merged;
 }
 
-/** Overlay the token-only CLI flags onto a copy of the env; a flag wins over the matching env var. */
-function envWithFlags(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+type CliValues = {
+  token?: string;
+  name?: string;
+  "hub-url"?: string;
+  version?: boolean;
+  help?: boolean;
+};
+
+const HELP = `dahrk - the Dahrk edge client
+
+Usage: dahrk [options]
+
+Options:
+  --token <token>   enrolment token (or DAHRK_ENROL_TOKEN)
+  --name <name>     node display name (or DAHRK_NODE_NAME)
+  --hub-url <url>   hub endpoint (or DAHRK_HUB_URL; defaults to the hosted hub)
+  -v, --version     print the client version and exit
+  -h, --help        print this help and exit
+
+Docs: https://dahrk.ai/docs`;
+
+/** Parse the token-only CLI flags plus --version/--help. Kept in one place so the flag set is single-sourced. */
+function parseCli(argv: string[]): CliValues {
   const { values } = parseArgs({
-    args: process.argv.slice(2),
+    args: argv,
     options: {
       token: { type: "string" },
       name: { type: "string" },
       "hub-url": { type: "string" },
+      version: { type: "boolean", short: "v" },
+      help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
   });
+  return values as CliValues;
+}
+
+/** Overlay the token-only CLI flags onto a copy of the env; a flag wins over the matching env var. */
+function envWithFlags(env: NodeJS.ProcessEnv, values: CliValues): NodeJS.ProcessEnv {
   const merged = applyEnvAliases(env);
   if (values.token) merged.DAHRK_ENROL_TOKEN = values.token;
   if (values.name) merged.DAHRK_NODE_NAME = values.name;
@@ -201,7 +229,16 @@ function envWithFlags(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 async function main(): Promise<void> {
-  const env = envWithFlags(process.env);
+  const cli = parseCli(process.argv.slice(2));
+  if (cli.version) {
+    console.log(CLIENT_VERSION);
+    return;
+  }
+  if (cli.help) {
+    console.log(HELP);
+    return;
+  }
+  const env = envWithFlags(process.env, cli);
   const nodeId = resolveNodeId(env);
   const runtimes = await resolveRuntimes(env);
   if (runtimes.length === 0) {
@@ -215,8 +252,19 @@ async function main(): Promise<void> {
 }
 
 // Only dial the hub when run as the process entrypoint; importing the module (e.g. from tests) is
-// side-effect-free.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// side-effect-free. Resolve argv[1] through any symlink first: an npm/Homebrew global install exposes
+// the bin as a symlink, so the raw path never equals the real module URL and main() would silently
+// never run (i.e. `dahrk --version` would print nothing).
+const invokedAsEntrypoint = ((): boolean => {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return pathToFileURL(realpathSync(argv1)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+})();
+if (invokedAsEntrypoint) {
   main().catch((err: unknown) => {
     // A fatal enrolment rejection (bad/missing token) rejects startEdgeNode before it ever connects.
     // The edge already set process.exitCode (78 = EX_CONFIG) so pm2 can stop rather than
