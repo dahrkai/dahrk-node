@@ -7,11 +7,11 @@
   "description": "The Dahrk node: deliberate edge/managed nodes that run deterministic multi-stage agent workflows per Linear issue, dispatched by the Dahrk hub.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/skakel/dahrk-node.git"
+    "url": "git+https://github.com/dahrkai/dahrk-node.git"
   },
-  "homepage": "https://github.com/skakel/dahrk-node#readme",
+  "homepage": "https://github.com/dahrkai/dahrk-node#readme",
   "bugs": {
-    "url": "https://github.com/skakel/dahrk-node/issues"
+    "url": "https://github.com/dahrkai/dahrk-node/issues"
   },
   "engines": {
     "node": ">=22"

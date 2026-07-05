@@ -1,0 +1,122 @@
+name: Release
+
+# Tag-driven release for the `dahrk-node` npm package (the edge client; binary/command `dahrk`).
+#
+# Cut a release by bumping apps/edge-node/package.json, moving the CHANGELOG [Unreleased] entries into
+# a versioned section, committing, then pushing a matching tag:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# This workflow then: gates that the tag equals the package version, runs the CI checks, publishes to
+# npm, bumps the Homebrew tap formula, and cuts a GitHub release from the changelog.
+#
+# Required secrets:
+#   NPM_TOKEN       - a *classic Automation* token on the npm account that owns `dahrk-node`. The account
+#                     has 2FA-on-write, so a granular/publish token would still prompt for an OTP in
+#                     CI; only a classic Automation token bypasses the OTP. Store it as a repo secret.
+#   TAP_PUSH_TOKEN  - a PAT with `repo` scope on github.com/dahrkai/homebrew-tap. Optional: if unset,
+#                     the tap-bump step is skipped (e.g. before the tap repo exists). See
+#                     packaging/homebrew/README.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify tag matches package version
+        id: version
+        run: |
+          PKG_VERSION=$(node -p "require('./apps/edge-node/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME ($TAG_VERSION) does not match package version $PKG_VERSION" >&2
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      - name: Publish to npm
+        working-directory: apps/edge-node
+        # pnpm publish rewrites the workspace: protocol on the bundled internal deps and honours the
+        # prepack build; --no-git-checks because CI publishes from a detached tag, not a branch.
+        run: pnpm publish --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Bump Homebrew tap formula
+        if: env.TAP_PUSH_TOKEN != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Wait for the just-published tarball to be fetchable, then hash it.
+          TARBALL="https://registry.npmjs.org/dahrk-node/-/dahrk-node-${VERSION}.tgz"
+          for attempt in $(seq 1 12); do
+            if curl -fsSL "$TARBALL" -o /tmp/dahrk.tgz; then break; fi
+            echo "tarball not available yet (attempt $attempt), retrying..."
+            sleep 10
+          done
+          SHA=$(shasum -a 256 /tmp/dahrk.tgz | cut -d' ' -f1)
+          echo "sha256=$SHA"
+
+          git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/dahrkai/homebrew-tap.git" tap
+          FORMULA=tap/Formula/dahrk.rb
+          # Repoint url + sha256 to this release. The formula's `version` is derived from the url.
+          sed -i -E "s|url \".*\"|url \"${TARBALL}\"|" "$FORMULA"
+          sed -i -E "s|sha256 \".*\"|sha256 \"${SHA}\"|" "$FORMULA"
+          cd tap
+          git config user.name "dahrk-release"
+          git config user.email "release@dahrk.ai"
+          if git diff --quiet; then
+            echo "formula already at ${VERSION}, nothing to push"
+          else
+            git commit -am "dahrk ${VERSION}"
+            git push
+          fi
+
+      - name: Extract changelog notes
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Pull the section for this version out of CHANGELOG.md (between "## [VERSION]" and the next "## ").
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" { grab=1; next }
+              grab && /^## / { exit }
+              grab { print }
+            ' CHANGELOG.md > /tmp/notes.md
+          fi
+          if [ ! -s /tmp/notes.md ]; then
+            echo "Release ${VERSION}." > /tmp/notes.md
+          fi
+          echo "path=/tmp/notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.notes.outputs.path }}
