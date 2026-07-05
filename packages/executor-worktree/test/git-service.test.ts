@@ -72,9 +72,9 @@ test("sanitizeBranchName produces a valid ref", () => {
 });
 
 test("parseOwnerRepo handles SSH and HTTPS git URLs and rejects non-URLs", () => {
-  assert.equal(parseOwnerRepo("git@github.com:skakel/dahrk-node.git"), "skakel/dahrk-node");
-  assert.equal(parseOwnerRepo("https://github.com/skakel/dahrk-node.git"), "skakel/dahrk-node");
-  assert.equal(parseOwnerRepo("https://github.com/skakel/dahrk-node"), "skakel/dahrk-node");
+  assert.equal(parseOwnerRepo("git@github.com:dahrkai/dahrk-node.git"), "dahrkai/dahrk-node");
+  assert.equal(parseOwnerRepo("https://github.com/dahrkai/dahrk-node.git"), "dahrkai/dahrk-node");
+  assert.equal(parseOwnerRepo("https://github.com/dahrkai/dahrk-node"), "dahrkai/dahrk-node");
   assert.equal(parseOwnerRepo("not-a-url"), undefined);
 });
 
