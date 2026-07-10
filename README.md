@@ -54,7 +54,7 @@ install it as a service (see [`dahrk service install`](#run-it-as-a-service-dahr
 
 To keep a node always-on without a process manager, install it as a native service. It generates and
 registers a **launchd** LaunchAgent on macOS or a **systemd** user service on Linux that runs
-`dahrk start` on boot, restarts it on failure, and streams logs — no pm2, no root:
+`dahrk start` on boot, restarts it on failure, and streams logs - no pm2, no root:
 
 ```bash
 dahrk service install --token <enrolment-token>   # register + start
@@ -62,19 +62,21 @@ dahrk service uninstall                            # stop + remove
 ```
 
 Because the node id is persisted at `~/.dahrk/node.json`, the service re-attaches as the **same** node
-across restarts — no hand-set `DAHRK_NODE_ID`. The token (and any `--name` / `--hub-url`) is baked into
-the service's environment block, not its command line, so it never shows up in `ps`.
+across restarts - no hand-set `DAHRK_NODE_ID`. The token (and any `--name` / `--hub-url`) is baked into
+the service's environment block, not its command line, so it never shows up in `ps`. Your current `PATH`
+is snapshotted into that block too, so the daemon finds `git` and the runtime CLIs (claude / codex / pi)
+the same way your shell does - install the service from a shell where `dahrk doctor` already sees them.
 
 - **macOS** writes `~/Library/LaunchAgents/ai.dahrk.node.plist` and loads it with `launchctl`. Logs land
   at `~/.dahrk/logs/node.{out,err}.log` (`tail -f ~/.dahrk/logs/node.err.log`).
 - **Linux** writes `~/.config/systemd/user/dahrk-node.service`, runs `systemctl --user enable --now`, and
-  enables **linger** (`loginctl enable-linger`) so the node starts at boot and survives logout — the
+  enables **linger** (`loginctl enable-linger`) so the node starts at boot and survives logout - the
   thing a headless VPS needs. Logs go to the journal (`journalctl --user -u dahrk-node -f`). If enabling
   linger needs privilege on your host, run `sudo loginctl enable-linger $USER` once.
 
 On a clean Mac or a clean Linux VPS this yields a node that survives a reboot and re-attaches. A bad or
 missing token exits 78 (`EX_CONFIG`): on Linux systemd stops the service rather than restarting it, and
-on macOS launchd throttles retries to one every 10s — either way the misconfiguration stays visible in
+on macOS launchd throttles retries to one every 10s - either way the misconfiguration stays visible in
 the logs instead of hammering the hub.
 
 ## What's in this repo

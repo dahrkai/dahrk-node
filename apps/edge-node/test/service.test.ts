@@ -67,6 +67,19 @@ test("renderSystemdUnit: quotes an Environment value that contains whitespace", 
   assert.match(unit, /Environment=DAHRK_NODE_NAME="my mac"/);
 });
 
+test("bakes the operator's PATH into the env block so the daemon finds git + runtime CLIs", () => {
+  const path = "/opt/homebrew/bin:/usr/bin:/bin";
+  // launchd: PATH is a key in EnvironmentVariables, not a ProgramArgument.
+  const plist = renderLaunchdPlist({ ...BASE, pathEnv: path });
+  assert.match(plist, new RegExp(`<key>PATH</key>\\s*<string>${path.replace(/\//g, "\\/")}</string>`));
+  // systemd: PATH via Environment=.
+  const unit = renderSystemdUnit({ ...BASE, manager: "systemd", pathEnv: path });
+  assert.match(unit, new RegExp(`Environment=PATH=${path.replace(/\//g, "\\/")}`));
+  // Unset PATH omits it entirely rather than exporting an empty one.
+  assert.doesNotMatch(renderLaunchdPlist(BASE), /<key>PATH<\/key>/);
+  assert.doesNotMatch(renderSystemdUnit({ ...BASE, manager: "systemd" }), /Environment=PATH=/);
+});
+
 test("buildPlan: launchd path + launchctl load/unload commands", () => {
   const plan = buildPlan(BASE);
   assert.equal(plan.filePath, `/Users/me/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`);
@@ -101,6 +114,7 @@ function harness(over: Partial<ServiceDeps>): {
     nodeBin: "/usr/local/bin/node",
     scriptPath: "/usr/local/lib/node_modules/dahrk-node/dist/main.js",
     logDir: "/Users/me/.dahrk/logs",
+    pathEnv: "/opt/homebrew/bin:/usr/bin:/bin",
     mkdirp: () => {},
     writeFile: (path, content) => writes.push({ path, content }),
     removeFile: (path) => removed.push(path),
@@ -122,6 +136,8 @@ test("install: writes the plist and runs the loader; exit 0", async () => {
   assert.equal(writes.length, 1);
   assert.match(writes[0]!.path, /Library\/LaunchAgents\/ai\.dahrk\.node\.plist$/);
   assert.match(writes[0]!.content, /DAHRK_ENROL_TOKEN<\/key>\s*<string>sket_abc/);
+  // The harness's PATH is snapshotted into the unit so the daemon resolves git + runtime CLIs.
+  assert.match(writes[0]!.content, /<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin/);
   assert.ok(ran.some((c) => c[0] === "launchctl" && c[1] === "load"));
 });
 

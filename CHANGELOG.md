@@ -14,9 +14,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   persisted node id (`~/.dahrk/node.json`) means the service re-attaches as the same node across
   reboots; on Linux it also enables linger so a headless VPS starts at boot and survives logout. The
   token and any `--name` / `--hub-url` are baked into the service's environment (not its argv, so they
-  never surface in `ps`). A bad or missing token exits 78 (`EX_CONFIG`): systemd stops the service and
-  launchd throttles retries to one every 10s, so the misconfiguration stays visible rather than hammering
-  the hub. (DHK-231)
+  never surface in `ps`), along with the operator's PATH so the daemon finds `git` and the runtime CLIs
+  (claude / codex / pi) that a supervisor's minimal PATH would otherwise hide. A bad or missing token
+  exits 78 (`EX_CONFIG`): systemd stops the service and launchd throttles retries to one every 10s, so
+  the misconfiguration stays visible rather than hammering the hub. (DHK-231)
 
 - `dahrk update`: a local, user-initiated self-update to the latest published client. It reads this
   build's version, asks the npm registry for the newest release (the single source of "latest" across

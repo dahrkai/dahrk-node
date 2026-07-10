@@ -13,7 +13,10 @@
  *  - The enrolment token is written into the service's *environment block*, not its argv, so it never
  *    shows up in `ps`. `dahrk start` reads `DAHRK_ENROL_TOKEN`; the unit passes it (plus any hub-url /
  *    name override) that way. The service invokes `node <this client's main.js> start` by absolute path,
- *    because launchd/systemd run with a minimal PATH where a bare `dahrk` may not resolve.
+ *    because launchd/systemd run with a minimal PATH where a bare `dahrk` may not resolve. For the same
+ *    reason we snapshot the operator's PATH at install time into the env block, so once running the node
+ *    resolves `git` and the runtime CLIs (claude / codex / pi) the same way their interactive shell does
+ *    - otherwise the daemon would connect but detect no runtimes and serve no Jobs.
  *
  * The plan builders (which manager, which file, what content, which loader commands) are pure so they
  * unit-test without a host or a real supervisor; `runServiceInstall` / `runServiceUninstall` are the thin
@@ -60,6 +63,11 @@ export interface PlanInputs {
   name?: string;
   /** Optional hub URL override (DAHRK_HUB_URL); unset lets the client default to wss://api.dahrk.ai. */
   hubUrl?: string;
+  /** PATH to export into the service, so the daemonised node finds `git` and the runtime CLIs
+   *  (claude / codex / pi) the same way the operator's interactive shell does. launchd / systemd run
+   *  with a minimal PATH that excludes Homebrew / npm-global bins, so without this the node would come
+   *  up, connect, and then detect no runtimes - always-on but serving no Jobs. Unset omits it. */
+  pathEnv?: string;
   homeDir: string;
   /** Directory launchd writes stdout/stderr logs to (systemd uses the journal). */
   logDir: string;
@@ -77,13 +85,15 @@ export interface ServicePlan {
   logHint: string;
 }
 
-/** The environment the service exports: the token, plus any explicit hub-url / name overrides. Kept out
- *  of argv so it never leaks through `ps`. */
+/** The environment the service exports: the token, any explicit hub-url / name overrides, and the
+ *  operator's PATH (so the node finds git + the runtime CLIs under a supervisor's minimal PATH). Kept
+ *  out of argv so the token never leaks through `ps`. */
 function serviceEnv(inputs: PlanInputs): Record<string, string> {
   return {
     DAHRK_ENROL_TOKEN: inputs.token,
     ...(inputs.hubUrl ? { DAHRK_HUB_URL: inputs.hubUrl } : {}),
     ...(inputs.name ? { DAHRK_NODE_NAME: inputs.name } : {}),
+    ...(inputs.pathEnv ? { PATH: inputs.pathEnv } : {}),
   };
 }
 
@@ -225,6 +235,9 @@ export interface ServiceDeps {
   scriptPath: string;
   /** Directory launchd logs land in (`~/.dahrk/logs`). */
   logDir: string;
+  /** PATH to bake into the service so the daemon resolves git + runtime CLIs like the operator's shell
+   *  (`process.env.PATH` at install time). Undefined omits it, falling back to the supervisor's minimal PATH. */
+  pathEnv: string | undefined;
   mkdirp: (dir: string) => void;
   writeFile: (path: string, content: string) => void;
   removeFile: (path: string) => void;
@@ -288,6 +301,7 @@ export async function runServiceInstall(
     token: inputs.token,
     ...(inputs.name ? { name: inputs.name } : {}),
     ...(inputs.hubUrl ? { hubUrl: inputs.hubUrl } : {}),
+    ...(d.pathEnv ? { pathEnv: d.pathEnv } : {}),
     homeDir: d.homeDir,
     logDir: d.logDir,
   });
@@ -378,6 +392,9 @@ const defaultDeps = (): ServiceDeps => ({
   nodeBin: process.execPath,
   scriptPath: resolveScriptPath(),
   logDir: join(process.env.DAHRK_STATE_DIR ?? join(homedir(), ".dahrk"), "logs"),
+  // Snapshot the operator's PATH at install time so the daemon finds git + the runtime CLIs (Homebrew /
+  // npm-global bins) that a supervisor's minimal PATH would otherwise hide.
+  pathEnv: process.env.PATH,
   mkdirp: (dir) => void mkdirSync(dir, { recursive: true }),
   writeFile: (path, content) => writeFileSync(path, content),
   removeFile: (path) => rmSync(path, { force: true }),
