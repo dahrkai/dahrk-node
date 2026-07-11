@@ -82,6 +82,29 @@ const policyCanUseTool = async (
 };
 
 /**
+ * The interactive-stage tool decision, extracted pure so the DHK-223 tool-parity invariant is
+ * unit-testable without invoking the SDK. The AskUserQuestion shadow (DHK-344) is injected additively
+ * via `mcpServers`/`toolAliases`/`allowedTools` and NEVER appears here as a denial: arbitrary tools
+ * (Bash/Write/Read) run exactly as in a batch stage, gated solely by the edge policy
+ * (`ctx.authorizeToolUse`). The one denial is the engine-owned gate-exit summarisation turn, which is
+ * recap-only: while `summarising`, every tool except the stage-complete exit is denied so the model
+ * produces prose rather than starting fresh stage work.
+ */
+export const interactiveCanUseTool = (
+  summarising: boolean,
+  stageAllowedToolName: string,
+  ctx: PolicyAwareRunnerContext,
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> =>
+  summarising && toolName !== stageAllowedToolName
+    ? Promise.resolve({
+        behavior: "deny",
+        message: "Summarise from the work you just did; reply with the sentence only, no tools.",
+      })
+    : policyCanUseTool(ctx, toolName, input);
+
+/**
  * Brokered MCP servers: point each declared server at the node's gateway proxy
  * (`${proxyBaseUrl}/<id>`), which holds the token and injects it upstream - the agent never sees the
  * raw secret. Programmatic `mcpServers` take precedence over a same-named entry in the repo
@@ -254,9 +277,7 @@ export function createClaudeRunner(): Runner {
         // it does not restrict the other tools canUseTool allows.
         allowedTools: [stageTool.allowedToolName, askTool.allowedToolName],
         canUseTool: async (toolName, input) =>
-          summarising && toolName !== stageTool.allowedToolName
-            ? { behavior: "deny", message: "Summarise from the work you just did; reply with the sentence only, no tools." }
-            : policyCanUseTool(ctx, toolName, input),
+          interactiveCanUseTool(summarising, stageTool.allowedToolName, ctx, toolName, input),
         maxTurns: MAX_TURNS,
         includePartialMessages: false,
       };
