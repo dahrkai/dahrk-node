@@ -163,7 +163,14 @@ test("BOUNDED: a registry that hangs forever is aborted, not waited on - a start
     fetchLatest: (signal) => {
       seen = signal;
       return new Promise((_resolve, reject) => {
-        signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        // A pending real `fetch` holds an open socket, which holds the event loop open. This timer stands
+        // in for that. Without it the loop would drain while we await - `AbortSignal.timeout`'s own timer
+        // is unref'd and does not hold it - and the test runner would cancel this test rather than run it.
+        const openSocket = setTimeout(() => reject(new Error("the registry never answered")), 30_000);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(openSocket);
+          reject(new Error("aborted"));
+        });
       });
     },
   });
