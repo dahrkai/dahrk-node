@@ -67,7 +67,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   from the hub while the operator had every reason to believe the host was idle. `stop` now checks the
   single-instance pidfile after stopping the service, names the surviving node's pid, says where to go
   and stop it, and exits 3 rather than 0. (#43)
-- **A node exiting no longer deletes another node's lock.** `release` removed the pidfile
+- **A node exiting no longer deletes another node's lock.** `release()` removed the pidfile
   unconditionally, so a node that had reclaimed a stale lock (or lost the acquire race) would, on its way
   out, delete the pidfile of the live node that had since taken it. That left the single-instance guard
   silently disarmed - the exact condition it exists to prevent - and left `dahrk stop` nothing on disk to
