@@ -14,7 +14,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING` because a bundled dependency shipped uncompiled
   TypeScript that current Node refuses to load from `node_modules`. The client now resolves the
   compiled build, so `dahrk start` runs again. Upgrade with `dahrk update` (or
-  `npm install -g dahrk-node@latest`).
+  `npm install -g dahrk-node@latest`). (#27)
 
 ## [0.1.5] - 2026-07-11
 
