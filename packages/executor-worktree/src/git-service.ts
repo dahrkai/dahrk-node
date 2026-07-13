@@ -117,6 +117,42 @@ export interface BackupPushResult {
   wipRef: string;
 }
 
+/**
+ * The handle {@link GitService.reconcileInterrupted} needs: where the tree is, and where to push what
+ * it finds there.
+ *
+ * Deliberately narrower than a full {@link WorkspaceRef} (to which it is structurally assignable, so a
+ * live ref still passes). Boot reconciliation reconstructs this from the on-disk job ledger, long after
+ * the process that held the real ref has died, and a full ref would force the ledger to carry `repoId`,
+ * `repo`, `baseBranch` and `scratchPath` that nothing in this operation reads. Ask for what is used.
+ */
+export type InterruptedWorktree = Pick<WorkspaceRef, "worktreePath" | "gitUrl">;
+
+/** Options for {@link GitService.reconcileInterrupted}: preserve an interrupted stage's uncommitted
+ *  tail, then reset the worktree to its last commit. */
+export interface ReconcileInterruptedOpts {
+  /** Commit message for the preserved tail. */
+  message: string;
+  /** The disposable WIP ref the tail is pinned to, locally and (best-effort) on the remote. */
+  branch: string;
+  /** Brokered HTTPS push token; absent = ambient host credentials. */
+  credentialToken?: string;
+}
+
+/** Outcome of {@link GitService.reconcileInterrupted}. */
+export interface ReconcileInterruptedResult {
+  /** True if the worktree had an uncommitted tail that had to be preserved and reset away. */
+  dirty: boolean;
+  /** The commit the worktree was reset back to: the last commit the agent actually completed. */
+  headSha: string;
+  /** The tail commit, when there was one. Reachable from `wipRef` locally whatever the push did. */
+  tailSha?: string;
+  /** The local (and, if `pushed`, remote) ref the tail was pinned to. */
+  wipRef?: string;
+  /** True if the tail also reached the remote. False is not a failure: the tail is safe locally. */
+  pushed: boolean;
+}
+
 /** Options for {@link GitService.openPrAmbient}. */
 export interface OpenPrOpts {
   /** The pushed branch to open the PR from. */
@@ -165,6 +201,26 @@ export interface GitService {
    * the hub opens their PR through the credential broker.
    */
   openPrAmbient(ref: WorkspaceRef, opts: OpenPrOpts): Promise<OpenPrResult>;
+  /**
+   * Make an interrupted run's worktree safe to reuse (DHK-416): preserve whatever the killed agent left
+   * uncommitted, then hard-reset the tree back to its last commit.
+   *
+   * A node killed mid-stage leaves half-written files behind, and `createWorktree` REUSES an existing
+   * worktree for the same runId, so the next dispatch would otherwise land an agent on top of a partial
+   * edit. That is worse than starting clean: it can silently produce corrupt output that looks like work.
+   *
+   * Not `backupPush`, though it shares the same `commitPending` primitive, for two reasons that both
+   * matter exactly here. `backupPush` leaves HEAD ADVANCED onto the tail commit, which is right when the
+   * worktree is about to be reaped but wrong when it is about to be re-run - we need HEAD back at the
+   * last good commit. And it THROWS when it cannot reach the remote, whereas boot reconciliation runs
+   * before the socket is even up and must still produce a clean tree on a node that is offline. So the
+   * push here is best-effort, and the tail is pinned to a LOCAL ref first: the work is never lost, even
+   * when nothing can be pushed.
+   */
+  reconcileInterrupted(
+    ref: InterruptedWorktree,
+    opts: ReconcileInterruptedOpts,
+  ): Promise<ReconcileInterruptedResult>;
   teardownWorktree(ref: WorkspaceRef): Promise<void>;
   /** The resolved absolute worktree base this service creates run worktrees under
    *  (`join(worktreesDir, runId)`). Exposed so the client can advertise it to the hub on `hello`, so
@@ -545,11 +601,17 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     return { mirror, refreshed: true };
   };
 
+  // `branch` is carried on the ref even though nothing here needs it, because everything DOWNSTREAM
+  // does and had no way to get it: the ref is the only handle the stage runner and the ws client hold
+  // on a live run, so a ref without a branch left the node unable to say which branch it was working on
+  // (DHK-416's job ledger, and the checkpoint the hub wants on its dispatch row, both want it). Same
+  // sanitisation as `createWorktree` uses to make the branch, so the two can never disagree.
   const refFor = (spec: WorktreeSpec, worktreePath: string): WorkspaceRef => ({
     repoId: spec.repoId,
     gitUrl: spec.gitUrl,
     repo: spec.repo ?? spec.repoId,
     baseBranch: spec.baseBranch,
+    branch: sanitizeBranchName(spec.branch ?? `dahrk/${spec.runId}`),
     worktreePath,
     scratchPath: join(worktreePath, ".skakel", "scratch"),
   });
@@ -802,6 +864,50 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
         auth?.cleanup();
       }
       return { headSha, pushed: true, nothingToCommit: !dirty, wipRef };
+    },
+
+    async reconcileInterrupted(ref, opts) {
+      const { worktreePath } = ref;
+      if (!existsSync(worktreePath) || !gitOk(worktreePath, ["rev-parse", "--git-dir"])) {
+        throw new Error(`worktree missing for reconcile: ${worktreePath}`);
+      }
+      // The commit the agent last completed. This is what we reset back to, so read it BEFORE
+      // `commitPending` moves HEAD onto the tail.
+      const headSha = git(worktreePath, ["rev-parse", "HEAD"]).trim();
+      const wipRef = sanitizeBranchName(opts.branch);
+
+      // Commit whatever the killed agent left behind. Nothing staged means the tree was clean when the
+      // process died (the agent was thinking, not writing): there is no tail, no reset, nothing to do.
+      const { headSha: tailSha, dirty } = commitPending(worktreePath, opts.message);
+      if (!dirty) return { dirty: false, headSha, pushed: false };
+
+      // Pin the tail LOCALLY before anything can fail. After the reset below, this ref is the only thing
+      // keeping the tail commit reachable, and it must exist whether or not the network does - boot
+      // reconciliation runs before the socket is up, and an operator who has lost power should still be
+      // able to find what the agent had written.
+      git(worktreePath, ["branch", "--force", wipRef, tailSha]);
+
+      // Now try to get it off the box too. Best-effort by design: a node that cannot reach the remote
+      // still has to end this function with a clean tree, and the tail is already safe on the local ref.
+      let pushed = false;
+      const auth = opts.credentialToken ? setupAuth(opts.credentialToken) : undefined;
+      const remote = opts.credentialToken ? withTokenUser(ref.gitUrl) : ref.gitUrl;
+      try {
+        git(worktreePath, ["push", "--force", remote, `${tailSha}:refs/heads/${wipRef}`], netEnv(auth?.env));
+        pushed = true;
+      } catch (e) {
+        log.warn(`could not push the preserved tail to ${wipRef}: ${(e as Error).message}`);
+      } finally {
+        auth?.cleanup();
+      }
+
+      // Back to the last good commit, and drop the untracked debris the agent left with it. Without the
+      // `-x`/`clean` the tree would still carry untracked half-written files, which is the corruption we
+      // are here to prevent; scratch is excluded because it is engine-owned state, not agent output.
+      git(worktreePath, ["reset", "--hard", headSha]);
+      git(worktreePath, ["clean", "-fd", "--exclude", SCRATCH_DIR]);
+
+      return { dirty: true, headSha, tailSha, wipRef, pushed };
     },
 
     async openPrAmbient(ref, opts) {

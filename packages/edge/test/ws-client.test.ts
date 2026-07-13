@@ -10,10 +10,14 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { decode, encode, type EdgeToHub, type JobRequest, type PushJob } from "@dahrk/contracts";
 import { startEdgeNode } from "../src/ws-client.js";
+import { fileJobLedger, jobLedgerFile, type JobLedger, type JobLedgerEntry } from "../src/job-ledger.js";
 
 const NODE_TENANT = "t_node";
 
@@ -84,7 +88,7 @@ async function withEdge(
     toEdge: (frame: unknown) => void;
     connections: number;
   }) => Promise<void>,
-  serverOpts: { autoPong?: boolean; heartbeatMs?: number } = {},
+  serverOpts: { autoPong?: boolean; heartbeatMs?: number; jobLedger?: JobLedger } = {},
 ): Promise<void> {
   const wss = new WebSocketServer({ port: 0, autoPong: serverOpts.autoPong ?? true });
   await new Promise<void>((r) => wss.on("listening", r));
@@ -113,6 +117,7 @@ async function withEdge(
       enrolToken: "sket_test",
       signal: abort.signal,
       ...(serverOpts.heartbeatMs ? { heartbeatMs: serverOpts.heartbeatMs } : {}),
+      ...(serverOpts.jobLedger ? { jobLedger: serverOpts.jobLedger } : {}),
     });
     await waitFor(() => inbound.some((m) => m.type === "hello"));
     await fn({
@@ -185,5 +190,106 @@ test("a hub that stops answering pings is terminated and reconnected, not left a
       await waitFor(() => ctx.connections >= 2, 3000);
     },
     { autoPong: false, heartbeatMs: 100 },
+  );
+});
+
+// --- announcing in-flight jobs on hello (DHK-416) --------------------------------------------------
+
+test("an idle node announces an EMPTY in-flight list, not an absent one", async () => {
+  // The wire contract makes these mean different things: absent = "I am too old to know", which leaves
+  // the hub on its old re-dispatch behaviour; empty = "I positively have nothing in flight". A node that
+  // can answer must answer, or the hub's adoption path stays dormant for ever.
+  await withEdge(async (ctx) => {
+    const hello = ctx.inbound.find((m) => m.type === "hello");
+    assert.ok(hello);
+    assert.deepEqual((hello as { inFlightJobs?: unknown }).inFlightJobs, []);
+  });
+});
+
+test("a job the previous process died holding is reconciled at boot, and never announced", async () => {
+  // The restart case. The old process's runner is dead - the AbortController, the trace stream and the
+  // elicit router all died with it - so the job is NOT running and announcing it would tell the hub to
+  // keep waiting on a stage that nothing is executing. It must be dropped from the ledger and left out
+  // of `hello`, so the hub's lease lapses and the stage is re-dispatched onto a live node.
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-ws-ledger-"));
+  try {
+    const file = jobLedgerFile(dir);
+    const ledger = fileJobLedger(file);
+    ledger.upsert({
+      jobId: "job-from-the-dead-process",
+      runId: "run-dead",
+      kind: "stage",
+      stageId: "build",
+      payloadVersion: "v1",
+      // No worktreePath: nothing to reconcile on disk, so the entry is simply dropped. (The worktree
+      // reset itself is covered against a real git repo in git-service.test.ts.)
+      startedAt: Date.now() - 60_000,
+      nodePid: process.pid + 1, // a pid that is not ours: a previous process wrote this
+    });
+    assert.equal(ledger.all().length, 1, "precondition: the stale entry is on disk");
+
+    await withEdge(
+      async (ctx) => {
+        const hello = ctx.inbound.find((m) => m.type === "hello");
+        assert.ok(hello);
+        assert.deepEqual(
+          (hello as { inFlightJobs?: unknown }).inFlightJobs,
+          [],
+          "a job whose runner died is never announced as in-flight",
+        );
+        assert.equal(marker(ctx.lines, "EDGE_INTERRUPTED:"), 1, "and the interruption is reported");
+        assert.deepEqual(ledger.all(), [], "the stale entry is cleared, so the next boot is clean too");
+      },
+      { jobLedger: fileJobLedger(file) },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a running job is written through to the ledger with its payloadVersion, and removed when it ends", async () => {
+  // The write-through is what makes the hub-roll case work. While a stage runs, the node holds it in
+  // `running` (which `hello` announces, so a new hub build ADOPTS it rather than re-dispatching) and on
+  // disk (so a crash can be reconciled). `payloadVersion` has to survive both hops or the hub's adoption
+  // gate version-rejects the job and kills it.
+  //
+  // A recording ledger rather than a real one: what matters is the sequence of calls the job path makes,
+  // and a genuinely long-running stage would need a real worktree and a real agent (that is what the
+  // end-to-end check on a live hub is for).
+  const calls: Array<{ op: "upsert" | "remove" | "clear"; entry?: JobLedgerEntry; jobId?: string }> = [];
+  const spy: JobLedger = {
+    all: () => [],
+    stale: () => [],
+    upsert: (entry) => void calls.push({ op: "upsert", entry }),
+    remove: (jobId) => void calls.push({ op: "remove", jobId }),
+    clear: () => void calls.push({ op: "clear" }),
+  };
+
+  await withEdge(
+    async (ctx) => {
+      const job = { ...foreignJob("job-ledgered"), payloadVersion: "v1" } as JobRequest;
+      ctx.toEdge({ type: "job", job });
+      await waitFor(() => ctx.inbound.some((m) => m.type === "result"));
+
+      const upsert = calls.find((c) => c.op === "upsert");
+      assert.ok(upsert, "the job was ledgered when it started");
+      assert.equal(upsert.entry?.jobId, "job-ledgered");
+      assert.equal(upsert.entry?.payloadVersion, "v1", "the hub's payload version survived to the ledger");
+      assert.equal(upsert.entry?.kind, "stage");
+      assert.equal(upsert.entry?.stageId, "plan");
+      assert.equal(upsert.entry?.nodePid, process.pid, "stamped with OUR pid: a later boot can tell it apart");
+
+      // And it is taken back out the moment the result is sent. A finished job that stayed in the ledger
+      // would be announced on the next `hello`, asking the hub to adopt a stage nothing is running.
+      assert.ok(
+        calls.some((c) => c.op === "remove" && c.jobId === "job-ledgered"),
+        "the finished job was removed from the ledger",
+      );
+      assert.ok(
+        calls.findIndex((c) => c.op === "upsert") < calls.findIndex((c) => c.op === "remove"),
+        "upsert precedes remove",
+      );
+    },
+    { jobLedger: spy },
   );
 });

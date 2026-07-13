@@ -36,6 +36,8 @@ import {
   createNodeLoggerFromEnv,
   detectRuntimes,
   ENROLMENT_REJECTED_EXIT_CODE,
+  fileJobLedger,
+  jobLedgerFile,
   LogShipper,
   shipperStream,
   startEdgeNode,
@@ -78,6 +80,7 @@ import {
   readState,
   resolveEnrolToken,
   setDesired,
+  stateDir,
   stateFile,
   writeState,
 } from "./state.js";
@@ -358,6 +361,10 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     // (a pinned override never re-probes to something else) and the mock runner path stays stable.
     reprobeRuntimes: () => resolveRuntimes(env),
     ...(env.DAHRK_RUNTIME_RECHECK_MS ? { runtimeRecheckMs: Number(env.DAHRK_RUNTIME_RECHECK_MS) } : {}),
+    // What this node is running, on disk, so a crash mid-stage does not silently re-run the stage from
+    // scratch (DHK-416). Skipped for an ephemeral node for the same reason it never caches a token: a
+    // one-shot CI node touches no state dir, and has no next boot to recover into.
+    ...(flags.ephemeral ? {} : { jobLedger: fileJobLedger(jobLedgerFile(stateDir(env))) }),
     ...(persist
       ? {
           onEnrolled: (welcome) =>

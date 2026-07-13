@@ -2,8 +2,11 @@
  * The edge node's WebSocket client. It dials OUT to the hub (no inbound ports),
  * advertises its runtimes and repos on connect, heartbeats for liveness, and
  * reconnects on drop. Each `job` frame is run by the stage runner and answered with
- * a `result` keyed by `awakeableId`; progress streams up meanwhile. It holds no
- * durable state - a kill mid-stage loses nothing the bridge cannot re-dispatch.
+ * a `result` keyed by `awakeableId`; progress streams up meanwhile.
+ *
+ * It keeps ONE piece of durable state: the job ledger (DHK-416). Everything else is still in memory and
+ * still disposable, but what this node is running has to survive its own death, or a restart mid-stage
+ * silently re-runs the stage from scratch. See `job-ledger.ts`.
  *
  * Line-tagged markers (EDGE_CONNECTED / JOB_STARTED:{stageId} / JOB_DONE:{stageId})
  * let the harness time a kill, mirroring the S1 edge.
@@ -15,6 +18,7 @@ import type { CredentialMode, EdgeToHub, HubToEdge, NodeErrorClass, Runtime } fr
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, HealthCounters } from "./health.js";
+import { announceableJobs, nullJobLedger, type JobLedger, type JobLedgerEntry } from "./job-ledger.js";
 import { ceilingFromEnv, LogShipper } from "./log-shipper.js";
 import { createNodeLogger, levelFromEnv, type NodeLogger } from "./logger.js";
 import { denyToolRule, type PolicyRule } from "./policy.js";
@@ -104,6 +108,12 @@ export interface EdgeOptions {
   /** The shipper that batches log records up to the hub when policy permits. `main.ts` builds it and
    *  attaches it as a third pino stream; omitted (tests, embedders) nothing is ever shipped. */
   shipper?: LogShipper;
+  /** The durable record of what this node is running (DHK-416). `main.ts` passes one backed by
+   *  `~/.dahrk/jobs.json`; omitted (tests, embedders) it is the null ledger and the node behaves exactly
+   *  as it did before - in-memory only, a restart mid-stage loses the job. Injected rather than
+   *  constructed here because the state-dir convention lives in the CLI app, which this package does not
+   *  depend on (same seam as `onEnrolled`). */
+  jobLedger?: JobLedger;
 }
 
 export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
@@ -112,6 +122,11 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
 
   // Running tallies for the self-report: uptime, reconnects, in-flight jobs, failure counts by class.
   const counters = new HealthCounters();
+  // Declared up here, well above the `running` map it backs, because boot reconciliation reads it before
+  // the first job can ever arrive - and a `const` used above its declaration is a dead-zone crash, not a
+  // hoist. Absent (tests, embedders, ephemeral nodes) this is the null ledger: no disk, pre-DHK-416
+  // behaviour, no branch in the code below.
+  const ledger: JobLedger = opts.jobLedger ?? nullJobLedger();
   const shipper = opts.shipper;
   // The operator's local ceiling. The hub can ask for LESS than this; it can never ask for more. A node
   // whose operator set DAHRK_TELEMETRY=off reports nothing at all, whatever the hub says.
@@ -269,11 +284,80 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
   const stageRunner = createStageRunner(stageDeps);
   stageRunnerRef = stageRunner; // closes the late binding above
 
+  /**
+   * Deal with the jobs the PREVIOUS process died holding (DHK-416).
+   *
+   * This must finish before `hello` goes out, because `hello` announces what we are running and the hub
+   * ADOPTS what it hears: announcing a job whose runner died would tell the hub to keep waiting on a
+   * stage that nothing is executing, which is a worse failure than the re-dispatch it replaces. So it is
+   * awaited, unlike the worktree reap below.
+   *
+   * Every stale entry is dropped, never resumed. Liveness is OBSERVED, not inferred: "running" means the
+   * runner is alive in THIS process, and after a restart it is not. There is no re-attaching to what the
+   * old process was doing - the AbortController, the trace stream and the elicit router all died with it.
+   * The hub's lease (DHK-414) lapses and the stage is re-dispatched, which is correct and, crucially,
+   * honest.
+   *
+   * What we CAN do is leave the worktree fit to be re-run, which is the whole reason this is not just a
+   * `ledger.clear()`. A killed agent leaves half-written files, and `createWorktree` reuses an existing
+   * worktree for the same runId, so without this the re-dispatched stage would start on top of a partial
+   * edit and could silently produce corrupt output that looks like work.
+   *
+   * NOT DONE HERE: killing the orphaned agent subprocess. The runner is owned by the vendor SDK
+   * (`query()` / `createAgentSession`), which surfaces no pid - cancellation is an in-process
+   * AbortController - so there is nothing to signal. In practice the child dies with us anyway: its stdio
+   * pipes break when we do and the CLI exits. A child that survived that would be a runaway writing into
+   * the worktree, and the reset below is what keeps it from being mistaken for the agent's real output.
+   */
+  const reconcileInterruptedJobs = async (): Promise<void> => {
+    const stale = ledger.stale(process.pid);
+    if (!stale.length) return;
+    log.warn({ count: stale.length }, `EDGE_INTERRUPTED:${stale.length} jobs died with the previous process`);
+    for (const entry of stale) {
+      const entryLog = log.child({ runId: entry.runId, jobId: entry.jobId, ...(entry.stageId ? { stageId: entry.stageId } : {}) });
+      if (!entry.worktreePath || !entry.gitUrl) {
+        // Nothing to clean (an older ledger entry, or a job that died before its worktree existed).
+        entryLog.warn({}, `EDGE_INTERRUPTED_ABANDONED:${entry.jobId} no worktree recorded`);
+        continue;
+      }
+      try {
+        const r = await gitService.reconcileInterrupted(
+          { worktreePath: entry.worktreePath, gitUrl: entry.gitUrl },
+          {
+            message: `wip: work in progress when the node was interrupted (run ${entry.runId})`,
+            branch: `dahrk/wip/${entry.runId}`,
+          },
+        );
+        if (r.dirty) {
+          entryLog.warn(
+            { wipRef: r.wipRef, tailSha: r.tailSha, headSha: r.headSha, pushed: r.pushed },
+            `EDGE_INTERRUPTED_RESET:${entry.jobId} preserved the uncommitted tail on ${r.wipRef}${r.pushed ? "" : " (locally only)"} and reset to ${r.headSha.slice(0, 8)}`,
+          );
+        } else {
+          entryLog.info({ headSha: r.headSha }, `EDGE_INTERRUPTED_CLEAN:${entry.jobId} worktree was already clean`);
+        }
+      } catch (e) {
+        // A missing or broken worktree is not recoverable and not fatal: the stage simply re-runs from
+        // scratch, which is what would have happened before any of this existed.
+        entryLog.warn({ err: e }, `EDGE_INTERRUPTED_ERROR:${entry.jobId} ${(e as Error).message}`);
+      }
+    }
+    // Everything the previous process held is now settled, one way or another. Clearing rather than
+    // removing one by one also collects entries we could not act on, so a worktree we failed to reconcile
+    // cannot be announced as in-flight on the next boot either.
+    ledger.clear();
+  };
+
+  await reconcileInterruptedJobs();
+
   // Reclaim leaked worktrees at boot, BEFORE the first job arrives (DHK-371). This is the only pass that
   // can collect worktrees created by a previous process: the runner's in-memory maps start empty, so
   // without it every worktree from a prior lifetime is orphaned for ever, holding both disk and its
   // branch name (which then wedges the next run of that issue). Best-effort and non-blocking to the
   // connect: a tidy-up must never stop the node coming up.
+  //
+  // Runs AFTER the interrupted-job reconciliation above, which is the ordering that matters: reconciling
+  // needs the worktree to still be there to preserve the tail from.
   void stageRunner
     .reapWorktrees()
     .then((r) => {
@@ -312,6 +396,21 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // the projection instead of an advisory placeholder. Single-sourced from the git service so it
       // always matches where worktrees actually land.
       worktreesDir: gitService.worktreesDir,
+      // What we are running RIGHT NOW (DHK-416), which is what lets a new hub build ADOPT an in-flight
+      // stage rather than duplicate it (DHK-415). Without this the hub cannot tell "this node is midway
+      // through the stage you are about to re-dispatch" from "this node is idle", so a hub roll or a
+      // reconnect re-ran the stage from scratch.
+      //
+      // Always sent, even empty. Per the wire contract an ABSENT list means "unknown" (a node too old to
+      // answer, for which the hub must keep its old re-dispatch behaviour), while an EMPTY list means "I
+      // have nothing in flight" - a positive statement the hub can act on. We always know, so we always
+      // say, and the two must not be conflated.
+      //
+      // Only genuinely-running jobs are in `running`: boot reconciliation has already dropped the entries
+      // whose runner died with the previous process, so we never claim to be running something we are not.
+      // `announceableJobs` drops what we cannot version-stamp - announcing such a job would make the hub
+      // KILL it, not adopt it. See there.
+      inFlightJobs: announceableJobs(running.values()),
     });
   };
 
@@ -339,13 +438,32 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
     reprobeTimer.unref?.();
   }
 
-  // In-flight job/push ids, so a re-dispatched frame for a job that is STILL running is dropped rather
+  // In-flight jobs/pushes, so a re-dispatched frame for a job that is STILL running is dropped rather
   // than starting a second runner on the same run worktree. The hub re-dispatches the SAME
   // jobId/awakeableId on its dispatch deadline, on every re-arm tick, and on each reconnect (502/521
   // churn); all carry a stable jobId, so this guard de-dups them. on_fail retries use a fresh jobId
-  // and are allowed. A frame for a FINISHED job is not in this set - it is answered from `lastResults`
+  // and are allowed. A frame for a FINISHED job is not in this map - it is answered from `lastResults`
   // instead, and only a job we have neither running nor a cached result for genuinely re-runs.
-  const running = new Set<string>();
+  //
+  // A Map, not the Set it used to be, because the entries now have to be announced on `hello` and written
+  // to disk, and both need more than the id: the announce needs `payloadVersion` (the hub's adoption gate
+  // refuses to adopt a job that cannot prove its payload is one this build can still read), and the boot
+  // reconciliation needs the worktree and branch. Every field is already in hand where the inbound
+  // JobRequest is destructured, so this costs nothing to populate.
+  const running = new Map<string, JobLedgerEntry>();
+
+  // Start tracking a job/push: in memory for the de-dup guard, on disk so it survives our own death.
+  const trackJob = (entry: JobLedgerEntry): void => {
+    running.set(entry.jobId, entry);
+    ledger.upsert(entry);
+  };
+  // Stop tracking it. The ledger entry goes at the same moment the in-memory one does: a job whose result
+  // has been sent is finished, and re-announcing it on the next `hello` would ask the hub to adopt a job
+  // nothing is running.
+  const untrackJob = (jobId: string): void => {
+    running.delete(jobId);
+    ledger.remove(jobId);
+  };
 
   const onMessage = async (raw: string): Promise<void> => {
     const msg = decode<HubToEdge>(raw);
@@ -432,8 +550,20 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         pushLog.info({}, `PUSH_REPLAY:${job.runId} ${job.jobId}`);
         return;
       }
-      running.add(job.jobId);
       const pushStartedAt = Date.now();
+      trackJob({
+        jobId: job.jobId,
+        runId: job.runId,
+        kind: "push",
+        // No `payloadVersion`: `PushJob` does not carry one (DHK-415 added the field to `JobRequest`
+        // only). It is ledgered anyway - boot reconciliation still has to clean its worktree - but it is
+        // deliberately never announced. See `sendHello`.
+        ...(job.workspaceRef?.worktreePath ? { worktreePath: job.workspaceRef.worktreePath } : {}),
+        ...(job.branch ? { branch: job.branch } : {}),
+        ...(job.workspaceRef?.gitUrl ? { gitUrl: job.workspaceRef.gitUrl } : {}),
+        startedAt: pushStartedAt,
+        nodePid: process.pid,
+      });
       pushLog.info({}, `PUSH_STARTED:${job.runId} ${job.branch}`);
       try {
         const result = await stageRunner.runPush(job);
@@ -457,7 +587,7 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         // `err` carries the stack to the file sink; the marker line on stdout stays as it was.
         pushLog.error({ err: e, durationMs: Date.now() - pushStartedAt }, `PUSH_ERROR:${job.runId} ${(e as Error).message}`);
       } finally {
-        running.delete(job.jobId);
+        untrackJob(job.jobId);
       }
       return;
     }
@@ -485,9 +615,23 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       jobLog.info({}, `JOB_REPLAY:${job.stageId} ${job.jobId}`);
       return;
     }
-    running.add(job.jobId);
-    counters.activeJobs = running.size;
     const startedAt = Date.now();
+    trackJob({
+      jobId: job.jobId,
+      runId: job.runId,
+      kind: "stage",
+      stageId: job.stageId,
+      // The hub stamped this on dispatch. Persisting it is what lets a reconnecting node prove, after a
+      // restart, that the job it is announcing was dispatched under a contract the adopting build can
+      // still read. Announced without it, the hub's gate version-rejects the job rather than adopting it.
+      ...(job.payloadVersion ? { payloadVersion: job.payloadVersion } : {}),
+      ...(job.workspaceRef?.worktreePath ? { worktreePath: job.workspaceRef.worktreePath } : {}),
+      ...(job.workspaceRef?.branch ? { branch: job.workspaceRef.branch } : {}),
+      ...(job.workspaceRef?.gitUrl ? { gitUrl: job.workspaceRef.gitUrl } : {}),
+      startedAt,
+      nodePid: process.pid,
+    });
+    counters.activeJobs = running.size;
     jobLog.info({}, `JOB_STARTED:${job.stageId} ${job.jobId}`);
     try {
       const result = await stageRunner.runJob(job);
@@ -512,7 +656,7 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // `err` carries the stack into the file sink - the old code dropped it and kept only `.message`.
       jobLog.error({ err: e, durationMs: Date.now() - startedAt }, `JOB_ERROR:${job.stageId} ${(e as Error).message}`);
     } finally {
-      running.delete(job.jobId);
+      untrackJob(job.jobId);
       counters.activeJobs = running.size;
     }
   };

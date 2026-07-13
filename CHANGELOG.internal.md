@@ -19,6 +19,54 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Node announces its in-flight jobs on connect, and persists them across a restart, DHK-416
+
+The node half of DHK-415 (whose hub-side adoption path shipped live but **dormant**: `reconcileAnnouncedJobs`
+does nothing until a node actually emits `hello.inFlightJobs`). This is the activation switch.
+
+- **`@dahrk/contracts` bumped `^0.2.0` -> `^0.3.0`** across `packages/edge`, `packages/executor-worktree`
+  and `apps/edge-node`. Note 0.3.0 existed in the harness repo but **had never been published to npm** -
+  DHK-415 bumped the version and did not release it, so `inFlightJobs`, `JobRequest.payloadVersion` and
+  `isPayloadVersionSupported` were unreachable from here and no node-side work was buildable. Published as
+  part of this ticket. A caret on a `0.x` version does not cross the minor, so the dep bump is load-bearing,
+  not cosmetic.
+- **New `packages/edge/src/job-ledger.ts`**: a durable JSON ledger (`~/.dahrk/jobs.json`, 0600, atomic
+  temp+rename, corrupt reads degrade to empty). Injected through `EdgeOptions.jobLedger` rather than
+  constructed in `packages/edge`, which has no dependency on the CLI app where the state-dir convention
+  lives - the same seam as `onEnrolled`. Ephemeral nodes get the null ledger.
+- **`ws-client.ts`**: `running` widened from `Set<jobId>` to `Map<jobId, JobLedgerEntry>` and written
+  through to the ledger on start/finish for both the job and push paths; `sendHello` announces
+  `inFlightJobs`; a new boot reconciliation runs (awaited) before `connect()`, ahead of the DHK-371
+  worktree reap, which must not run first or there would be no worktree left to preserve a tail from.
+- **`git-service.ts`**: new `reconcileInterrupted` (preserve the uncommitted tail on a local + remote
+  `dahrk/wip/<runId>` ref, then hard-reset to the last completed commit). Not `backupPush`, though it
+  shares `commitPending`: `backupPush` leaves HEAD advanced onto the tail (right before a reap, wrong
+  before a re-run) and throws when it cannot reach the remote (wrong at boot, which runs before the socket
+  is up and must still yield a clean tree offline). `refFor` now also carries `branch`, which it computed
+  and dropped.
+
+**The announce filter is a safety property, not tidiness.** The hub's gate version-rejects an announced job
+whose `payloadVersion` is absent or malformed: it calls `markDispatchDead`, sends `cancel`, and fails the
+awakeable. So announcing a job we cannot version-stamp does not fail to help, it **kills a healthy stage**.
+`announceableJobs` therefore drops any entry without a version - which is exactly a push (`PushJob` carries
+no `payloadVersion`; only `JobRequest` got the DHK-415 field) and any stage from a pre-DHK-415 hub. Pushes
+are still ledgered, because their worktrees still need reconciling; they are just never announced.
+
+**Two-state, not three.** The earlier refine answer called for `running` / `interrupted` / `abandoned`, but
+the shipped wire frame is `{ jobId, payloadVersion }` with no `status` and no `checkpoint`, so it cannot
+express them. This ships what the contract supports: announced = alive in this process, hub adopts; omitted
+= not running, the DHK-414 lease lapses and the reaper re-dispatches. Resume-from-checkpoint is deferred -
+it needs a checkpoint transport that does not exist on either side yet.
+
+**Not done: killing the orphaned agent subprocess.** The runner is owned by the vendor SDK (`query()` /
+`createAgentSession`), which surfaces no pid - cancellation is an in-process `AbortController` - so there is
+nothing to signal. In practice the child dies with us (its stdio pipes break), and the dirty-tail reset is
+what stops a hypothetical survivor's writes being mistaken for the agent's real output.
+
+**Also stale in the ticket:** point 3's "heartbeat renews the DHK-414 lease" was already shipped hub-side in
+DHK-414 (`bridge.ts` calls `store.renewNodeLeases(nodeId, ...)` off the existing heartbeat, keyed on the
+socket). It needs no wire field and no node change; the ticket predates that merge.
+
 ### Pin the pi SDK to an installable version, DHK-343
 
 - `pi-adapter` loaded `@earendil-works/pi-coding-agent` without the package being a declared dependency,
