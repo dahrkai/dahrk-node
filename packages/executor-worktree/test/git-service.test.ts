@@ -971,3 +971,158 @@ test("a live run's branch claim is NOT stomped: a busy holder fails the new run 
     for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+// --- reconcileInterrupted (DHK-416) ----------------------------------------------------------------
+//
+// A node killed mid-stage leaves the worktree dirty, and `createWorktree` REUSES an existing worktree
+// for the same runId - so the re-dispatched stage would otherwise start on top of a half-written edit
+// and could silently produce corrupt output that looks like work. `reconcileInterrupted` preserves the
+// tail and resets the tree to the last commit the agent actually completed.
+
+test("reconcileInterrupted resets a dirty worktree to its last commit and preserves the tail", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-interrupted",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-interrupted-1",
+      branch: "dahrk/issue-INT",
+    });
+
+    // The agent's completed work: one real commit. This is the state a resume must land on.
+    writeFileSync(join(ref.worktreePath, "done.ts"), "export const done = 1;\n");
+    git(ref.worktreePath, ["add", "."]);
+    git(ref.worktreePath, ["-c", "user.email=a@dahrk.test", "-c", "user.name=Agent", "commit", "-m", "real work"]);
+    const lastGoodSha = git(ref.worktreePath, ["rev-parse", "HEAD"]).trim();
+
+    // ... and then the kill: a half-written tracked edit plus an untracked file the agent never finished.
+    writeFileSync(join(ref.worktreePath, "done.ts"), "export const done = 1;\nexport const hal");
+    writeFileSync(join(ref.worktreePath, "half-written.ts"), "export const oops = ");
+
+    const r = await svc.reconcileInterrupted(ref, {
+      message: "wip: interrupted",
+      branch: "dahrk/wip/run-interrupted-1",
+    });
+
+    assert.equal(r.dirty, true, "the tail was detected");
+    assert.equal(r.headSha, lastGoodSha, "reset back to the last COMPLETED commit, not the tail");
+    assert.equal(r.wipRef, "dahrk/wip/run-interrupted-1");
+    assert.notEqual(r.tailSha, lastGoodSha, "the tail is a distinct commit");
+
+    // The tree is now exactly the last good commit: the half-written edit is reverted and the untracked
+    // debris is gone. This is the whole point - the next dispatch starts from clean, known-good state.
+    assert.equal(git(ref.worktreePath, ["rev-parse", "HEAD"]).trim(), lastGoodSha);
+    assert.equal(readFileSync(join(ref.worktreePath, "done.ts"), "utf-8"), "export const done = 1;\n");
+    assert.equal(existsSync(join(ref.worktreePath, "half-written.ts")), false, "untracked debris cleaned");
+    assert.equal(git(ref.worktreePath, ["status", "--porcelain"]).trim(), "", "tree is clean");
+
+    // And nothing was lost: the tail is reachable on the wip ref, locally and on the remote.
+    const tailOnLocalRef = git(ref.worktreePath, ["rev-parse", "dahrk/wip/run-interrupted-1"]).trim();
+    assert.equal(tailOnLocalRef, r.tailSha, "the tail is pinned to a local ref");
+    assert.equal(r.pushed, true);
+    assert.equal(git(remote, ["rev-parse", "dahrk/wip/run-interrupted-1"]).trim(), r.tailSha, "and pushed");
+    // The half-written content is retrievable from the preserved commit.
+    const preserved = git(ref.worktreePath, ["show", `${r.tailSha}:half-written.ts`]);
+    assert.match(preserved, /export const oops =/);
+  } finally {
+    for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("reconcileInterrupted is a no-op on a clean worktree: nothing to preserve, nothing to reset", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-interrupted-clean",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-interrupted-2",
+      branch: "dahrk/issue-INT2",
+    });
+    writeFileSync(join(ref.worktreePath, "done.ts"), "export const done = 1;\n");
+    git(ref.worktreePath, ["add", "."]);
+    git(ref.worktreePath, ["-c", "user.email=a@dahrk.test", "-c", "user.name=Agent", "commit", "-m", "real work"]);
+    const head = git(ref.worktreePath, ["rev-parse", "HEAD"]).trim();
+
+    // The node died while the agent was THINKING, not writing. There is no tail.
+    const r = await svc.reconcileInterrupted(ref, { message: "wip", branch: "dahrk/wip/run-interrupted-2" });
+
+    assert.equal(r.dirty, false);
+    assert.equal(r.headSha, head, "HEAD is untouched");
+    assert.equal(r.pushed, false, "nothing was pushed, because there was nothing to preserve");
+    assert.equal(r.wipRef, undefined, "no wip ref is minted for a clean tree");
+    assert.throws(() => git(remote, ["rev-parse", "--verify", "dahrk/wip/run-interrupted-2"]));
+  } finally {
+    for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("reconcileInterrupted still yields a clean tree when the remote is unreachable", async () => {
+  // Boot reconciliation runs BEFORE the socket is up, and an operator whose box lost power should not
+  // be left with a dirty worktree because the network happened to be down. The push is best-effort; the
+  // local ref is not, so the work is never lost even when nothing can leave the machine.
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-interrupted-offline",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-interrupted-3",
+      branch: "dahrk/issue-INT3",
+    });
+    writeFileSync(join(ref.worktreePath, "done.ts"), "export const done = 1;\n");
+    git(ref.worktreePath, ["add", "."]);
+    git(ref.worktreePath, ["-c", "user.email=a@dahrk.test", "-c", "user.name=Agent", "commit", "-m", "real work"]);
+    const lastGoodSha = git(ref.worktreePath, ["rev-parse", "HEAD"]).trim();
+    writeFileSync(join(ref.worktreePath, "half.ts"), "half");
+
+    // The remote goes away under us (a dead box, a revoked credential, no network).
+    rmSync(remote, { recursive: true, force: true });
+
+    const r = await svc.reconcileInterrupted({ worktreePath: ref.worktreePath, gitUrl: remote }, {
+      message: "wip: interrupted",
+      branch: "dahrk/wip/run-interrupted-3",
+    });
+
+    assert.equal(r.dirty, true);
+    assert.equal(r.pushed, false, "the push failed, as it must");
+    // The two things that still have to hold: the tree is clean, and the work is not lost.
+    assert.equal(git(ref.worktreePath, ["rev-parse", "HEAD"]).trim(), lastGoodSha, "still reset to last good");
+    assert.equal(git(ref.worktreePath, ["status", "--porcelain"]).trim(), "", "still a clean tree");
+    assert.equal(
+      git(ref.worktreePath, ["rev-parse", "dahrk/wip/run-interrupted-3"]).trim(),
+      r.tailSha,
+      "and the tail survives on the local ref",
+    );
+  } finally {
+    for (const d of [worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("reconcileInterrupted throws on a missing worktree rather than pretending it cleaned one", async () => {
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    await assert.rejects(
+      () =>
+        svc.reconcileInterrupted(
+          { worktreePath: join(worktreesDir, "run-that-is-gone"), gitUrl: "https://example.invalid/x.git" },
+          { message: "wip", branch: "dahrk/wip/gone" },
+        ),
+      /worktree missing for reconcile/,
+    );
+  } finally {
+    for (const d of [worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
