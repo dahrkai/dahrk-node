@@ -6,6 +6,37 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **The node now tells the hub what it is running, so a hub redeploy no longer restarts your stage.** When
+  the connection moved to a new hub build midway through a stage (a redeploy, or a dropped socket), the
+  new hub had no idea the node was already working: it dispatched the stage again, and the node ran it a
+  second time from the beginning. A long stage could burn hours of agent time, and its cost, twice over.
+
+  The node now announces its in-flight jobs when it connects, so the hub adopts the work already under way
+  instead of duplicating it. An idle node says so explicitly, and a node running nothing it can identify
+  stays silent rather than risk the hub cancelling healthy work.
+
+### Fixed
+
+- **Restarting the node mid-stage no longer silently re-runs the stage from scratch.** The node kept the
+  list of what it was running in memory only, so a restart, a crash, or a machine reboot lost it entirely.
+  The agent was killed, its result was never sent, and the hub simply dispatched the whole stage again -
+  paying for all of it a second time, with no indication anything had gone wrong.
+
+  The node now keeps that list on disk (`~/.dahrk/jobs.json`, alongside `node.json`; honours
+  `DAHRK_STATE_DIR`, and is skipped entirely for an ephemeral node). On the next start it reconciles what
+  the dead process left behind rather than pretending it never happened.
+
+- **An interrupted stage no longer leaves half-written files for the next attempt to trip over.** An agent
+  killed mid-edit leaves the worktree dirty, and because the worktree is reused for the same run, the
+  re-dispatched stage started on top of a partial edit. That is worse than starting clean: it can quietly
+  produce corrupt output that still looks like work.
+
+  The node now preserves whatever the killed agent had written - committed to a disposable
+  `dahrk/wip/<runId>` ref, pushed when it can reach the remote and kept locally when it cannot, so the work
+  is never lost - and resets the worktree to the last commit the agent actually completed.
+
 ## [0.1.13] - 2026-07-12
 
 ### Fixed

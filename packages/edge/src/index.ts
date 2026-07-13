@@ -15,6 +15,8 @@
  */
 export { startEdgeNode, ENROLMENT_REJECTED_EXIT_CODE } from "./ws-client.js";
 export type { EdgeOptions } from "./ws-client.js";
+export { fileJobLedger, jobLedgerFile, nullJobLedger } from "./job-ledger.js";
+export type { JobLedger, JobLedgerEntry } from "./job-ledger.js";
 export { createStageRunner } from "./stage-runner.js";
 export type {
   StageRunner,
