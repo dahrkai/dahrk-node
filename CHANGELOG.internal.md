@@ -19,6 +19,22 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-07-13
+
+### Changed
+
+- **`runUpdate` now takes `saveResult` as an injected dep** and the test harness always supplies a fake (#62).
+  Worth knowing because the bug it fixes is latent elsewhere: the `Partial<Deps>` + real-`defaultDeps` pattern
+  used throughout the client means a test that simply omits a dep falls through to the real one. Here that
+  meant the update tests wrote the developer's actual `~/.dahrk/node.json` - which they did, before the fake
+  went in. Any new test against a `Partial<Deps>` entry point should assume an omitted dep is a live one.
+
+- **The Pi model fix lives in `packages/executor-worktree/src/pi-adapter.ts`** and leans on Pi's own
+  `registry.getAvailable()` rather than a hard-coded provider list (#63). Family matching strips a region or
+  vendor prefix and a `-v1:0` revision, so `us.anthropic.claude-opus-4-8` and `claude-opus-4-8` are matched as
+  one model. The model ids in the tests were read out of the built edge image, not invented, and the fix was
+  exercised against the live SDK in that image.
+
 ## [0.1.15] - 2026-07-13
 
 ### Changed
