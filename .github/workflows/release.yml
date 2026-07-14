@@ -21,6 +21,10 @@ name: Release
 #   RELEASE_PAT     - used by tag-release.yml (not this workflow) to push the tag so this workflow fires;
 #                     a tag pushed by the default GITHUB_TOKEN would not re-trigger it. See
 #                     tag-release.yml. Optional: if unset, push the tag manually.
+#   HARNESS_DISPATCH_PAT - a fine-grained PAT on github.com/dahrkai/dahrk-harness with `Contents: read and
+#                     write`, used to tell the harness a new client is out so its platform edge node
+#                     updates itself. Optional: if unset, the notify step is skipped and the harness can
+#                     be updated by hand (`gh workflow run update-platform-node.yml`).
 
 on:
   push:
@@ -38,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+      HARNESS_DISPATCH_PAT: ${{ secrets.HARNESS_DISPATCH_PAT }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -140,4 +145,29 @@ jobs:
           else
             git commit -am "dahrk ${VERSION}"
             git push
+          fi
+
+      # Tell the harness a new client is out, so its PLATFORM EDGE NODE updates itself (harness DHK-437).
+      # That node runs every hub-launched debug and triage run, and used to sit on a hand-maintained pin
+      # in the harness Dockerfile: the pin went stale, the node shipped a client that could not
+      # authenticate (#63), and the whole admin loop silently stopped. It now tracks the latest published
+      # client, and this is what tells it a release landed.
+      #
+      # NON-FATAL and LAST, exactly like the tap bump above: npm + the GitHub release are the release. A
+      # downstream repo being unreachable must never fail this run or block a publish. If it is skipped,
+      # the harness can be updated by hand with `gh workflow run update-platform-node.yml`.
+      - name: Notify dahrk-harness of the new client
+        if: env.HARNESS_DISPATCH_PAT != ''
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.HARNESS_DISPATCH_PAT }}
+        run: |
+          set -uo pipefail
+          if gh api /repos/dahrkai/dahrk-harness/dispatches \
+               -f event_type=dahrk-node-released \
+               -F "client_payload[version]=${VERSION}"; then
+            echo "notified dahrk-harness: dahrk-node ${VERSION} released"
+          else
+            echo "::warning::could not notify dahrk-harness of ${VERSION}; update the platform node manually (gh workflow run update-platform-node.yml)"
           fi
