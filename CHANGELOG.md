@@ -6,6 +6,17 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **An interactive Pi stage can now ask the human a structured multiple-choice question, surfaced as a
+  Linear elicitation.** Previously only a Claude stage could raise a structured question; a Pi stage
+  had no way to, so it fell back to guessing. A Pi stage's `ask_user_question` tool now maps each
+  question (with its options and multi-select flag) to a Linear `select` elicitation, waits for the
+  human's pick, and feeds the selection straight back into the same stage so it continues with the
+  answer. It reuses the same one-question-at-a-time machinery as the Claude path, so a batch of
+  questions is asked one at a time and an unanswered question, a cancelled stage, or a second question
+  raised while one is still open all behave exactly as they do for Claude.
+
 ### Changed
 
 - **The node now acknowledges cancels, so a cancel survives a hub restart or a dropped connection.**

@@ -17,10 +17,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
-import type { HumanTurn, RunnerContext, TraceEvent } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, RunnerContext, TraceEvent } from "@dahrk/contracts";
 import type { PiEvent } from "../src/pi-mappers.js";
-import { createPiRunner, type PiSessionLike, PI_STAGE_COMPLETE_TOOL } from "../src/pi-adapter.js";
+import {
+  createPiRunner,
+  type AskUserQuestions,
+  type PiSessionLike,
+  PI_STAGE_COMPLETE_TOOL,
+} from "../src/pi-adapter.js";
 import { makeRunner } from "../src/index.js";
+import { ManagedMailbox } from "../src/runner-shared.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const traceSchema = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@dahrk/contracts"))), "..", "schemas", "trace.schema.json"), "utf8"));
@@ -28,6 +34,14 @@ const ajv = new Ajv2020({ allErrors: true, strict: false });
 ajv.addSchema(traceSchema);
 const validateEvent = ajv.compile({ $ref: "https://skakel.io/schemas/trace.schema.json#/$defs/event" });
 const pe = (x: unknown): PiEvent => x as PiEvent;
+
+/**
+ * A per-prompt script step: either a fixed list of native events to replay, or a thunk the fake
+ * awaits to produce them. The thunk models a turn in which the model calls the injected
+ * `ask_user_question` tool (invoking the adapter's registered handler and parking until the human
+ * replies) before emitting its follow-up events - the async shape Pi's live tool `execute` has.
+ */
+type ScriptStep = PiEvent[] | (() => PiEvent[] | Promise<PiEvent[]>);
 
 /**
  * A scripted fake `AgentSession`. Each `prompt()` call shifts and replays the next event
@@ -40,10 +54,12 @@ class FakePiSession implements PiSessionLike {
   prompts: string[] = [];
   aborted = false;
   disposed = false;
+  /** The dispatcher the adapter registers; a thunk step drives it to model the tool's execute. */
+  askHandler?: (questions: AskUserQuestions) => Promise<string>;
   /** The aggregate session cost Pi would report; `undefined` models a session that cannot price a run. */
   cost: number | undefined;
   private listeners: Array<(e: PiEvent) => void> = [];
-  constructor(private readonly scripts: PiEvent[][], cost?: number) {
+  constructor(private readonly scripts: ScriptStep[], cost?: number) {
     this.cost = cost;
   }
   getSessionStats(): { cost?: number } {
@@ -55,9 +71,13 @@ class FakePiSession implements PiSessionLike {
       this.listeners = this.listeners.filter((l) => l !== listener);
     };
   }
+  setAskUserQuestionHandler(handler: (questions: AskUserQuestions) => Promise<string>): void {
+    this.askHandler = handler;
+  }
   async prompt(text: string): Promise<void> {
     this.prompts.push(text);
-    const script = this.scripts.shift() ?? [];
+    const step = this.scripts.shift() ?? [];
+    const script = typeof step === "function" ? await step() : step;
     for (const ev of script) for (const l of [...this.listeners]) l(ev);
   }
   async abort(): Promise<void> {
@@ -74,6 +94,25 @@ const ctx = (over: Partial<RunnerContext> = {}): RunnerContext => ({
   issueContext: "Fix the failing tests.",
   ...over,
 });
+
+/** An interactive Pi context, optionally carrying an `emitElicit` seam (put on the ctx by the stage
+ *  runner for every runtime) and per-stage idle windows. */
+const ctxInteractive = (
+  over: { emitElicit?: (q: ElicitQuestion) => void; firstReplyMs?: number; idleMs?: number } = {},
+): RunnerContext => {
+  const { emitElicit, firstReplyMs, idleMs } = over;
+  const base = ctx({
+    config: {
+      runtime: "pi",
+      interaction: "interactive",
+      ...(firstReplyMs !== undefined ? { firstReplyMs } : {}),
+      ...(idleMs !== undefined ? { idleMs } : {}),
+    } as RunnerContext["config"],
+  });
+  return { ...base, ...(emitElicit ? { emitElicit } : {}) } as RunnerContext;
+};
+
+const humanTurn = (text: string): HumanTurn => ({ text, ts: "2026-07-18T00:00:00Z" });
 
 const turnsFrom = (texts: string[]): AsyncIterable<HumanTurn> => ({
   async *[Symbol.asyncIterator]() {
@@ -305,4 +344,180 @@ test("summarise: returns the unavailable message when prompt() throws during the
   fake.prompt = async () => { throw new Error("model unavailable"); };
   const result = await runner.summarise(ctx());
   assert.match(result, /summary unavailable.*model unavailable/);
+});
+
+// DHK-505: Pi elicitation. A mid-stage structured question is surfaced as a Linear `select`
+// elicitation via `emitElicit`, and the human's pick returns into the same Pi turn as the tool
+// result, reusing the shared router/machinery so behaviour matches the Claude AskUserQuestion path.
+
+test("DHK-505 runInteractive elicit: a structured question reaches emitElicit and the human's pick returns into the turn", async () => {
+  const events: TraceEvent[] = [];
+  const elicited: ElicitQuestion[] = [];
+  const turns = new ManagedMailbox<HumanTurn>();
+  let answer: string | undefined;
+
+  const question: AskUserQuestions = [
+    {
+      question: "Which approach?",
+      options: [
+        { label: "Option A", description: "the safe one" },
+        { label: "Option B", description: "the fast one" },
+      ],
+      multiSelect: true,
+    },
+  ];
+
+  const fake = new FakePiSession([
+    // Self-seeded opening turn: the model calls ask_user_question, parks on the human, then continues
+    // once the pick returns - the shape Pi's live tool `execute` has.
+    async () => {
+      answer = await fake.askHandler!(question);
+      turns.end(); // no further human turns -> the stage settles to gate after this turn
+      return [
+        pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Proceeding with the pick." } }),
+        pe({ type: "turn_end", message: { stopReason: "stop" } }),
+      ];
+    },
+    // Engine-owned summarise turn (turns exhausted -> gate).
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Chose Option B." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+
+  const onTrace = (e: TraceEvent): void => {
+    events.push(e);
+    // The human replies exactly when the question is raised, mirroring a Linear elicitation reply.
+    if (e.type === "elicitation") turns.push(humanTurn("Option B"));
+  };
+  const result = await createPiRunner({ createSession: async () => fake }).runInteractive(
+    ctxInteractive({ emitElicit: (q) => elicited.push(q) }),
+    turns,
+    onTrace,
+  );
+
+  // emitElicit received the exact ElicitQuestion: the prompt folds each option's description, options
+  // map label -> { label, value: label }, and multiSelect is carried.
+  assert.equal(elicited.length, 1, "the question reached the edge emitElicit seam exactly once");
+  assert.equal(elicited[0]!.prompt, "Which approach?\n\n- Option A: the safe one\n- Option B: the fast one");
+  assert.deepEqual(elicited[0]!.options, [
+    { label: "Option A", value: "Option A" },
+    { label: "Option B", value: "Option B" },
+  ]);
+  assert.equal(elicited[0]!.multiSelect, true, "multiSelect is carried into the ElicitQuestion");
+  // The human's pick flows back into the Pi turn as the tool result text (Claude-identical wording).
+  assert.equal(answer, "The user selected: Option B");
+  // The audit trace `elicitation` event is emitted on raise and is schema-valid.
+  const elicitEvt = events.find((e) => e.type === "elicitation");
+  assert.ok(elicitEvt, "an elicitation audit trace event is emitted on raise");
+  assert.ok(validateEvent(elicitEvt), `schema: ${JSON.stringify(validateEvent.errors)}`);
+  assert.equal(result.status, "ok");
+});
+
+test("DHK-505 runInteractive elicit: a multi-question batch is asked one at a time and returns Q1..QN answers", async () => {
+  const turns = new ManagedMailbox<HumanTurn>();
+  let answer: string | undefined;
+  const questions: AskUserQuestions = [
+    { question: "Framework?", options: [{ label: "Vite" }, { label: "Webpack" }] },
+    { question: "Language?", options: [{ label: "TS" }, { label: "JS" }] },
+  ];
+  const replies = ["Vite", "TS"];
+  let raised = 0;
+
+  const fake = new FakePiSession([
+    async () => {
+      answer = await fake.askHandler!(questions);
+      turns.end();
+      return [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Set up." } }),
+              pe({ type: "turn_end", message: { stopReason: "stop" } })];
+    },
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Done." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const onTrace = (e: TraceEvent): void => {
+    if (e.type === "elicitation") turns.push(humanTurn(replies[raised++]!));
+  };
+  const result = await createPiRunner({ createSession: async () => fake }).runInteractive(ctxInteractive(), turns, onTrace);
+
+  // Each question is raised only after the previous is answered (one elicit in flight), and the
+  // batch returns per-question answers labelled Q1..QN so the model can tie each reply to its question.
+  assert.equal(raised, 2, "both questions were raised, one at a time");
+  assert.equal(answer, "Q1 (Framework?): The user selected: Vite\nQ2 (Language?): The user selected: TS");
+  assert.equal(result.status, "ok");
+});
+
+test("DHK-505 runInteractive elicit: a concurrent second ask while one is in flight returns the busy note", async () => {
+  const turns = new ManagedMailbox<HumanTurn>();
+  let answer1: string | undefined;
+  let answer2: string | undefined;
+
+  const fake = new FakePiSession([
+    // Opening turn: the model fires two concurrent ask_user_question calls. The first sets ref.settle
+    // synchronously (inside the Promise constructor); the second sees it and returns busy immediately.
+    async () => {
+      const q: AskUserQuestions = [{ question: "Which?", options: [{ label: "X" }, { label: "Y" }] }];
+      const p1 = fake.askHandler!(q); // sets ref.settle; emits elicitation
+      const p2 = fake.askHandler!(q); // ref.settle is non-null -> busy, no onRaise called
+      turns.push(humanTurn("X"));     // replies to p1; the router delivers it to ref.settle
+      answer1 = await p1;
+      answer2 = await p2;
+      turns.end();
+      return [
+        pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "OK." } }),
+        pe({ type: "turn_end", message: { stopReason: "stop" } }),
+      ];
+    },
+    // Summarise turn (gate exit: turns exhausted after turns.end()).
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Done." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+
+  await createPiRunner({ createSession: async () => fake }).runInteractive(ctxInteractive(), turns, () => {});
+
+  assert.equal(answer1, "The user selected: X", "first concurrent ask resolves with the human's pick");
+  assert.equal(
+    answer2,
+    "Only one question can be asked at a time; wait for the current one to be answered, then ask again.",
+    "second concurrent ask returns the busy note without calling onRaise",
+  );
+});
+
+test("DHK-505 runInteractive elicit: no reply within the idle window returns the proceed-anyway note", async () => {
+  const turns = new ManagedMailbox<HumanTurn>();
+  let answer: string | undefined;
+  const fake = new FakePiSession([
+    async () => {
+      // Never a reply: the elicit times out on the (tiny) window.
+      answer = await fake.askHandler!([{ question: "Which?", options: [{ label: "X" }, { label: "Y" }] }]);
+      turns.end();
+      return [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "OK." } }),
+              pe({ type: "turn_end", message: { stopReason: "stop" } })];
+    },
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Done." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const result = await createPiRunner({ createSession: async () => fake }).runInteractive(
+    ctxInteractive({ firstReplyMs: 20, idleMs: 20 }),
+    turns,
+    () => {},
+  );
+  assert.equal(answer, "No response from the user; proceed with your best judgement.");
+  assert.equal(result.status, "ok");
+});
+
+test("DHK-505 runInteractive elicit: the turn stream ending mid-question returns the cancelled note", async () => {
+  const turns = new ManagedMailbox<HumanTurn>();
+  let answer: string | undefined;
+  const fake = new FakePiSession([
+    async () => {
+      const pending = fake.askHandler!([{ question: "Which?", options: [{ label: "X" }, { label: "Y" }] }]);
+      turns.end(); // the stream ends with the elicit still outstanding -> cancel
+      answer = await pending;
+      return [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "OK." } }),
+              pe({ type: "turn_end", message: { stopReason: "stop" } })];
+    },
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Done." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const result = await createPiRunner({ createSession: async () => fake }).runInteractive(ctxInteractive(), turns, () => {});
+  assert.equal(answer, "The question was cancelled.");
+  assert.equal(result.status, "ok");
 });

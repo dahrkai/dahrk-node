@@ -18,7 +18,7 @@
  * (mirroring how the pure mappers are unit-tested). The real SDK is loaded via a lazy dynamic
  * import so the build does not hard-depend on a live Pi install.
  */
-import type { HumanTurn, JobResult, JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, JobResult, JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
 import { consumePiEvent, newPiBufferState, type PiEvent } from "./pi-mappers.js";
 import {
   makeEmit,
@@ -26,9 +26,11 @@ import {
   interactiveIdleWindows,
   resolveStagePrompt,
   interactiveSeedText,
+  createElicitTurnRouter,
   SUMMARISE_PROMPT,
   type EmittableEvent,
 } from "./runner-shared.js";
+import { askQuestionsSequentially } from "./ask-user-question-tool.js";
 
 /** Debounce window for coalescing a burst of rapid human turns into one prompt. */
 const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? process.env.SKAKEL_COALESCE_MS ?? 40);
@@ -40,6 +42,23 @@ const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? process.env.SKAKEL_C
  * capture the handoff summary from its `summary` argument.
  */
 export const PI_STAGE_COMPLETE_TOOL = "dahrk_stage_complete";
+
+/**
+ * The injected structured-question tool's name (DHK-505). Pi has no built-in `AskUserQuestion`
+ * (the Claude Agent SDK's), so an interactive Pi stage raises a structured multiple-choice question
+ * by calling this plain custom tool (registered via `defineTool`); its `execute` routes through the
+ * adapter's dispatcher to a Linear elicitation and returns the human's pick as the tool result.
+ */
+export const PI_ASK_USER_QUESTION_TOOL = "ask_user_question";
+
+/** A batch of structured questions as the `ask_user_question` tool presents them: each carries a
+ *  prompt, labelled options (with optional descriptions), and an optional multi-select flag. Shared
+ *  by the adapter's dispatcher hook and the live tool's parameter shape. */
+export type AskUserQuestions = {
+  question: string;
+  options: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}[];
 
 /**
  * The subset of Pi's `AgentSession` the adapter drives. Kept local (not imported from the SDK)
@@ -66,6 +85,15 @@ export interface PiSessionLike {
   getSessionStats?(): { cost?: number } | undefined;
   /** Live agent state; `state.tools` is replaced to deny tools for the summarise turn. */
   readonly agent?: { readonly state: { tools: unknown[] } };
+  /**
+   * Register the adapter's structured-question dispatcher (DHK-505) so the live session's injected
+   * `ask_user_question` tool can route a mid-stage multiple-choice question through the shared elicit
+   * machinery to a Linear elicitation and hand the human's pick back as its tool result. The adapter
+   * sets it at the top of `runInteractive`, once the elicit router exists. Optional: a batch-only or
+   * container/RPC session that does not (yet) surface elicitation omits it, so this hook can be added
+   * without changing the `PiSessionFactory` signature.
+   */
+  setAskUserQuestionHandler?(handler: (questions: AskUserQuestions) => Promise<string>): void;
 }
 
 /** Builds a fresh Pi session bound to the stage's worktree and brokered inference creds. */
@@ -167,9 +195,42 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
         if (r.responseText) lastResponseText = r.responseText;
       });
 
-      const humanIter = turns[Symbol.asyncIterator]();
       const { firstReplyMs, idleMs } = interactiveIdleWindows(ctx);
+      // DHK-505: fan the relayed human-turn stream into (a) conversational turns the loop reads and
+      // (b) a blocking `ask` the injected `ask_user_question` tool awaits, so a mid-stage structured
+      // question surfaces as a Linear `select` elicitation and the human's pick returns into the same
+      // Pi turn. Reuses the exact router the Claude adapter uses, so Pi inherits Claude's
+      // one-at-a-time / no-reply / cancel behaviour rather than a Pi-specific variant.
+      const router = createElicitTurnRouter(turns, { signal, firstReplyMs, idleMs });
+      const humanIter = router.conversation[Symbol.asyncIterator]();
       let awaitingFirstReply = true;
+
+      // The router-backed `ask`: raise one elicitation, block for the human's turn, and map the
+      // outcome to the SAME text the Claude adapter returns (claude-adapter.ts) so the model reads an
+      // identical result. `emitElicit` (put on the ctx by the stage runner for every runtime) carries
+      // the `elicit` wire frame; the preceding trace event is audit-only (the hub maps a trace
+      // `elicitation` to null and raises Linear solely from the wire frame, so this does not double-post).
+      const elicitCtx = ctx as RunnerContext & { emitElicit?: (question: ElicitQuestion) => void };
+      const ask = async (question: ElicitQuestion): Promise<string> => {
+        const outcome = await router.ask(awaitingFirstReply, () => {
+          emit({ type: "elicitation", prompt: question.prompt, signal: "select", options: question.options });
+          elicitCtx.emitElicit?.(question);
+        });
+        switch (outcome.kind) {
+          case "reply":
+            return `The user selected: ${outcome.text}`;
+          case "busy":
+            return "Only one question can be asked at a time; wait for the current one to be answered, then ask again.";
+          case "noreply":
+            return "No response from the user; proceed with your best judgement.";
+          case "cancel":
+            return "The question was cancelled.";
+        }
+      };
+      // Hand the batch dispatcher to the live session so its `ask_user_question` tool's execute can
+      // reach it. A batch of questions is asked one at a time (the router forbids concurrent asks).
+      s.setAskUserQuestionHandler?.((questions) => askQuestionsSequentially(questions, ask));
+
       let exited: "tool" | "gate" | "timeout" | "cancelled" = "gate";
       let pending = humanIter.next();
       try {
@@ -340,15 +401,74 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     execute: async () => ({ content: [{ type: "text", text: "Stage marked complete." }], details: {} }),
   });
 
+  // The injected structured-question tool (DHK-505). Seam decision: the SHADOW TOOL, not Pi's host UI
+  // adapter (`ExtensionUIContext.select`). Two facts about the pinned 0.80.6 API decide it:
+  //  1. `ctx.ui.select(title, options: string[])` carries only a flat list of option strings and
+  //     returns a single `string | undefined` - it cannot carry an option's description or the
+  //     multiSelect flag, so it would lose the structured `ElicitQuestion` shape.
+  //  2. `ctx.ui.*` is an EXTENSION-facing API; Pi has no built-in model-facing structured-question
+  //     tool (no `AskUserQuestion` analogue) that routes to it, so the model cannot reach `ui.select`.
+  // Only a custom tool the model can call, whose `execute` runs inside the live session, can both
+  // raise the question and return the human's pick back into the turn as a tool result. `execute`
+  // routes through the adapter's dispatcher (`setAskUserQuestionHandler`), which drives the shared
+  // elicit router -> `emitElicit`, matching the Claude AskUserQuestion->Linear path.
+  let askHandler: ((questions: AskUserQuestions) => Promise<string>) | undefined;
+  const askUserQuestion = defineTool({
+    name: PI_ASK_USER_QUESTION_TOOL,
+    label: "Ask the user a question",
+    description:
+      "Ask the human a structured multiple-choice question and wait for their selection. Use this " +
+      "when you need the human to choose between options before you can continue.",
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string" },
+              options: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: { label: { type: "string" }, description: { type: "string" } },
+                  required: ["label"],
+                },
+              },
+              multiSelect: { type: "boolean" },
+            },
+            required: ["question", "options"],
+          },
+        },
+      },
+      required: ["questions"],
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    execute: async (_toolCallId: string, params: any) => {
+      // No handler registered (e.g. a batch stage, which never wires elicitation): degrade to the
+      // same soft note the router's no-reply path returns rather than blocking or erroring.
+      const text = askHandler
+        ? await askHandler((params as { questions: AskUserQuestions }).questions)
+        : "No response from the user; proceed with your best judgement.";
+      return { content: [{ type: "text", text }], details: {} };
+    },
+  });
+
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(ctx.workspace.worktreePath),
     authStorage,
     modelRegistry,
     cwd: ctx.workspace.worktreePath,
-    customTools: [stageComplete],
+    customTools: [stageComplete, askUserQuestion],
     ...(model ? { model } : {}),
   });
-  return session as PiSessionLike;
+  const piSession = session as PiSessionLike;
+  // The adapter's `runInteractive` registers its dispatcher here; the tool's `execute` above reads it.
+  piSession.setAskUserQuestionHandler = (handler) => {
+    askHandler = handler;
+  };
+  return piSession;
 }
 
 /** Common provider inference-key env var names -> Pi provider ids ( `runtimeEnv`). */
