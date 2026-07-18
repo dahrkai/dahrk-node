@@ -19,6 +19,14 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **Clarify the batch stall-watchdog window computation (DHK-210).** Split the nested
+  `stallMs` expression in `stage-runner.ts` into a `stallSource` fallback (config `stall_seconds` →
+  env → 300s default) and a separate non-negative-integer clamp that mirrors `killMs`. No behaviour
+  change: reading env has no side effects, so computing the source unconditionally is equivalent to
+  the old interactive short-circuit.
+
 ### Removed
 
 - **Remove the Codex runtime adapter (DHK-510).** Deleted `codex-adapter.ts`, `codex-mappers.ts`, and
