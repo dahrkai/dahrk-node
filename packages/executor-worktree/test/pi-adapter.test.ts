@@ -17,12 +17,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
-import type { ElicitQuestion, HumanTurn, RunnerContext, TraceEvent } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, PolicyOutcome, RunnerContext, TraceEvent } from "@dahrk/contracts";
 import type { PiEvent } from "../src/pi-mappers.js";
 import {
   createPiRunner,
+  piToolCallDecision,
   type AskUserQuestions,
   type PiSessionLike,
+  type PolicyAwareRunnerContext,
   PI_STAGE_COMPLETE_TOOL,
 } from "../src/pi-adapter.js";
 import { makeRunner } from "../src/index.js";
@@ -56,6 +58,10 @@ class FakePiSession implements PiSessionLike {
   disposed = false;
   /** The dispatcher the adapter registers; a thunk step drives it to model the tool's execute. */
   askHandler?: (questions: AskUserQuestions) => Promise<string>;
+  /** The pre-execution gate the adapter registers (DHK-504); consulted before each tool executes. */
+  gate?: (toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined;
+  /** Tool calls the gate blocked before execution: recorded here, never delivered as events. */
+  blocked: { toolName: string; reason?: string }[] = [];
   /** The aggregate session cost Pi would report; `undefined` models a session that cannot price a run. */
   cost: number | undefined;
   private listeners: Array<(e: PiEvent) => void> = [];
@@ -74,11 +80,29 @@ class FakePiSession implements PiSessionLike {
   setAskUserQuestionHandler(handler: (questions: AskUserQuestions) => Promise<string>): void {
     this.askHandler = handler;
   }
+  setToolCallGate(gate: (toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined): void {
+    this.gate = gate;
+  }
   async prompt(text: string): Promise<void> {
     this.prompts.push(text);
     const step = this.scripts.shift() ?? [];
     const script = typeof step === "function" ? await step() : step;
-    for (const ev of script) for (const l of [...this.listeners]) l(ev);
+    // Model Pi's runner consulting the pre-execution gate before a tool runs (DHK-504): a blocked
+    // `tool_execution_start` (and its paired `_end`) never reaches subscribers, so the tool does not
+    // execute and produces no action/observation - blocked up front, not run-then-annotated.
+    const blockedCallIds = new Set<string>();
+    for (const ev of script) {
+      if (ev.type === "tool_execution_start") {
+        const decision = this.gate?.(ev.toolName, ev.args);
+        if (decision?.block) {
+          this.blocked.push({ toolName: ev.toolName, reason: decision.reason });
+          blockedCallIds.add(ev.toolCallId);
+          continue;
+        }
+      }
+      if (ev.type === "tool_execution_end" && blockedCallIds.has(ev.toolCallId)) continue;
+      for (const l of [...this.listeners]) l(ev);
+    }
   }
   async abort(): Promise<void> {
     this.aborted = true;
@@ -520,4 +544,166 @@ test("DHK-505 runInteractive elicit: the turn stream ending mid-question returns
   const result = await createPiRunner({ createSession: async () => fake }).runInteractive(ctxInteractive(), turns, () => {});
   assert.equal(answer, "The question was cancelled.");
   assert.equal(result.status, "ok");
+});
+
+// DHK-504: Pi pre-execution tool gate. The pure decision mirrors Claude's `policyCanUseTool`: only a
+// `deny` verdict blocks (with the policy reason, or a policy-name fallback); `ask`/`allow`/absent pass
+// through. Wired into the adapter, a policy-violating tool call is blocked BEFORE it executes.
+
+const ctxWithAuth = (authorizeToolUse?: (tool: string, input: unknown) => PolicyOutcome): PolicyAwareRunnerContext =>
+  ({ ...ctx(), ...(authorizeToolUse ? { authorizeToolUse } : {}) }) as PolicyAwareRunnerContext;
+
+test("DHK-504 piToolCallDecision: a deny verdict blocks with the policy's reason", () => {
+  const decision = piToolCallDecision(
+    ctxWithAuth(() => ({ verdict: "deny", policy: "fs_confine", reason: "write escapes the worktree" })),
+    "write",
+    { path: "/etc/passwd" },
+  );
+  assert.deepEqual(decision, { block: true, reason: "write escapes the worktree" });
+});
+
+test("DHK-504 piToolCallDecision: a deny with no reason falls back to the policy name", () => {
+  const decision = piToolCallDecision(
+    ctxWithAuth(() => ({ verdict: "deny", policy: "shell_guard" })),
+    "bash",
+    { command: "rm -rf /" },
+  );
+  assert.deepEqual(decision, { block: true, reason: `tool "bash" denied by policy shell_guard` });
+});
+
+test("DHK-504 piToolCallDecision: an ask verdict passes through (no divergence from Claude)", () => {
+  const decision = piToolCallDecision(ctxWithAuth(() => ({ verdict: "ask", policy: "cost_budget" })), "bash", {});
+  assert.equal(decision, undefined);
+});
+
+test("DHK-504 piToolCallDecision: an allow verdict passes through", () => {
+  const decision = piToolCallDecision(ctxWithAuth(() => ({ verdict: "allow", policy: "none" })), "read", {});
+  assert.equal(decision, undefined);
+});
+
+test("DHK-504 piToolCallDecision: a ctx without authorizeToolUse passes through (unguarded stage)", () => {
+  const decision = piToolCallDecision(ctxWithAuth(), "write", { path: "/etc/passwd" });
+  assert.equal(decision, undefined);
+});
+
+test("DHK-504 runBatch gate: a session without setToolCallGate runs without error (optional seam backward compat)", async () => {
+  // A minimal session that lacks setToolCallGate (an older or batch-only session). The adapter must
+  // silently skip gate wiring, not throw, even when a policy would deny.
+  const listeners: Array<(e: PiEvent) => void> = [];
+  const minimalSession: PiSessionLike = {
+    sessionId: "min-1",
+    subscribe(l) { listeners.push(l); return () => {}; },
+    async prompt() {
+      for (const l of listeners) {
+        l(pe({ type: "agent_start" }));
+        l(pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "done" } }));
+        l(pe({ type: "agent_end", messages: [{ stopReason: "stop" }] }));
+      }
+    },
+    async abort() {},
+    dispose() {},
+    // setToolCallGate intentionally absent — models an older session shape
+  };
+  const authorizeToolUse = (): PolicyOutcome => ({ verdict: "deny", policy: "fs_confine", reason: "escape" });
+  const result = await createPiRunner({ createSession: async () => minimalSession }).runBatch(
+    { ...ctx(), authorizeToolUse } as RunnerContext,
+    () => {},
+  );
+  assert.equal(result.status, "ok", "missing setToolCallGate does not crash the adapter");
+});
+
+test("DHK-504 runInteractive gate: a policy-violating tool call in a human turn is blocked before execution", async () => {
+  const events: TraceEvent[] = [];
+  const fake = new FakePiSession([
+    // Self-seeded opening turn.
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "What to do?" } }),
+     pe({ type: "turn_end", message: { stopReason: "stop" } })],
+    // Human turn: the model attempts a denied write and an allowed read.
+    [
+      pe({ type: "tool_execution_start", toolName: "write", toolCallId: "w2", args: { path: "/etc/passwd", content: "x" } }),
+      pe({ type: "tool_execution_end", toolCallId: "w2", content: "written", isError: false }),
+      pe({ type: "tool_execution_start", toolName: "read", toolCallId: "r2", args: { path: "/tmp/wt/README.md" } }),
+      pe({ type: "tool_execution_end", toolCallId: "r2", content: "# Readme", isError: false }),
+      pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "read ok" } }),
+      pe({ type: "turn_end", message: { stopReason: "stop" } }),
+    ],
+    // Engine-owned summarise turn (turns exhausted -> gate).
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Used read safely." } }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const authorizeToolUse = (tool: string): PolicyOutcome =>
+    tool === "write"
+      ? { verdict: "deny", policy: "fs_confine", reason: "write escapes the worktree" }
+      : { verdict: "allow", policy: "none" };
+
+  const result = await createPiRunner({ createSession: async () => fake }).runInteractive(
+    {
+      ...ctx({ config: { runtime: "pi", interaction: "interactive" } as RunnerContext["config"] }),
+      authorizeToolUse,
+    } as RunnerContext,
+    turnsFrom(["do something"]),
+    (e) => events.push(e),
+  );
+
+  assert.deepEqual(fake.blocked, [{ toolName: "write", reason: "write escapes the worktree" }],
+    "the gate blocks the write in interactive mode before it runs");
+  assert.ok(
+    !events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "write"),
+    "blocked write produces no action event in interactive mode",
+  );
+  assert.ok(
+    !events.some((e) => e.type === "observation" && (e as Extract<TraceEvent, { type: "observation" }>).toolUseId === "w2"),
+    "blocked write produces no observation in interactive mode",
+  );
+  assert.ok(
+    events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "read"),
+    "the allowed read call still executes and produces an action",
+  );
+  assert.equal(result.status, "ok");
+});
+
+test("DHK-504 runBatch gate: a policy-violating write is blocked before execution, not run-then-annotated", async () => {
+  const events: TraceEvent[] = [];
+  // The scripted turn calls a denied `write` and an allowed `bash`; the gate must stop only the write.
+  const fake = new FakePiSession([
+    [
+      pe({ type: "agent_start" }),
+      pe({ type: "tool_execution_start", toolName: "write", toolCallId: "w1", args: { path: "/etc/passwd", content: "x" } }),
+      pe({ type: "tool_execution_end", toolCallId: "w1", content: "written", isError: false }),
+      pe({ type: "tool_execution_start", toolName: "bash", toolCallId: "b1", args: { command: "ls" } }),
+      pe({ type: "tool_execution_end", toolCallId: "b1", content: "file.txt", isError: false }),
+      pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "done" } }),
+      pe({ type: "agent_end", messages: [{ stopReason: "stop" }] }),
+    ],
+  ]);
+  const authorizeToolUse = (tool: string): PolicyOutcome =>
+    tool === "write"
+      ? { verdict: "deny", policy: "fs_confine", reason: "write escapes the worktree" }
+      : { verdict: "allow", policy: "none" };
+
+  await createPiRunner({ createSession: async () => fake }).runBatch(
+    { ...ctx(), authorizeToolUse } as RunnerContext,
+    (e) => events.push(e),
+  );
+
+  // The denied write was stopped up front with the policy reason.
+  assert.deepEqual(fake.blocked, [{ toolName: "write", reason: "write escapes the worktree" }]);
+  // It never reached onTrace: no action/observation for the blocked call (blocked before execution).
+  assert.ok(
+    !events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "write"),
+    "the blocked write produces no action event - it did not execute",
+  );
+  assert.ok(
+    !events.some((e) => e.type === "observation" && (e as Extract<TraceEvent, { type: "observation" }>).toolUseId === "w1"),
+    "the blocked write produces no observation - it was not run-then-annotated",
+  );
+  // The allowed bash call ran and produced its action + observation exactly as before.
+  assert.ok(
+    events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "bash"),
+    "the allowed bash call executes and produces its action",
+  );
+  assert.ok(
+    events.some((e) => e.type === "observation" && (e as Extract<TraceEvent, { type: "observation" }>).toolUseId === "b1"),
+    "the allowed bash call produces its observation",
+  );
 });
