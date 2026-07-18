@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-07-18
+
 ### Added
 
 - **CI: smoke-test `scripts/release.mjs` on every PR** (DHK-393). A new `smoke-release-script` job
