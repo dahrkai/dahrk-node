@@ -8,6 +8,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A Pi stage now enforces tool policy before a tool runs, not just after.** Previously only a Claude
+  stage had a pre-execution guardrail; a Pi stage's sole check was the post-hoc re-evaluation of the
+  trace, which could hard-fail a filesystem-confinement escape only after the command had already run.
+  A Pi stage now consults the same edge policy set as Claude (`fs_confine`, `read_only`, `write_scope`,
+  `max_tool_calls`, `shell_guard`) before each tool executes and blocks a denied call up front,
+  surfacing the policy's reason, so a policy-violating write or command never runs in the first place.
+  The post-hoc check stays in place as a defence-in-depth backstop.
 - **An interactive Pi stage can now ask the human a structured multiple-choice question, surfaced as a
   Linear elicitation.** Previously only a Claude stage could raise a structured question; a Pi stage
   had no way to, so it fell back to guessing. A Pi stage's `ask_user_question` tool now maps each
