@@ -19,7 +19,7 @@
  * import so the build does not hard-depend on a live Pi install.
  */
 import { join } from "node:path";
-import type { ElicitQuestion, HumanTurn, JobResult, JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, JobResult, JobStatus, PolicyOutcome, Runner, RunnerContext } from "@dahrk/contracts";
 import { consumePiEvent, newPiBufferState, type PiEvent } from "./pi-mappers.js";
 import {
   readAuthHint,
@@ -103,6 +103,59 @@ export interface PiSessionLike {
    * without changing the `PiSessionFactory` signature.
    */
   setAskUserQuestionHandler?(handler: (questions: AskUserQuestions) => Promise<string>): void;
+  /**
+   * Register the adapter's pre-execution tool gate (DHK-504) so the live session's `tool_call`
+   * extension hook can veto a policy-violating tool call BEFORE it runs, the direct analogue of the
+   * Claude adapter's `canUseTool`. The gate returns `{ block: true, reason }` to deny (Pi does not run
+   * the tool and surfaces the reason) or `undefined` to allow. The adapter sets it once, right after
+   * `openSession`, routing through `ctx.authorizeToolUse` so denials flow through the edge policy's
+   * existing `recordDeny` path exactly as for Claude. Optional: a batch-only or older session that does
+   * not surface the hook omits it, so the gate can be added without changing the `PiSessionFactory`
+   * signature (mirrors `setAskUserQuestionHandler`).
+   */
+  setToolCallGate?(gate: (toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined): void;
+}
+
+/**
+ * The stage runner puts `authorizeToolUse` on the RunnerContext for every runtime (the edge policy
+ * gate) plus `emitElicit` for elicitation; neither is on the base `RunnerContext` type. Mirrors the
+ * Claude adapter's `PolicyAwareRunnerContext`.
+ */
+export type PolicyAwareRunnerContext = RunnerContext & {
+  authorizeToolUse?: (toolName: string, input: unknown) => PolicyOutcome;
+  emitElicit?: (question: ElicitQuestion) => void;
+};
+
+/**
+ * The pure pre-execution decision (DHK-504), the Pi analogue of the Claude adapter's
+ * `policyCanUseTool`. Consult the edge policy: only a `deny` verdict blocks the call, carrying the
+ * policy's `reason` (falling back to the policy name, exactly as Claude does). `ask`/`allow`/an absent
+ * `authorizeToolUse` all pass through as `undefined` (allow) - `ask` deliberately does NOT block here,
+ * matching Claude (mid-stage approval is not this gate's concern). Extracted pure so the gate semantics
+ * are unit-testable without the live SDK.
+ */
+export function piToolCallDecision(
+  ctx: PolicyAwareRunnerContext,
+  toolName: string,
+  input: unknown,
+): { block: true; reason: string } | undefined {
+  const verdict = ctx.authorizeToolUse?.(toolName, input);
+  if (verdict?.verdict === "deny") {
+    return { block: true, reason: verdict.reason ?? `tool "${toolName}" denied by policy ${verdict.policy}` };
+  }
+  return undefined;
+}
+
+/**
+ * Wire the session's pre-execution gate to the edge policy (DHK-504), mirroring how the Claude adapter
+ * hands `canUseTool` to `query()`. Routing every tool call through `ctx.authorizeToolUse` means denials
+ * flow through the stage runner's existing `recordDeny` path and allowed actions are deduped from
+ * `onTrace` exactly as for Claude - no new recording mechanism. `ctx` is cast to the policy-aware shape
+ * the stage runner supplies (as the elicit path already casts for `emitElicit`).
+ */
+function registerToolCallGate(s: PiSessionLike, ctx: RunnerContext): void {
+  const policyCtx = ctx as PolicyAwareRunnerContext;
+  s.setToolCallGate?.((toolName, input) => piToolCallDecision(policyCtx, toolName, input));
 }
 
 /** Builds a fresh Pi session bound to the stage's worktree and brokered inference creds. */
@@ -168,6 +221,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
     async runBatch(ctx, onTrace) {
       const emit = makeEmit("pi", onTrace);
       const s = await openSession(ctx);
+      registerToolCallGate(s, ctx);
       const state = newPiBufferState();
       let status: JobStatus = "ok";
       const unsub = s.subscribe((ev) => {
@@ -197,6 +251,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
     async runInteractive(ctx, turns, onTrace) {
       const emit = makeEmit("pi", onTrace);
       const s = await openSession(ctx);
+      registerToolCallGate(s, ctx);
       const state = newPiBufferState();
       // Default to `either`, not `gate` (DHK-363): with `gate` the stage-complete tool is disabled,
       // so an interactive stage can only end `ok` if the human happens to type "allow"/"approve" -
@@ -414,7 +469,17 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   const spec = "@earendil-works/pi-coding-agent";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mod: any = await import(spec);
-  const { AuthStorage, ModelRegistry, SessionManager, createAgentSession, defineTool, resolveCliModel } = mod;
+  const {
+    AuthStorage,
+    DefaultResourceLoader,
+    ModelRegistry,
+    SessionManager,
+    SettingsManager,
+    createAgentSession,
+    defineTool,
+    getAgentDir,
+    resolveCliModel,
+  } = mod;
 
   // The auth-profile hint (DHK-509) is the sole source of provider identity; absent on ambient nodes.
   const hint = readAuthHint(ctx);
@@ -503,11 +568,44 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     },
   });
 
+  // The pre-execution tool gate (DHK-504). Pi's veto is its extension `tool_call` hook, which fires
+  // before a tool's `execute` and returns `{ block, reason }` - the direct analogue of Claude's
+  // `canUseTool`. `createAgentSession` has no direct `tool_call` option; the hook reaches it only via a
+  // ResourceLoader carrying an inline extension. So register an inline extension whose factory subscribes
+  // `tool_call` to the adapter-supplied gate (set by `setToolCallGate` below), covering built-in
+  // (read/bash/edit/write/grep/find/ls) and custom tools alike - every event carries `toolName`/`input`.
+  let toolCallGate: ((toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined) | undefined;
+  const toolGateExtension = {
+    name: "dahrk-tool-gate",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    factory: (pi: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      pi.on("tool_call", (event: any) => toolCallGate?.(event.toolName, event.input));
+    },
+  };
+  // Supplying our own ResourceLoader replaces the one `createAgentSession` would build, so replicate the
+  // SDK's own default construction (dist/core/sdk.js) field-for-field and only ADD `extensionFactories`,
+  // then reload ourselves (the SDK reloads only a loader it built): skill/prompt-template/context-file
+  // loading is unchanged, and the inline gate extension is registered. `getAgentDir()` is the SDK's own
+  // default agent dir (`~/.pi/agent`); `SettingsManager.create(cwd, agentDir)` matches the SDK default.
+  const cwd = ctx.workspace.worktreePath;
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    extensionFactories: [toolGateExtension],
+  });
+  await resourceLoader.reload();
+
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(ctx.workspace.worktreePath),
     authStorage,
     modelRegistry,
-    cwd: ctx.workspace.worktreePath,
+    settingsManager,
+    resourceLoader,
+    cwd,
     customTools: [stageComplete, askUserQuestion],
     ...(model ? { model } : {}),
   });
@@ -527,6 +625,10 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   // The adapter's `runInteractive` registers its dispatcher here; the tool's `execute` above reads it.
   piSession.setAskUserQuestionHandler = (handler) => {
     askHandler = handler;
+  };
+  // The adapter's run loops register the pre-execution gate here; the inline extension above reads it.
+  piSession.setToolCallGate = (gate) => {
+    toolCallGate = gate;
   };
   return piSession;
 }
