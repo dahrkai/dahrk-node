@@ -627,6 +627,35 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
   };
 
   /**
+   * Re-point a mirror's `origin` URL at the Job's `gitUrl` when it has drifted, in place on the next
+   * refresh (DHK-482). `gitUrl` is consulted only at first clone; every later refresh runs `fetch`
+   * against whatever `remote.origin.url` the mirror already holds. If the repo moves (org rename,
+   * transfer, host change) the mirror silently keeps fetching the old remote for the life of the dir -
+   * working only while the host courtesy-redirects the old name. This brings the URL onto the expected
+   * shape idempotently, the same way `migrateMirrorConfig` reconciles the refspec layout: no re-clone,
+   * no operator step. A differing `gitUrl` is followed (a rename is the normal, legitimate reason it
+   * changes); the residual risk is that a Job can thereby repoint an existing mirror at a new remote,
+   * which the broker's credential check (out of scope here) is the two-sided guard for.
+   *
+   * `expected` is computed exactly as the clone path builds `cloneUrl` (`withTokenUser` on https when a
+   * token is present, otherwise the plain URL), so a brokered (token-user) mirror is not seen as drift
+   * and rewritten on every refresh. SSH / local-path URLs pass through `withTokenUser` unchanged, so the
+   * org-rename case compares plain-vs-plain and rewrites exactly once. Logs on change only.
+   */
+  const reconcileMirrorUrl = (mirror: string, repoId: string, gitUrl: string, authEnv?: NodeJS.ProcessEnv): void => {
+    const expected = authEnv ? withTokenUser(gitUrl) : gitUrl;
+    let current = "";
+    try {
+      current = git(mirror, ["config", "--get", "remote.origin.url"]).trim();
+    } catch {
+      // no origin url set: treat as drifted and set it, never a thrown refresh
+    }
+    if (current === expected) return; // idempotent: a matching URL is left untouched
+    log.info(`mirror ${repoId}: origin url drifted (${current} -> ${expected}); updating in place`);
+    git(mirror, ["remote", "set-url", "origin", expected]);
+  };
+
+  /**
    * Park the tip of a local branch we are about to `-B` (create-or-reset) away, but only when that tip
    * holds commits the new start point does not already contain. This is the insurance on `-B`: an
    * unpushed run branch can never be silently destroyed by the next run of the same issue. The parked
@@ -708,6 +737,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       log.info(`refreshing mirror ${repoId}`);
       try {
         migrateMirrorConfig(mirror, repoId);
+        reconcileMirrorUrl(mirror, repoId, gitUrl, authEnv);
         git(mirror, ["fetch", "--prune", "origin"], netEnv(authEnv));
         gcShadowHeads(mirror);
         return { mirror, refreshed: true };

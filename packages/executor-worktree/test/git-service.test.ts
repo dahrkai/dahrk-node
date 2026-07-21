@@ -915,6 +915,78 @@ test("a second run reuses the mirror and picks up new commits via remote update 
   }
 });
 
+// --- DHK-482: a mirror must reconcile its origin URL against the Job's gitUrl on refresh ---
+
+test("a mirror whose origin URL drifted from the Job's gitUrl is re-pointed in place on refresh, and logged", async () => {
+  // The repo moved (org rename/transfer) but the bare mirror kept the OLD remote.origin.url. Every
+  // later refresh fetched the stale remote for ever. The refresh must now re-point origin at the Job's
+  // gitUrl in place (no re-clone) before fetching, so the very refresh that notices the drift fetches
+  // the right remote.
+  const src = makeRepo();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const logs: string[] = [];
+  const svc = createGitService({
+    worktreesDir,
+    mirrorsDir,
+    logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) },
+  });
+  const mirror = join(mirrorsDir, "repo-url");
+
+  try {
+    // First run clones the mirror; origin points at the current gitUrl.
+    await svc.createWorktree({ repoId: "repo-url", gitUrl: src, baseBranch: "main", runId: "run-url-1" });
+    assert.equal(git(mirror, ["config", "--get", "remote.origin.url"]).trim(), src, "origin starts at the clone URL");
+
+    // Simulate an org rename / repo move: the mirror keeps pointing at the OLD, now-gone remote.
+    const stale = join(tmpdir(), "moved-away-does-not-exist.git");
+    git(mirror, ["remote", "set-url", "origin", stale]);
+    logs.length = 0; // only care about what the next refresh logs
+
+    // A second run for the same repoId carries the canonical gitUrl again. The refresh re-points origin
+    // back to it (in place, no re-clone) BEFORE fetching, so the worktree still builds.
+    const ref2 = await svc.createWorktree({ repoId: "repo-url", gitUrl: src, baseBranch: "main", runId: "run-url-2" });
+    assert.equal(
+      git(mirror, ["config", "--get", "remote.origin.url"]).trim(),
+      src,
+      "origin is re-pointed to the Job's gitUrl",
+    );
+    assert.ok(existsSync(ref2.worktreePath), "the refreshed mirror builds a worktree (the fetch used the corrected URL)");
+    assert.ok(
+      logs.some((m) => /origin url drifted/i.test(m) && m.includes("repo-url")),
+      "the drift is logged",
+    );
+  } finally {
+    for (const d of [src, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("an already-correct mirror URL is left untouched on refresh (idempotent, no needless write or log)", async () => {
+  const src = makeRepo();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const logs: string[] = [];
+  const svc = createGitService({
+    worktreesDir,
+    mirrorsDir,
+    logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) },
+  });
+  const mirror = join(mirrorsDir, "repo-url-ok");
+
+  try {
+    await svc.createWorktree({ repoId: "repo-url-ok", gitUrl: src, baseBranch: "main", runId: "run-ok-1" });
+    const before = git(mirror, ["config", "--get", "remote.origin.url"]).trim();
+    logs.length = 0;
+
+    // A second run with the UNCHANGED gitUrl must not rewrite the URL nor log a drift.
+    await svc.createWorktree({ repoId: "repo-url-ok", gitUrl: src, baseBranch: "main", runId: "run-ok-2" });
+    assert.equal(git(mirror, ["config", "--get", "remote.origin.url"]).trim(), before, "the matching URL is untouched");
+    assert.ok(!logs.some((m) => /origin url drifted/i.test(m)), "no drift log on a matching URL");
+  } finally {
+    for (const d of [src, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 // --- DHK-371: the mirror must never destroy a run's branch, and a stale claim must never block a run ---
 
 /** Read a mirror's registered worktrees as `path -> branch` (branch as git reports it, even when the
