@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-07-22
+
 ## [0.1.22] - 2026-07-21
 
 ### Added

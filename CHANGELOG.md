@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-07-22
+
 ### Added
 
 - **A Pi stage can now authenticate against a subscription login, and pick a model the subscription
@@ -859,7 +861,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.22...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.23...HEAD
+[0.1.23]: https://github.com/dahrkai/dahrk-node/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/dahrkai/dahrk-node/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/dahrkai/dahrk-node/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/dahrkai/dahrk-node/compare/v0.1.19...v0.1.20
