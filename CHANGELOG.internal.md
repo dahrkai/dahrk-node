@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-07-22
+
 ### Changed
 
 - **Take `@dahrk/contracts` `^0.6.0` (was `^0.4.0`).** A caret range on a `0.x` version does not cross

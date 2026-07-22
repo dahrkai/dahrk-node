@@ -6,6 +6,19 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-07-22
+
+### Changed
+
+- **A stage can now be bound to an auth profile for any provider the Pi runtime supports, not just the
+  five that were hand-listed.** The client took `@dahrk/contracts` `^0.4.0`, and a caret range on a
+  `0.x` version does not cross the minor, so a node stayed on the contract published in 0.4.0 no matter
+  what shipped afterwards. It now takes `^0.6.0`, which carries a provider catalogue generated from the
+  Pi runtime itself: 36 providers and 1072 models, including subscription logins for Anthropic Claude
+  Pro/Max, GitHub Copilot and xAI alongside the existing ChatGPT/Codex one. Nothing changes for a node
+  already running: provider identity still arrives as a hint minted by the hub, and a profile you have
+  not created cannot be selected. (#111)
+
 ## [0.1.23] - 2026-07-22
 
 ### Added
@@ -861,7 +874,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.23...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.24...HEAD
+[0.1.24]: https://github.com/dahrkai/dahrk-node/compare/v0.1.23...v0.1.24
 [0.1.23]: https://github.com/dahrkai/dahrk-node/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/dahrkai/dahrk-node/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/dahrkai/dahrk-node/compare/v0.1.20...v0.1.21
