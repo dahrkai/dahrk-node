@@ -19,6 +19,22 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **Take `@dahrk/contracts` `^0.6.0` (was `^0.4.0`).** A caret range on a `0.x` version does not cross
+  the minor, so the three consumers (`apps/edge-node`, `packages/edge`, `packages/executor-worktree`)
+  were pinned to 0.4.0 and could not see anything published since. 0.6.0 carries the generated Pi
+  provider/model catalog (36 providers, 1072 models) plus the auth-profile registry it now derives, so
+  the hub can broker any provider Pi supports rather than the five that were hand-listed. No source
+  change was needed here: typecheck and the full suite pass unchanged.
+- **Two forward-compat shims are now removable** (follow-ups, deliberately not in this bump):
+  `PushResultWithFootprint` in the deliver path, which 0.1.22 left in place because
+  `@dahrk/contracts@0.4.0` omitted `numstat`/`scope`/`changedPaths`/`changedPathsTruncated` on
+  `PushResult` - 0.6.0 has them, so the shim can go and the flat names can align. And `readAuthHint`'s
+  structural cast in `executor-worktree/src/pi-auth.ts`, written against a `runtimeAuth` field that did
+  not exist in the published contract - 0.6.0 declares it on the Job, so the cast can become a plain
+  typed read.
+
 ## [0.1.23] - 2026-07-22
 
 ## [0.1.22] - 2026-07-21
