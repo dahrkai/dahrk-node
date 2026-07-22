@@ -8,6 +8,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **A moved or renamed repo now re-points its bare mirror instead of fetching the stale remote for
+  ever.** The per-repo mirror consulted the Job's `gitUrl` only at first clone; every later refresh
+  fetched whatever `remote.origin.url` the mirror already held, so an org rename, transfer, or host
+  change left it silently fetching the old remote - working only while the host courtesy-redirects the
+  old name. Each refresh now reconciles the mirror's `origin` URL against the Job's `gitUrl` in place
+  (`git remote set-url`, no re-clone) before fetching, and logs the change; a matching URL is left
+  untouched. A brokered (token-user) mirror is compared in its stored form, so it is never needlessly
+  rewritten.
 - **A transient upstream API failure, and a harness-owned watchdog kill, are no longer billed to the
   agent.** When the runtime's stream stalled (a stream idle timeout, an overloaded/529, a 5xx, a 429,
   a gateway timeout, or a connection reset), the node reported a bare `"<stage>: fail"` with no failure
