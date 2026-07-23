@@ -35,6 +35,7 @@ import {
   ManagedMailbox,
   overlayComponents,
   resolveMirrorsDir,
+  runRepoSetup,
   type GitService,
   type PackCache,
   type ReapReport,
@@ -747,6 +748,43 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: agentConfig.runtime, kind: "provision-failed", message: msg });
             deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: msg });
             return finish("fail", `${stageId}: ${msg}`, job.sessionId);
+          }
+        }
+
+        // Per-repo setup step (DHK-731): make the worktree buildable BEFORE the runner starts. The
+        // repo declares a `setup` command (carried on the Job by DHK-729); the node runs it in the
+        // worktree so the agent inherits installed dependencies rather than being handed a bare
+        // checkout it must install itself. Read the field defensively - it is not in the pinned
+        // `@dahrk/contracts` (^0.6.0) yet, the same idiom as `runtimeAuth`/`seedRef` above; drop the
+        // cast once contracts ships `setup`. Absent `setup` -> a no-op, so no new trace events and no
+        // behaviour change. Runs once per worktree: `runRepoSetup` caches on a scratch-dir marker, so a
+        // continuation / re-dispatch onto the sticky worktree does not reinstall.
+        const setup = (job as { setup?: { command?: string } }).setup;
+        if (setup?.command && ref) {
+          const outcome = runRepoSetup({ worktreePath: ref.worktreePath, command: setup.command });
+          if (outcome.status === "failed") {
+            // Fail closed BEFORE the runner is constructed, so the agent never touches a broken tree.
+            // A distinct `setup-failed` kind + `harness` failureClass make it a clean, attributable
+            // pre-agent provisioning failure, mirroring the provision-failed path above.
+            const msg = `repo setup failed (exit ${outcome.exitCode ?? "null"})`;
+            const detail = outcome.output ? `${msg}: ${outcome.output}` : msg;
+            writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: agentConfig.runtime, kind: "setup-failed", message: detail });
+            deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: detail });
+            return finish("fail", `${stageId}: ${msg}`, job.sessionId, undefined, undefined, "harness");
+          }
+          // Fold the outcome into the trace so setup's stdout/exit are observable (acceptance).
+          const detail =
+            outcome.status === "cached"
+              ? "setup: cached (already installed)"
+              : `setup: ran (exit 0, ${outcome.output.length} bytes)`;
+          // `event: "setup"` is not in the pinned `@dahrk/contracts` (^0.6.0) state-event union yet,
+          // so cast the frame the same way the Job fields above are read defensively; drop the cast
+          // once contracts ships the value. The error `kind` below needs no cast (it is an open string).
+          streamEvent(
+            writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "setup", detail } as unknown as TraceEvent),
+          );
+          if (outcome.status === "ran") {
+            deps.sendProgress({ jobId, kind: "observation", ts: nowIso(), text: outcome.output || detail });
           }
         }
 

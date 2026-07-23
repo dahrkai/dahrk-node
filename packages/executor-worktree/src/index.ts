@@ -68,6 +68,11 @@ export type {
 export { overlayComponents } from "./overlay.js";
 export type { OverlayResult, OverlayOptions } from "./overlay.js";
 
+/** The per-repo setup step: run the repo's declared `setup` command in the worktree before the
+ *  agent starts, once per worktree (DHK-731). */
+export { runRepoSetup } from "./repo-setup.js";
+export type { RepoSetupOpts, RepoSetupResult, RepoSetupLogger } from "./repo-setup.js";
+
 export { createMockRunner } from "./mock-runner.js";
 
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
