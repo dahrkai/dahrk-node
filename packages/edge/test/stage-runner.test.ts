@@ -950,6 +950,177 @@ test("action and observation progress frames carry a shared toolUseId through a 
   }
 });
 
+test("a repo `setup` step runs in the worktree before the agent, and is folded into the trace (DHK-731)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-"));
+  const repo = join(root, "repo");
+  const worktrees = join(root, "wt");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+
+  const streamed: TraceEvent[] = [];
+  const sink: TraceSink = {
+    event: (f) => void streamed.push(f.event),
+    finalised: () => undefined,
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: worktrees, mirrorsDir: join(root, "mir") }),
+    makeRunner: createMockRunner,
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+  });
+
+  // The setup command installs deps in-tree (here, leaves a marker file the way `pnpm install` would).
+  const job = {
+    tenantId: "t_default",
+    runId: "run-setup-ok",
+    stageId: "build",
+    jobId: "job-setup-ok",
+    awakeableId: "awk-setup-ok",
+    executorType: "worktree",
+    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    setup: { command: "mkdir -p node_modules && echo done > node_modules/.installed" },
+    timeout: 60,
+  } as unknown as JobRequest;
+
+  try {
+    const result = await runner.runJob(job);
+    assert.equal(result.status, "ok", "the stage succeeds with a buildable tree");
+    assert.ok(
+      existsSync(join(worktrees, "run-setup-ok", "node_modules", ".installed")),
+      "setup ran in the worktree before the agent, so node_modules is present",
+    );
+    assert.ok(
+      streamed.some((e) => e.type === "state" && (e as { event?: string }).event === "setup"),
+      "setup's outcome is folded into the trace as a state event",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-731)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-fail-"));
+  const repo = join(root, "repo");
+  const worktrees = join(root, "wt");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+
+  const streamed: TraceEvent[] = [];
+  const progress: JobProgress[] = [];
+  const sink: TraceSink = {
+    event: (f) => void streamed.push(f.event),
+    finalised: () => undefined,
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+
+  // A runner that would return ok if it ever ran; setup must fail the stage BEFORE it is constructed,
+  // so the agent never touches the broken tree.
+  let ranAgent = false;
+  const makeGuardRunner = (runtime: Runner["runtime"]): Runner => ({
+    runtime,
+    async runBatch() {
+      ranAgent = true;
+      return { status: "ok" };
+    },
+    async runInteractive() {
+      ranAgent = true;
+      return { status: "ok", summary: "n/a" };
+    },
+    async summarise() {
+      return "n/a";
+    },
+    async cancel() {},
+  });
+
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: worktrees, mirrorsDir: join(root, "mir") }),
+    makeRunner: makeGuardRunner,
+    rules: [],
+    sendProgress: (p) => void progress.push(p),
+    trace: sink,
+  });
+
+  const job = {
+    tenantId: "t_default",
+    runId: "run-setup-fail",
+    stageId: "build",
+    jobId: "job-setup-fail",
+    awakeableId: "awk-setup-fail",
+    executorType: "worktree",
+    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    setup: { command: "echo cannot install >&2; exit 1" },
+    timeout: 60,
+  } as unknown as JobRequest;
+
+  try {
+    const result = await runner.runJob(job);
+    assert.equal(result.status, "fail", "a broken setup fails the stage");
+    assert.equal(result.failureClass, "harness", "a pre-agent provisioning failure is the harness's, not the agent's");
+    assert.equal(ranAgent, false, "the agent runner is never constructed on a broken tree");
+    // The distinct `setup-failed` error frame is recorded in the trace archive (like provision-failed /
+    // hook-failed), and surfaced to the hub as a legible progress error - not stumbled into by the agent.
+    const traceLines = execFileSync("grep", ["-rh", "setup-failed", join(worktrees, "run-setup-fail", ".dahrk", "scratch", "traces")], { encoding: "utf8" });
+    assert.match(traceLines, /"kind":"setup-failed"/, "the trace carries a distinct `setup-failed` error kind");
+    assert.ok(
+      progress.some((p) => p.kind === "error" && /repo setup failed/.test(p.text ?? "")),
+      "the failure is surfaced to the hub as a legible progress error",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("no repo `setup` means no setup trace frames and no behaviour change (DHK-731)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-absent-"));
+  const repo = join(root, "repo");
+  const worktrees = join(root, "wt");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+
+  const streamed: TraceEvent[] = [];
+  const sink: TraceSink = {
+    event: (f) => void streamed.push(f.event),
+    finalised: () => undefined,
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: worktrees, mirrorsDir: join(root, "mir") }),
+    makeRunner: createMockRunner,
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+  });
+
+  const job: JobRequest = {
+    tenantId: "t_default",
+    runId: "run-setup-absent",
+    stageId: "build",
+    jobId: "job-setup-absent",
+    awakeableId: "awk-setup-absent",
+    executorType: "worktree",
+    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    timeout: 60,
+  };
+
+  try {
+    const result = await runner.runJob(job);
+    assert.equal(result.status, "ok");
+    // The unchanged event tape: attempt-start + mock (4) + stage-exit = 6, with no setup frame.
+    assert.equal(streamed.length, 6, "no extra frames when setup is absent");
+    assert.ok(!streamed.some((e) => (e as { event?: string }).event === "setup"), "no setup state frame");
+    assert.ok(!streamed.some((e) => (e as { kind?: string }).kind === "setup-failed"), "no setup-failed error frame");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the node MCP gateway starts for both brokered-MCP runtimes (claude-code and pi), not codex (DHK-507)", () => {
   // The gateway holds the brokered token and injects it upstream; a runtime with no MCP client can
   // never route through it. Claude consumes brokered MCP via the SDK, Pi via its extension bridge;

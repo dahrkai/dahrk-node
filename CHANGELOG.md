@@ -6,6 +6,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **A repo can now declare a `setup` step that the node runs in the worktree before the agent starts,
+  so a stage inherits a buildable tree instead of a bare checkout it has to install itself.** After the
+  worktree is created and the `.claude/` overlay applied, and before the runner starts, the node runs
+  the declared setup command inside the worktree and folds its output and exit into the run trace. It
+  runs once per worktree: a continuation or re-dispatch onto the same worktree reuses the installed tree
+  rather than reinstalling. A failing setup fails the stage cleanly with a distinct `setup-failed` error
+  rather than handing the agent a half-built tree. Nothing changes for a repo that declares no `setup`.
+
 ## [0.1.24] - 2026-07-22
 
 ### Changed
