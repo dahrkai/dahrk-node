@@ -19,6 +19,21 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **Comments and fixtures that contradicted the post-rename code (Skakel → Dahrk residue).** The source
+  here migrated some time ago; these were the descriptions of it that did not, so each one misstated
+  what the code does. `stage-complete-tool.ts` described "the in-process `skakel` MCP server" while the
+  exported name is `mcp__dahrk__dahrk_stage_complete`; a pi-container test asserted a container name
+  "starting with `skakel-pi-`" when the source produces `dahrk-pi-`, so the title contradicted its own
+  assertion; and ~40 branch fixtures across `git-service`, `worktree-reaper` and `stage-runner` used the
+  `skakel/` prefix, which are test INPUTS, so they implied a prefix the code has not produced since
+  DHK-332. Comment- and fixture-only; no behaviour change.
+
+  The four ajv `$ref`s at `https://skakel.io/schemas/*` are deliberately untouched: they resolve
+  against the published `@dahrk/contracts`, so they move only once that package ships the new `$id`
+  (DHK-764, blocked on DHK-762/763).
+
 ## [0.1.26] - 2026-07-25
 
 ### Fixed
