@@ -83,11 +83,11 @@ test("the reaper collects a BROKEN worktree and frees the branch name it was hol
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-broken",
-      branch: "skakel/issue-DHK-1",
+      branch: "dahrk/issue-DHK-1",
     });
     // Reproduce the corpse: branch ref deleted under a worktree that was never torn down. HEAD is now
     // unborn, so the worktree is unusable, yet it goes on claiming the branch name for ever.
-    git(mirror, ["update-ref", "-d", "refs/heads/skakel/issue-DHK-1"]);
+    git(mirror, ["update-ref", "-d", "refs/heads/dahrk/issue-DHK-1"]);
     ageBy(ref.worktreePath, 2 * HOUR); // past the activity grace
 
     const reaper = createWorktreeReaper({ worktreesDir, mirrorsDir });
@@ -97,7 +97,7 @@ test("the reaper collects a BROKEN worktree and frees the branch name it was hol
     assert.equal(report.reaped[0]?.reason, "broken");
     assert.ok(!existsSync(ref.worktreePath), "the broken worktree directory is gone");
     const claims = git(mirror, ["worktree", "list", "--porcelain"]);
-    assert.ok(!claims.includes("skakel/issue-DHK-1"), "and its branch claim is gone with it");
+    assert.ok(!claims.includes("dahrk/issue-DHK-1"), "and its branch claim is gone with it");
   } finally {
     for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
   }
@@ -119,7 +119,7 @@ test("the reaper is RESTART-SAFE: a fresh instance collects worktrees a previous
           gitUrl: remote,
           baseBranch: "main",
           runId: `run-old-${n}`,
-          branch: `skakel/issue-DHK-${n}`,
+          branch: `dahrk/issue-DHK-${n}`,
         }),
       );
     }
@@ -147,14 +147,14 @@ test("the reaper never touches a busy run, nor one inside the activity grace", a
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-busy",
-      branch: "skakel/issue-DHK-7",
+      branch: "dahrk/issue-DHK-7",
     });
     const freshRef = await svc.createWorktree({
       repoId: "repo-r3",
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-fresh",
-      branch: "skakel/issue-DHK-8",
+      branch: "dahrk/issue-DHK-8",
     });
     // Busy AND old: still must not be touched (a live stage owns it).
     ageBy(busyRef.worktreePath, 99 * HOUR);
@@ -188,7 +188,7 @@ test("dryRun reports what it would collect and deletes nothing", async () => {
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-dry",
-      branch: "skakel/issue-DHK-11",
+      branch: "dahrk/issue-DHK-11",
     });
     ageBy(ref.worktreePath, 12 * HOUR);
 
@@ -216,7 +216,7 @@ test("over the count cap, the idlest worktrees go first", async () => {
           gitUrl: remote,
           baseBranch: "main",
           runId: `run-c${n}`,
-          branch: `skakel/issue-DHK-2${n}`,
+          branch: `dahrk/issue-DHK-2${n}`,
         }),
       );
     }
@@ -250,10 +250,10 @@ test("the reaper expires a salvage ref parked longer ago than salvageTtlMs", asy
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-salv-1",
-      branch: "skakel/issue-DHK-30",
+      branch: "dahrk/issue-DHK-30",
     });
     const sha = git(mirror, ["rev-parse", "refs/remotes/origin/main"]).trim();
-    const parked = parkSalvageRef(mirror, "skakel/issue-DHK-30", sha);
+    const parked = parkSalvageRef(mirror, "dahrk/issue-DHK-30", sha);
     ageRef(mirror, parked, 30 * DAY); // parked well past a 14-day TTL
     // Keep the worktree out of the way: it is inside the grace, so the worktree sweep leaves it alone.
 
@@ -282,10 +282,10 @@ test("a freshly parked salvage ref survives and is counted (the insurance holds)
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-salv-2",
-      branch: "skakel/issue-DHK-31",
+      branch: "dahrk/issue-DHK-31",
     });
     const sha = git(mirror, ["rev-parse", "refs/remotes/origin/main"]).trim();
-    const parked = parkSalvageRef(mirror, "skakel/issue-DHK-31", sha);
+    const parked = parkSalvageRef(mirror, "dahrk/issue-DHK-31", sha);
     ageRef(mirror, parked, 1 * DAY); // parked recently, well inside a 14-day TTL
 
     const reaper = createWorktreeReaper({ worktreesDir, mirrorsDir });
@@ -310,10 +310,10 @@ test("dryRun expires no salvage ref and still reports it as parked", async () =>
       gitUrl: remote,
       baseBranch: "main",
       runId: "run-salv-3",
-      branch: "skakel/issue-DHK-32",
+      branch: "dahrk/issue-DHK-32",
     });
     const sha = git(mirror, ["rev-parse", "refs/remotes/origin/main"]).trim();
-    const parked = parkSalvageRef(mirror, "skakel/issue-DHK-32", sha);
+    const parked = parkSalvageRef(mirror, "dahrk/issue-DHK-32", sha);
     ageRef(mirror, parked, 30 * DAY); // stale enough to expire, but dryRun must stay its hand
 
     const reaper = createWorktreeReaper({ worktreesDir, mirrorsDir });

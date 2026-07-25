@@ -85,7 +85,7 @@ test("createContainerPiSession: spawns docker run -i --rm with the image and pi 
   assert.deepEqual(last3, ["pi", "--mode", "rpc"], "container command is pi --mode rpc");
 });
 
-test("createContainerPiSession: assigns a container name starting with skakel-pi-", async () => {
+test("createContainerPiSession: assigns a container name starting with dahrk-pi-", async () => {
   const calls: Array<{ cmd: string; args: string[] }> = [];
   const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawn(calls) });
 
