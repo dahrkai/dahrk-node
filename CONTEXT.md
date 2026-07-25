@@ -69,6 +69,23 @@ One dispatch of one stage to one executor - the unit the engine hands to a node,
 `jobId`. The load-bearing seam between engine and executor.
 _Avoid_: Turn (deprecated), task, message.
 
+**Check stage**:
+A stage that runs named deterministic commands in the worktree, where the **exit code is the verdict**.
+It has no runtime, no model and no cost, but it is still dispatched to a node because it needs the
+worktree. It is the determinism boundary applied to verdicts rather than only to routing: "the tests
+pass" becomes a fact instead of an inference an agent makes about its own work. A workflow names checks;
+the repo's declared **check map** says what each name runs, so a central workflow stays
+language-agnostic.
+_Avoid_: Test stage, lint stage, hook (a hook is workflow-level and has no id, gate or `goto` target),
+gate (a gate is a human pause).
+
+**Check**:
+One named command in a repo's check map (`lint`, `typecheck`, `test`, a security scan, a formatter in
+`--check` mode). Every check a stage declares runs even after one fails, so a single loop-back carries
+every defect. Each yields one **verification** (`passed` / `failed` / `skipped`).
+_Avoid_: Expected check (that is the CI check set a repo declares it expects to observe on a PR - a
+different concept with a confusingly similar name).
+
 **Attempt**:
 One (re-)dispatch of a stage. A re-run writes `attempt-<n>/`; earlier attempts are never clobbered.
 _Avoid_: Retry, try.
