@@ -6,6 +6,20 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **Check stages: deterministic quality gates the node runs in the worktree, where the exit code is
+  the verdict.** A workflow stage may now declare `check: [lint, typecheck, test]` and no runtime. The
+  node runs each named command in the run's shared worktree and reports a pass or fail per check, so
+  "the tests pass" becomes a fact rather than something an agent was asked to judge about its own work.
+  Commands are declared per repository, so a workflow names what to check and the repository says how,
+  and the same workflow works on a TypeScript repo and a Python one. Every declared check runs even
+  after one fails, so a single loop back to the build stage carries every defect rather than one per
+  round trip. When a check fails, the node writes a per-attempt note to
+  `.dahrk/scratch/checks/<stage>-<attempt>.md` holding each command, its exit code and its captured
+  output, and the agent the run loops back to is told which checks failed and where to read the detail.
+  A check stage runs no model, so it costs nothing.
+
 ## [0.1.25] - 2026-07-23
 
 ### Added

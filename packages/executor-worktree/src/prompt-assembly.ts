@@ -144,6 +144,38 @@ function gateFeedbackBlock(ctx: RunnerContext): string {
 }
 
 /**
+ * Build the `<check-failures>` block: WHY this agent is running again.
+ *
+ * Without it the loop is blind. `stageInstruction` returns the stage's STATIC prompt, nothing else
+ * injects a re-entry note, and no other block points at `.dahrk/scratch/checks/`. An agent looped back
+ * by a failing lint would otherwise rebuild identically until the `on_fail` bound ran out and the run
+ * died - the exact failure a check stage exists to prevent.
+ *
+ * Every check is listed, passed ones included, so the agent sees the whole picture rather than a list
+ * of complaints. The captured output is deliberately NOT here: it can be tens of kilobytes, so the
+ * block points at the per-attempt note in the worktree instead.
+ *
+ * Nothing needs defanging: every value is engine-authored (a check name from the repo's config, a
+ * status from a closed enum, a stage id), never agent or human prose.
+ */
+function checkFailuresBlock(ctx: RunnerContext): string {
+  const failures = ctx.checkFailures;
+  if (!failures) return "";
+  const { stageId, attempt, verifications } = failures;
+  if (verifications.length === 0) return "";
+  const safeStage = stageId.replace(/[^A-Za-z0-9._-]/g, "-");
+  const rows = verifications
+    .map((v) => `  ${v.name}: ${v.status === "failed" ? "FAILED" : v.status}`)
+    .join("\n");
+  return (
+    `<check-failures stage="${stageId.replace(/[<>"]/g, "'")}" attempt="${attempt}">\n` +
+    `${rows}\n` +
+    `  Full output: .dahrk/scratch/checks/${safeStage}-${attempt}.md\n` +
+    `</check-failures>`
+  );
+}
+
+/**
  * Resolve the prompt an adapter sends for a stage: the stage instruction (from a `prompt_file`,
  * inline `prompt`, `skill`, or the default), with the run's Linear ticket brief prepended as a
  * delimited `<ticket>` block, the run's workspace/team guidance as a `<guidance>` block, and any
@@ -160,8 +192,11 @@ export function resolveStagePrompt(ctx: RunnerContext): string {
   const gateFeedback = gateFeedbackBlock(ctx);
   const docs = documentsBlock(ctx);
   // Guidance sits right after the ticket (workspace direction); gate feedback follows it (run-specific
-  // approving-with-guidance), both ahead of any attached documents.
-  const preamble = [ticket, guidance, gateFeedback, docs].filter(Boolean).join("\n\n");
+  // approving-with-guidance), both ahead of any attached documents. Check failures come LAST, closest
+  // to the instruction: it is the most immediate, most actionable context the agent has, and it is the
+  // reason this stage is running at all.
+  const checkFailures = checkFailuresBlock(ctx);
+  const preamble = [ticket, guidance, gateFeedback, docs, checkFailures].filter(Boolean).join("\n\n");
   return preamble ? `${preamble}\n\n${instruction}` : instruction;
 }
 
@@ -175,6 +210,7 @@ export function hasSystemPrompt(ctx: RunnerContext): boolean {
       ctx.issueContext?.trim() ||
       (ctx.guidance && ctx.guidance.length > 0) ||
       (ctx.gateFeedback && ctx.gateFeedback.length > 0) ||
+      Boolean(ctx.checkFailures) ||
       (ctx.attachedDocuments && ctx.attachedDocuments.length > 0),
   );
 }

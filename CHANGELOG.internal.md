@@ -19,6 +19,48 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`runRepoSetup` had never executed in production (DHK-729/731).** The hub attaches the resolved
+  setup step at `workspaceRef.setup`, and `@dahrk/contracts` declares it there, but the node read
+  `(job as { setup?: ... }).setup` - the Job ROOT, where nothing ever sets it. `undefined?.command` is
+  merely falsy, so setup silently never ran: no trace event, no warning, and both tickets marked done.
+  The `as` cast is what hid it, defeating the compiler on exactly the seam it exists to guard, and the
+  node's own tests set `setup` at the root too, so the bug was invisible to CI. The read is now
+  `job.workspaceRef?.setup` and the two DHK-731 tests carry the real wire shape, so they exercise the
+  feature for the first time.
+- **`JobResult.verifications` had no producer (DHK-666).** The contract, the projection fold, the Card
+  renderer and the tests all shipped, but `finish()` in the stage runner builds its result object
+  field by field and never forwarded the key. Now forwarded for every stage, not just check jobs, so a
+  stage-exit hook or an agent-run gate can populate it too.
+
+### Added
+
+- **`createCheckRunner` (DHK check stages).** Implements the `Runner` port, so the stage wall clock,
+  `cancel()`, the trace writer, progress streaming and `finish()` all work unmodified -
+  `createMockRunner` is the precedent for an LLM-free runner. Uses `spawn` with streaming capture
+  rather than the `execFileSync` the setup and hook paths use: a check stage runs `pnpm test`, and
+  blocking the event loop for minutes would stop the WebSocket heartbeat (so the hub's lease reaper
+  would read this node as dead), stop progress and trace streaming, and stall every other run sharing
+  the node. Reports `runtime: "check"` in the trace rather than impersonating an agent runtime.
+- **`hello.capabilities`.** The node advertises `["check"]`, and the hub default-denies a check job to
+  any node that does not. This is a safety gate, not an optimisation: `makeRunner()` falls through to
+  Claude rather than erroring on an unknown job shape, so an older client handed a check job would boot
+  an unbounded write-access agent with the `"Begin the stage."` fallback instruction, report `ok`, and
+  let the run reach deliver green having run no checks at all.
+
+### Changed
+
+- **The batch stall watchdog is disabled for a check job.** `bumpStall` is only called from `onTrace`,
+  and a check emits nothing between a command's `action` and its `observation`, so any check slower
+  than the 300s default would have been cancelled as stalled - `pnpm test` on a real repo. The bounds
+  are the per-check `timeoutSeconds` and the stage's own `timeout_seconds`.
+- **`runner.summarise()` is not an inference call for a check job.** It is unconditional on an ok batch
+  stage, so without the check runner's own deterministic summary a check stage would have spent a real,
+  billed model turn describing a lint run - and stopped being a zero-cost stage.
+- **Take `@dahrk/contracts` `^0.8.2`** for the check Job shape, `hello.capabilities`,
+  `CheckFailureContext` and the widened `Runner.runtime` / `TraceRuntime`.
+
 ## [0.1.25] - 2026-07-23
 
 ### Changed
