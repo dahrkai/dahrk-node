@@ -75,6 +75,10 @@ export type { RepoSetupOpts, RepoSetupResult, RepoSetupLogger } from "./repo-set
 
 export { createMockRunner } from "./mock-runner.js";
 
+// The deterministic quality gate: named commands in the worktree, exit code as the verdict.
+export { createCheckRunner, summariseChecks, renderCheckNote, safeStageSegment } from "./check-runner.js";
+export type { CheckOutcome } from "./check-runner.js";
+
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
 export { createClaudeRunner } from "./claude-adapter.js";
 /** The Pi runtime adapter: the model-agnostic runtime for the managed node. */

@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
-import type { CredentialMode, EdgeToHub, HubToEdge, NodeErrorClass, Runtime } from "@dahrk/contracts";
+import type { CredentialMode, EdgeToHub, HubToEdge, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, HealthCounters } from "./health.js";
@@ -44,6 +44,10 @@ export const ENROLMENT_REJECTED_EXIT_CODE = 78;
  *  and is closed again has not succeeded at anything, so only an accepted enrolment clears the backoff. */
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 30_000;
+
+/** What this build can do beyond running an agent runtime. Advertised on `hello` so the hub can
+ *  default-deny a job kind an older client would silently mishandle. */
+const NODE_CAPABILITIES: NodeCapability[] = ["check"];
 
 /** How often a PARKED node re-reads its token. Slow on purpose: nothing is dialled and no socket is held
  *  while parked, so this is the whole cost of waiting, and re-enrolment is a human-speed act. */
@@ -449,6 +453,12 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       os: osPlatform(),
       arch: osArch(),
       clientVersion: opts.clientVersion ?? "0.0.0",
+      // Non-runtime job kinds this build can execute. The hub REFUSES to place a check job on a node
+      // that does not advertise `check`, and that refusal is a safety gate rather than an optimisation:
+      // `makeRunner()` defaults to Claude rather than erroring on an unknown job shape, so an old client
+      // handed a check job would boot an unbounded write-access agent with the fallback instruction
+      // "Begin the stage.", report ok, and let the run reach deliver green having run no checks.
+      capabilities: NODE_CAPABILITIES,
       // Advertise the resolved worktree base so the hub records each run's real worktree location in
       // the projection instead of an advisory placeholder. Single-sourced from the git service so it
       // always matches where worktrees actually land.

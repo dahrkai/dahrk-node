@@ -299,3 +299,56 @@ test("the prompt's scratch-file pointer matches the edge's sanitised basename", 
   assert.match(out, /file=".dahrk\/scratch\/docs\/evil-id-\.md"/);
   assert.doesNotMatch(out, /\.\.\//);
 });
+
+// The <check-failures> block: WHY the agent is running again. Without it the loop is blind -
+// `stageInstruction` returns the stage's STATIC prompt, and an agent looped back by a failing lint
+// would rebuild identically until the on_fail bound ran out.
+const withFailures = (): RunnerContext =>
+  ({
+    config: { runtime: "claude-code", prompt: "Implement the ticket." },
+    workspace: { worktreePath: "/tmp/x", scratchPath: "/tmp/x/.dahrk/scratch" } as WorkspaceRef,
+    checkFailures: {
+      stageId: "verify",
+      attempt: 2,
+      verifications: [
+        { name: "lint", status: "failed" },
+        { name: "typecheck", status: "failed" },
+        { name: "test", status: "passed" },
+      ],
+    },
+  }) as RunnerContext;
+
+test("a looped-back stage is told which checks failed and where the full output is", () => {
+  const prompt = resolveStagePrompt(withFailures());
+  assert.match(prompt, /<check-failures stage="verify" attempt="2">/);
+  assert.match(prompt, /lint: FAILED/);
+  assert.match(prompt, /typecheck: FAILED/);
+  // Passed checks travel too, so the agent sees the whole picture, not just a list of complaints.
+  assert.match(prompt, /test: passed/);
+  assert.match(prompt, /Full output: \.dahrk\/scratch\/checks\/verify-2\.md/);
+});
+
+test("the check-failures block sits closest to the instruction, as the most actionable context", () => {
+  const prompt = resolveStagePrompt(withFailures());
+  assert.ok(
+    prompt.indexOf("<check-failures") < prompt.indexOf("Implement the ticket."),
+    "block precedes the instruction",
+  );
+  assert.ok(
+    prompt.indexOf("</check-failures>") > prompt.indexOf("<check-failures"),
+    "block is well formed",
+  );
+});
+
+test("no check failure means no block at all (the common case is untouched)", () => {
+  const clean = {
+    config: { runtime: "claude-code", prompt: "Implement the ticket." },
+    workspace: { worktreePath: "/tmp/x", scratchPath: "/tmp/x/.dahrk/scratch" } as WorkspaceRef,
+  } as RunnerContext;
+  assert.equal(resolveStagePrompt(clean), "Implement the ticket.");
+  assert.doesNotMatch(resolveStagePrompt(clean), /check-failures/);
+});
+
+test("an outstanding check failure is enough to warrant a system prompt", () => {
+  assert.equal(hasSystemPrompt(withFailures()), true);
+});

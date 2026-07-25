@@ -21,15 +21,23 @@ import type {
   JobStatus,
   PushJob,
   PushResult,
+  AgentConfig,
+  ResolvedCheck,
   Runner,
   RunnerContext,
+  Runtime,
+  StageVerification,
   TraceEvent,
   TraceMeta,
+  TraceRuntime,
   WorkspaceRef,
 } from "@dahrk/contracts";
 import type { PolicyOutcome } from "@dahrk/contracts";
-import { attachedDocBasename } from "@dahrk/contracts";
+import { attachedDocBasename, isCheckJob } from "@dahrk/contracts";
 import {
+  createCheckRunner,
+  renderCheckNote,
+  safeStageSegment,
   createTraceWriter,
   createWorktreeReaper,
   ManagedMailbox,
@@ -38,6 +46,7 @@ import {
   runRepoSetup,
   type GitService,
   type PackCache,
+  type CheckOutcome,
   type ReapReport,
 } from "@dahrk/executor-worktree";
 import { buildRules } from "./builtins.js";
@@ -85,7 +94,11 @@ export interface TraceSink {
 
 export interface StageRunnerDeps {
   gitService: GitService;
-  makeRunner: (runtime: Runner["runtime"]) => Runner;
+  makeRunner: (runtime: Runtime) => Runner;
+  /** Builds the deterministic check runner. Injectable so a test can substitute one; defaults to the
+   *  real `createCheckRunner`. Separate from `makeRunner` because that switches on a vendor agent
+   *  runtime and has no access to the Job's resolved checks. */
+  makeCheckRunner?: (checks: readonly ResolvedCheck[], onOutcomes?: (o: CheckOutcome[]) => void) => Runner;
   /** The node's logger. Absent (tests, embedders) = a silent logger, so the runner stays quiet by
    *  default. Used to surface the best-effort paths below, which used to fail invisibly. */
   logger?: NodeLogger;
@@ -279,6 +292,32 @@ function writeGuidance(ref: WorkspaceRef, guidance: JobRequest["guidance"]): voi
     writeFileSync(join(ref.scratchPath, "guidance.md"), renderGuidanceMarkdown(guidance));
   } catch {
     /* best-effort; the guidance still reaches the agent via the stage prompt */
+  }
+}
+
+/**
+ * Write the check note into the shared worktree: the durable, full-fidelity record of what each check
+ * ran and what it printed.
+ *
+ * Attempt-scoped (`<stageId>-<attempt>.md`), mirroring the trace writer. A bare `<stageId>.md` would
+ * let attempt 2 clobber attempt 1, destroying the evidence from the failure that caused the loop.
+ *
+ * Written on success as well as failure, so "did this run and pass" is answerable from the worktree.
+ * `.dahrk/scratch` is in the worktree-local git excludes, so `deliver` never commits it.
+ */
+function writeCheckNote(
+  ref: WorkspaceRef,
+  stageId: string,
+  attempt: number,
+  outcomes: readonly CheckOutcome[],
+): void {
+  if (outcomes.length === 0) return;
+  try {
+    const dir = join(ref.scratchPath, "checks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${safeStageSegment(stageId)}-${attempt}.md`), renderCheckNote(stageId, attempt, outcomes));
+  } catch {
+    /* best-effort, like every other scratch writer: the verdict still reaches the engine on the result */
   }
 }
 
@@ -512,7 +551,12 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
     },
 
     async runJob(job) {
-      const { stageId, jobId, runId, agentConfig } = job;
+      const { stageId, jobId, runId } = job;
+      // A check job carries no `agentConfig` (no runtime, model or prompt). Everything that reads it
+      // below is agent-only and guarded; `traceRuntime` is what the trace record shows either way.
+      const isCheck = isCheckJob(job);
+      const agentConfig = job.agentConfig;
+      const traceRuntime: TraceRuntime = isCheck ? "check" : agentConfig!.runtime;
       const attempt = attemptOf(jobId);
 
       // Defence in depth: a tenant-bound node refuses a Job for another tenant. The hub's
@@ -586,12 +630,12 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         writeAttachedDocuments(ref, job.attachedDocuments);
         // Pre-create the parent of a declared output artifact so the agent's relative write succeeds
         // even if it does not mkdir first.
-        if (job.agentConfig.emitArtifact) {
-          const artifactDir = resolveWorktreeRelativePath(ref, job.agentConfig.emitArtifact);
-          const slash = job.agentConfig.emitArtifact.lastIndexOf("/");
+        if (agentConfig?.emitArtifact) {
+          const artifactDir = resolveWorktreeRelativePath(ref, agentConfig.emitArtifact);
+          const slash = agentConfig.emitArtifact.lastIndexOf("/");
           if (artifactDir && slash > 0) {
             try {
-              mkdirSync(join(ref.worktreePath, job.agentConfig.emitArtifact.slice(0, slash)), { recursive: true });
+              mkdirSync(join(ref.worktreePath, agentConfig.emitArtifact.slice(0, slash)), { recursive: true });
             } catch {
               /* best-effort; the agent can still create the directory itself */
             }
@@ -609,10 +653,10 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           stageId,
           jobId,
           attempt,
-          runtime: agentConfig.runtime,
-          model: agentConfig.model,
+          runtime: traceRuntime,
+          model: agentConfig?.model,
           sessionId: job.sessionId,
-          configDigest: digest(agentConfig),
+          configDigest: digest(isCheck ? job.checks : agentConfig),
           startedAt: nowIso(),
         };
         const writer = createTraceWriter(ref.scratchPath, meta);
@@ -622,7 +666,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         const streamEvent = (e: TraceEvent): void =>
           deps.trace?.event({ runId, stageId, attempt, tenantId: job.tenantId, event: e });
         streamEvent(
-          writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "attempt-start" }),
+          writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "attempt-start" }),
         );
 
         // At stage exit: upload heavy spilled blobs + the finalised trace.jsonl archive to
@@ -664,6 +708,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           costUsd?: number,
           handedBackDoc?: { path: string; content: string },
           failureClass?: FailureClass,
+          verifications?: StageVerification[],
         ): Promise<JobResult> => {
           active.delete(jobId);
           turnQueues.delete(jobId);
@@ -672,7 +717,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           await gateway?.stop().catch((e: unknown) => log.warn({ err: e, jobId }, "mcp gateway: stop failed"));
           gateway = undefined;
           streamEvent(
-            writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "stage-exit", status }),
+            writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "stage-exit", status }),
           );
           const endedAt = nowIso();
           writer.finalise({ status, endedAt, ...(sessionId ? { sessionId } : {}) });
@@ -699,17 +744,17 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // `dahrk_stage_complete`) and succeeded, resolve it from whichever channel produced content
           // so the engine can publish it (e.g. the `attach-document` action). Read-only; a miss returns
           // undefined and the action surfaces the absence. Ordinary code/build stages are not scanned.
-          const wantsArtifact = agentConfig.emitArtifact !== undefined || handedBackDoc !== undefined;
+          const wantsArtifact = agentConfig?.emitArtifact !== undefined || handedBackDoc !== undefined;
           const resolved =
             status === "ok" && wantsArtifact
-              ? resolveStageArtifact(ref!, agentConfig.emitArtifact, handedBackDoc)
+              ? resolveStageArtifact(ref!, agentConfig?.emitArtifact, handedBackDoc)
               : undefined;
           if (status === "ok" && wantsArtifact) {
             const detail = resolved
               ? `source=${resolved.source} path=${resolved.artifact.path} bytes=${resolved.artifact.content.length}`
               : "no document resolved (declared path, tool handoff, and scratch/changed-file scans all empty)";
             streamEvent(
-              writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "artifact", detail }),
+              writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "artifact", detail }),
             );
           }
           return {
@@ -720,6 +765,11 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             ...(costUsd !== undefined ? { costUsd } : {}),
             ...(resolved ? { artifact: resolved.artifact } : {}),
             ...(failureClass ? { failureClass } : {}),
+            // DHK-666: `JobResult.verifications` shipped with a contract, a projection fold, a Card
+            // renderer and tests - but this object never forwarded it, which is the entire reason the
+            // field has had no producer. Forwarded for EVERY stage, not just check jobs, so a hook or
+            // an agent-run gate can populate it too.
+            ...(verifications?.length ? { verifications } : {}),
           };
         };
 
@@ -732,20 +782,20 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           try {
             const overlay = await overlayComponents({
               worktreePath: ref.worktreePath,
-              runtime: agentConfig.runtime,
+              runtime: agentConfig!.runtime,
               components: job.provision,
               cache: deps.packCache,
             });
             const detail = `provision: ${overlay.written.length} written, ${overlay.skippedRepoLocal.length} repo-local, ${overlay.warnings.length} warning(s)`;
             streamEvent(
-              writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "provision", detail }),
+              writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "provision", detail }),
             );
             // Surface the summary (and any Codex warnings) to the hub so the overlay is observable.
             const noteText = overlay.warnings.length > 0 ? `${detail}; ${overlay.warnings.join("; ")}` : detail;
             deps.sendProgress({ jobId, kind: "observation", ts: nowIso(), text: noteText });
           } catch (e) {
             const msg = `component provisioning failed: ${(e as Error).message}`;
-            writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: agentConfig.runtime, kind: "provision-failed", message: msg });
+            writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "provision-failed", message: msg });
             deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: msg });
             return finish("fail", `${stageId}: ${msg}`, job.sessionId);
           }
@@ -759,7 +809,13 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // cast once contracts ships `setup`. Absent `setup` -> a no-op, so no new trace events and no
         // behaviour change. Runs once per worktree: `runRepoSetup` caches on a scratch-dir marker, so a
         // continuation / re-dispatch onto the sticky worktree does not reinstall.
-        const setup = (job as { setup?: { command?: string } }).setup;
+        // DHK-729/731 was DEAD IN PRODUCTION until this line was fixed. The hub attaches the resolved
+        // setup step at `workspaceRef.setup` (intake.ts), and `@dahrk/contracts` declares it there - but
+        // this read was `(job as { setup?: ... }).setup`, i.e. the Job ROOT, where nothing ever sets it.
+        // `undefined?.command` is merely falsy, so setup silently never ran: no trace event, no warning.
+        // The `as` cast is what hid it, defeating the compiler on exactly the seam it exists to guard,
+        // and the node's own test set `setup` at the root too, so the bug was invisible to CI.
+        const setup = job.workspaceRef?.setup;
         if (setup?.command && ref) {
           const outcome = runRepoSetup({ worktreePath: ref.worktreePath, command: setup.command });
           if (outcome.status === "failed") {
@@ -768,7 +824,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             // pre-agent provisioning failure, mirroring the provision-failed path above.
             const msg = `repo setup failed (exit ${outcome.exitCode ?? "null"})`;
             const detail = outcome.output ? `${msg}: ${outcome.output}` : msg;
-            writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: agentConfig.runtime, kind: "setup-failed", message: detail });
+            writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "setup-failed", message: detail });
             deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: detail });
             return finish("fail", `${stageId}: ${msg}`, job.sessionId, undefined, undefined, "harness");
           }
@@ -781,7 +837,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // so cast the frame the same way the Job fields above are read defensively; drop the cast
           // once contracts ships the value. The error `kind` below needs no cast (it is an open string).
           streamEvent(
-            writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "setup", detail } as unknown as TraceEvent),
+            writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "setup", detail } as unknown as TraceEvent),
           );
           if (outcome.status === "ran") {
             deps.sendProgress({ jobId, kind: "observation", ts: nowIso(), text: outcome.output || detail });
@@ -809,7 +865,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // Policy at stage entry.
         const entry = evaluatePolicies({ kind: "stage-entry", stageId }, rules);
         if (entry.verdict === "deny") {
-          writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: agentConfig.runtime, event: "policy-deny", detail: entry.reason });
+          writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "policy-deny", detail: entry.reason });
           return finish("fail", `${stageId}: denied at stage entry (${entry.policy})`, job.sessionId);
         }
 
@@ -828,7 +884,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // pre-denied tool can still surface an action event here, and that must NOT fail the stage.
         let escapedUnblocked = false;
         const authorisedActions: string[] = [];
-        const runtime = agentConfig.runtime;
+        const runtime = agentConfig?.runtime;
         const actionKey = (tool: string, input: unknown): string => {
           try {
             return `${tool}\0${JSON.stringify(input)}`;
@@ -841,9 +897,9 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           denied = true;
           const reason = policyReason(verdict);
           if (toolUseId) {
-            streamEvent(writer.append({ seq: 0, ts: nowIso(), type: "observation", runtime, toolUseId, isError: true, output: { error: reason } }));
+            streamEvent(writer.append({ seq: 0, ts: nowIso(), type: "observation", runtime: traceRuntime, toolUseId, isError: true, output: { error: reason } }));
           }
-          streamEvent(writer.append({ seq: 0, ts: nowIso(), type: "state", runtime, event: "policy-deny", detail: reason }));
+          streamEvent(writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "policy-deny", detail: reason }));
           const surfaceKey = `${verdict.policy}\0${reason}`;
           if (!surfacedDenyReasons.has(surfaceKey)) {
             surfacedDenyReasons.add(surfaceKey);
@@ -892,20 +948,34 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // DHK-507). Codex is excluded - its SDK has no MCP, so a proxy would be dead weight (the codex
         // adapter logs and ignores declared servers). The gateway holds the token and injects it
         // upstream, so the agent never sees the raw secret (`mcpProxyBaseUrl` seam) regardless of runtime.
-        const mcpServers = agentConfig.mcpServers;
-        if (mcpServers && mcpServers.length > 0 && runtimeUsesMcpGateway(runtime)) {
+        const mcpServers = agentConfig?.mcpServers;
+        if (runtime && mcpServers && mcpServers.length > 0 && runtimeUsesMcpGateway(runtime)) {
           gateway = await startMcpGateway({ servers: mcpServers, creds: job.brokeredCreds ?? {} });
         }
 
-        const runner = deps.makeRunner(runtime);
+        // A check stage runs deterministic commands, not an agent. Everything agent-shaped above is
+        // already inert for it (it declares no mcpServers, no provision, no emitArtifact); this is the
+        // one place the two paths genuinely diverge.
+        let checkOutcomes: CheckOutcome[] = [];
+        const runner = isCheck
+          ? (deps.makeCheckRunner ?? createCheckRunner)(job.checks, (o) => {
+              checkOutcomes = o;
+            })
+          : deps.makeRunner(runtime!);
         active.set(jobId, runner);
         const ctx: PolicyAwareRunnerContext = {
-          config: agentConfig,
+          // A check runner reads only `workspace.worktreePath`; the empty config keeps the shared
+          // RunnerContext shape without inventing a runtime the stage does not have.
+          config: agentConfig ?? ({ runtime: "claude-code" } as AgentConfig),
           workspace: ref,
           sessionId: job.sessionId,
           ...(job.issueContext !== undefined ? { issueContext: job.issueContext } : {}),
           ...(job.guidance !== undefined ? { guidance: job.guidance } : {}),
           ...(job.gateFeedback !== undefined ? { gateFeedback: job.gateFeedback } : {}),
+          // Why this stage is running again, when it is. Without this passthrough the failing checks
+          // reach the node and stop dead here, and the looped-back agent gets the stage's static prompt
+          // with no hint of what it is meant to fix.
+          ...(job.checkFailures !== undefined ? { checkFailures: job.checkFailures } : {}),
           ...(job.attachedDocuments !== undefined ? { attachedDocuments: job.attachedDocuments } : {}),
           ...(gateway ? { mcpProxyBaseUrl: gateway.baseUrl } : {}),
           // brokered inference env for a managed node (no operator login). The runtime adapter
@@ -940,7 +1010,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         };
         // Interactive stages run a multi-turn conversation fed by relayed human turns (M5b);
         // batch stages run to a terminal result. Both emit through the same onTrace.
-        const interactive = agentConfig.interaction === "interactive";
+        const interactive = agentConfig?.interaction === "interactive";
         let result: Omit<JobResult, "jobId" | "summary"> & { summary?: string };
         // Wall-clock kill (the contract `JobRequest.timeout` promises "on expiry the executor kills the
         // runner; the engine marks the stage timeout"). Enforce it here so it covers batch AND interactive
@@ -978,7 +1048,10 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         const stallSource =
           (agentConfig as { stallMs?: number }).stallMs ??
           Number(process.env.DAHRK_BATCH_STALL_MS ?? process.env.SKAKEL_BATCH_STALL_MS ?? 300_000);
-        const stallMs = interactive ? 0 : Math.max(0, Math.floor(stallSource));
+        // A check stage streams nothing while a command runs (no per-token trace), so the output-idle
+        // watchdog would kill any check slower than the 300s default - `pnpm test` on a real repo.
+        // Its bounds are the per-check `timeoutSeconds` and the stage's own `timeout_seconds`.
+        const stallMs = interactive || isCheck ? 0 : Math.max(0, Math.floor(stallSource));
         if (stallMs > 0) {
           bumpStall = (): void => {
             if (stallTimer) clearTimeout(stallTimer);
@@ -1020,7 +1093,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         if (status === "ok" && escapedUnblocked) {
           status = "fail";
           const msg = `stage reached outside the run's worktree and the ${runtime} runtime could not block it before it ran`;
-          writer.append({ seq: 0, ts: nowIso(), type: "error", runtime, kind: "fs-confine-escape", message: msg });
+          writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "fs-confine-escape", message: msg });
           deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: msg });
         }
 
@@ -1031,7 +1104,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
               execFileSync("sh", ["-c", cmd], { cwd: ref.worktreePath, stdio: ["pipe", "pipe", "pipe"] });
             } catch (e) {
               status = "fail";
-              writer.append({ seq: 0, ts: nowIso(), type: "error", runtime, kind: "hook-failed", message: `hook "${cmd}" failed: ${(e as Error).message}` });
+              writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "hook-failed", message: `hook "${cmd}" failed: ${(e as Error).message}` });
               break;
             }
           }
@@ -1047,6 +1120,9 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         }
         if (!interactive && status === "ok") {
           try {
+            // For a check job this is the runner's own deterministic one-liner, not an inference call:
+            // `createCheckRunner.summarise` returns the precomputed text. That is what keeps a check
+            // stage genuinely zero-cost rather than quietly spending a summarisation turn on eslint.
             summary = await runner.summarise(ctx);
           } catch {
             /* keep the fallback summary; a summarise failure must not fail an ok stage */
@@ -1065,7 +1141,20 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         const failureClass: FailureClass | undefined =
           timedOut || stalled ? "harness" : result.failureClass;
 
-        return finish(status, summary, result.sessionId ?? job.sessionId, result.costUsd, result.artifact, failureClass);
+        // The engine-authored handoff note: per-check command, exit code and captured output, in the
+        // shared worktree where the next stage's agent can read it. Attempt-scoped, so a loop-back never
+        // clobbers the evidence from the previous attempt.
+        if (isCheck && ref) writeCheckNote(ref, stageId, attempt, checkOutcomes);
+
+        return finish(
+          status,
+          summary,
+          result.sessionId ?? job.sessionId,
+          result.costUsd,
+          result.artifact,
+          failureClass,
+          result.verifications,
+        );
       } finally {
         inFlight.set(runId, Math.max(0, (inFlight.get(runId) ?? 1) - 1));
       }

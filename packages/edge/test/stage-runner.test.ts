@@ -981,8 +981,14 @@ test("a repo `setup` step runs in the worktree before the agent, and is folded i
     awakeableId: "awk-setup-ok",
     executorType: "worktree",
     agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
-    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
-    setup: { command: "mkdir -p node_modules && echo done > node_modules/.installed" },
+    // `setup` rides the WorkspaceRef, which is where the hub attaches it and where
+    // `@dahrk/contracts` declares it. Setting it at the Job ROOT (as this test used to) is what
+    // kept DHK-731 dead in production invisible to CI: the node read the root too, and
+    // `undefined?.command` is merely falsy.
+    workspaceRef: {
+      repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "",
+      setup: { command: "mkdir -p node_modules && echo done > node_modules/.installed" },
+    },
     timeout: 60,
   } as unknown as JobRequest;
 
@@ -1052,8 +1058,14 @@ test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-
     awakeableId: "awk-setup-fail",
     executorType: "worktree",
     agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
-    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
-    setup: { command: "echo cannot install >&2; exit 1" },
+    // `setup` rides the WorkspaceRef, which is where the hub attaches it and where
+    // `@dahrk/contracts` declares it. Setting it at the Job ROOT (as this test used to) is what
+    // kept DHK-731 dead in production invisible to CI: the node read the root too, and
+    // `undefined?.command` is merely falsy.
+    workspaceRef: {
+      repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "",
+      setup: { command: "echo cannot install >&2; exit 1" },
+    },
     timeout: 60,
   } as unknown as JobRequest;
 
