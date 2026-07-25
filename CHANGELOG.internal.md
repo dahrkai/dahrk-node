@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-07-25
+
 ### Fixed
 
 - **`runRepoSetup` had never executed in production (DHK-729/731).** The hub attaches the resolved
