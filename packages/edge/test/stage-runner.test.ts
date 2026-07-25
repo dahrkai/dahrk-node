@@ -749,7 +749,7 @@ const mkPushJob = (over: Partial<PushJob> & { mode?: "deliver" | "backup" }): Pu
   jobId: "job-push-1",
   awakeableId: "awk-push",
   workspaceRef: { repoId: "repo", gitUrl: "u", repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
-  branch: "skakel/issue-PUSH",
+  branch: "dahrk/issue-PUSH",
   base: "main",
   message: "deliver",
   ...over,
@@ -760,7 +760,7 @@ test("runPush mode:backup routes to backupPush on the sticky worktree and return
   const runner = createStageRunner({ gitService: svc as never, makeRunner: createMockRunner, rules: [], sendProgress: () => undefined });
 
   // A first deliver push seeds the run's sticky worktree (via the createWorktree fallback).
-  await runner.runPush(mkPushJob({ jobId: "job-deliver", branch: "skakel/issue-PUSH" }));
+  await runner.runPush(mkPushJob({ jobId: "job-deliver", branch: "dahrk/issue-PUSH" }));
   assert.ok(calls.some((c) => c.method === "commitAndPush"), "deliver took the commitAndPush path");
 
   // The backup push reuses that worktree and force-preserves HEAD on the wip ref - no commitAndPush.
@@ -833,7 +833,7 @@ test("DHK-371: a job that throws before `finish` must not leave the run marked b
   const exploding = {
     ...gitService,
     createWorktree: async () => {
-      throw new Error("fatal: 'skakel/issue-DHK-1' is already used by worktree at /somewhere/stale");
+      throw new Error("fatal: 'dahrk/issue-DHK-1' is already used by worktree at /somewhere/stale");
     },
   };
 

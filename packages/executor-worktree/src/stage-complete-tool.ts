@@ -12,7 +12,7 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-/** The fully-qualified tool name the SDK exposes for the in-process `skakel` MCP server. */
+/** The fully-qualified tool name the SDK exposes for the in-process `dahrk` MCP server. */
 export const STAGE_COMPLETE_TOOL_NAME = "mcp__dahrk__dahrk_stage_complete";
 
 export interface StageCompleteTool {
