@@ -6,6 +6,19 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **An interactive stage was being told it could not write files, which was no longer true.** The
+  description of the injected `dahrk_stage_complete` tool, which the model reads on every interactive
+  stage, stated that the stage "cannot write files" and that handing a document back through the tool
+  was "the only way" to emit one. That described the original gated tool posture, which was reversed
+  some time ago: interactive stages now have full tool parity with batch stages and may write files
+  and explore the repository like any other stage. The stale wording invited exactly the behaviour the
+  reversal was meant to eliminate, since an agent that believes it cannot write a file will not try,
+  and no denial ever occurs to correct it. The description now presents the document handback as what
+  it is, a convenience that avoids choosing a filesystem path, and the surrounding documentation has
+  been corrected to match. No behaviour, argument or tool name changed.
+
 ## [0.1.26] - 2026-07-25
 
 ### Added

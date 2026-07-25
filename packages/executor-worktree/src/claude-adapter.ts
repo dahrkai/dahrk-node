@@ -479,7 +479,7 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner {
             : CLAUDE_CODE_SYSTEM_PROMPT,
           // Inject the stage-complete exit tool and the AskUserQuestion shadow alongside any brokered
           // MCP servers (parity with batch).
-          mcpServers: { dahrk: stageTool.server, ask: askTool.server, ...(brokered ?? {}) },
+          mcpServers: { [stageTool.serverName]: stageTool.server, ask: askTool.server, ...(brokered ?? {}) },
           // Redirect the built-in AskUserQuestion to the shadow tool so a structured question surfaces
           // as a Linear elicitation. The redirect is name-only and single-hop; the tool still runs, so
           // this is mapping, not gating (DHK-344 / DHK-223).

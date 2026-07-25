@@ -21,6 +21,16 @@ this file is left verbatim.
 
 ### Changed
 
+- **`mcp__dahrk__dahrk_stage_complete` is now derived, not restated, and covered by a test.** The
+  exposed tool name is `mcp__<mcpServers key>__<tool name>`, and those three strings were written out
+  independently in four places (`STAGE_COMPLETE_TOOL_NAME`, the `tool()` name, the
+  `createSdkMcpServer` name, and the adapter's `mcpServers` key). Nothing asserted the `Options`
+  object the adapter builds, so a typo in any one of them would have broken every interactive stage in
+  production while the whole suite stayed green: the stage would simply never be able to exit and
+  would be recorded as a timeout. The name is now composed from two constants, the server key is
+  exposed on the handle so the adapter cannot spell it differently, and `stage-complete-tool.test.ts`
+  pins the wire name. Both failure modes were confirmed to fail the new test before it landed.
+
 - **Comments and fixtures that contradicted the post-rename code (Skakel → Dahrk residue).** The source
   here migrated some time ago; these were the descriptions of it that did not, so each one misstated
   what the code does. `stage-complete-tool.ts` described "the in-process `skakel` MCP server" while the
