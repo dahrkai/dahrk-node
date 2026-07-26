@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-07-26
+
 ### Fixed
 
 - **A stage that names a model the runtime cannot resolve now fails, instead of silently running on a
@@ -14,13 +16,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   and the only way to notice was to spot that the output did not look like the model you asked for. The
   stage now fails with the id it was asked for, the reason it could not be resolved, and the models
   that stage can actually authenticate to. This most often means the node's Pi runtime is older than
-  the model list the hub is offering from, so the message says so and points at upgrading the node.
+  the model list the hub is offering from, so the message says so and points at upgrading the node. (#119)
 
 ### Changed
 
 - Upgraded the bundled Pi runtime to `@earendil-works/pi-coding-agent` 0.82.1 (from 0.80.6), which adds
   the Claude Opus 5 model family, OAuth sign-in for OpenRouter and Kimi Code, and two Qwen Token Plan
-  providers. Nodes on an older release cannot resolve these newer model ids.
+  providers. Nodes on an older release cannot resolve these newer model ids. (#119)
 
 ## [0.1.26] - 2026-07-25
 
@@ -918,7 +920,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.26...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.27...HEAD
+[0.1.27]: https://github.com/dahrkai/dahrk-node/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/dahrkai/dahrk-node/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/dahrkai/dahrk-node/compare/v0.1.24...v0.1.25
 [0.1.24]: https://github.com/dahrkai/dahrk-node/compare/v0.1.23...v0.1.24

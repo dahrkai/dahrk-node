@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-07-26
+
 ### Fixed
 
 - **`selectStageModel`: an unresolvable model id throws instead of falling through to Pi's default.**
