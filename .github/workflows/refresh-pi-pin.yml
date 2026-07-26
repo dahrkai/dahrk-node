@@ -1,0 +1,125 @@
+# Keep this node's Pi runtime current with upstream.
+#
+# WHY. `@earendil-works/pi-coding-agent` is what actually RESOLVES a stage's model id at run time, so a
+# stale pin means the hub offers models this node cannot run. That drifted unnoticed once - 0.80.6 here
+# against a 0.80.10 catalogue - because an unresolvable id used to fall back to Pi's default model and
+# the run still went green. `scripts/check-pi-pin.mjs` now fails CI on that gap; this workflow is what
+# keeps the gap from opening in the first place.
+#
+# Deliberately this repo's OWN job rather than something the harness drives across repos: each side
+# maintains its own pin, so neither needs a cross-repo token. They converge because both chase the same
+# upstream version.
+#
+# Like the harness's refresh-pi-catalog.yml, this pushes to a SINGLE rolling branch so a chatty upstream
+# produces one always-current PR rather than one per release, and it only ever opens a PR - the pin
+# lands in a published client, which deserves a human glance.
+name: refresh-pi-pin
+
+on:
+  schedule:
+    # Daily, shortly after the harness's catalogue refresh, so when both move the two PRs agree.
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "pi-coding-agent version to move to (blank = whatever npm calls latest)."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-pi-pin
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        name: Resolve the target pi-coding-agent version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          pkg=packages/executor-worktree/package.json
+          current="$(grep -o '"@earendil-works/pi-coding-agent": "[^"]*"' "$pkg" | head -1 | sed 's/.*: "//; s/"//')"
+          target="${INPUT_VERSION:-$(npm view @earendil-works/pi-coding-agent version)}"
+          test -n "$current" && test -n "$target"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "target=$target"   >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$target" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "pi-coding-agent is already on **$current**. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "pi-coding-agent **$current** -> **$target**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.resolve.outputs.changed == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.resolve.outputs.changed == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The adapter imports the SDK by bare specifier and the edge image installs the same concrete
+      # version, so the pin stays EXACT (no caret) - check-pi-pin.mjs enforces that too.
+      - name: Bump the pin
+        if: steps.resolve.outputs.changed == 'true'
+        env:
+          CURRENT: ${{ steps.resolve.outputs.current }}
+          TARGET: ${{ steps.resolve.outputs.target }}
+        run: |
+          set -euo pipefail
+          # package.json ONLY. The adapter's doc comment deliberately no longer repeats the version, so
+          # this touches nothing under `src/` and the PR does not trip the changelog gate for what is,
+          # by itself, pure dependency plumbing. Add a changelog line by hand when the new Pi brings
+          # models or provider logins a self-hoster would notice.
+          sed -i "s|\"@earendil-works/pi-coding-agent\": \"${CURRENT}\"|\"@earendil-works/pi-coding-agent\": \"${TARGET}\"|" \
+            packages/executor-worktree/package.json
+          git diff --stat
+
+      - name: Install
+        if: steps.resolve.outputs.changed == 'true'
+        run: pnpm install --no-frozen-lockfile
+
+      # Prove the tree is coherent before proposing it, rather than opening a PR that reddens on arrival.
+      - name: Verify
+        if: steps.resolve.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          node scripts/check-pi-pin.mjs
+          pnpm build
+          pnpm typecheck
+          pnpm test
+
+      - name: Open or update the refresh PR
+        if: steps.resolve.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/pi-pin-refresh
+          base: main
+          title: "chore(deps): pi-coding-agent ${{ steps.resolve.outputs.target }}"
+          body: |
+            Bumps the Pi runtime this node resolves stage models with.
+
+            `@earendil-works/pi-coding-agent` `${{ steps.resolve.outputs.current }}` -> `${{ steps.resolve.outputs.target }}`
+
+            The matching `@earendil-works/pi-ai` bump and catalogue regeneration is a separate PR in
+            dahrk-harness. Merge order: **harness -> publish `@dahrk/contracts` -> here**, because
+            `scripts/check-pi-pin.mjs` reads `PI_CATALOG_VERSION` from the published package.
+
+            This bump touches only `package.json` and the lockfile, so no changelog entry is forced.
+            Add one by hand if the new Pi brings models or provider logins a self-hoster would notice,
+            which is usually the whole point of the upgrade.
+          commit-message: |
+            chore(deps): bump pi-coding-agent to ${{ steps.resolve.outputs.target }}
+          labels: dependencies
+          delete-branch: false

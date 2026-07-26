@@ -11,7 +11,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickAuthedModel, type PiModelLike } from "../src/pi-adapter.js";
+import { pickAuthedModel, selectStageModel, type PiModelLike } from "../src/pi-adapter.js";
 
 /** What `registry.getAvailable()` returns when the broker injected only an ANTHROPIC_API_KEY. */
 const ANTHROPIC_AVAILABLE: PiModelLike[] = [
@@ -123,4 +123,92 @@ test("a fallback naming a model the auth cannot reach is ignored, so Pi raises i
 
 test("no fallback given: behaviour is exactly as before", () => {
   assert.equal(pickAuthedModel(BEDROCK_SONNET, CODEX_AVAILABLE), BEDROCK_SONNET);
+});
+
+/**
+ * `selectStageModel`: an unresolvable model id must FAIL the stage, not silently downgrade it.
+ *
+ * The bug it exists for: the adapter used to write `if (!resolved?.error)`, so a model id Pi could not
+ * resolve left the selection undefined and Pi ran the stage on its OWN default model - successfully.
+ * That is how a stale provider catalogue hid for two minor Pi versions: the portal offered
+ * `claude-opus-5`, older nodes could not resolve it, and every affected run still went green.
+ */
+const ok = (model: PiModelLike) => () => ({ model });
+const fails = (error?: string) => () => (error ? { error } : {});
+const none = () => undefined;
+
+test("an unresolvable stage model throws rather than leaving Pi on its own default", () => {
+  assert.throws(
+    () =>
+      selectStageModel({
+        stageModel: "claude-opus-99",
+        resolve: fails("unknown model"),
+        available: () => ANTHROPIC_AVAILABLE,
+      }),
+    (err: Error) => {
+      assert.match(err.message, /claude-opus-99/, "names the model that was asked for");
+      assert.match(err.message, /unknown model/, "carries Pi's own reason");
+      assert.match(err.message, /anthropic\/claude-opus-4-8/, "lists what this stage CAN reach");
+      assert.match(err.message, /upgrade dahrk-node/, "points at the usual cause");
+      return true;
+    },
+  );
+});
+
+test("a resolver that returns no model and no error still throws, rather than returning undefined", () => {
+  // The shape that actually caused the silent downgrade: no `error` set, no `model` either.
+  assert.throws(() => selectStageModel({ stageModel: "mystery", resolve: fails(), available: none }), /mystery/);
+});
+
+test("the failure names the auth profile when the stage can reach nothing at all", () => {
+  assert.throws(
+    () => selectStageModel({ stageModel: "opus", resolve: fails("nope"), available: none }),
+    /no authenticated models at all/,
+  );
+});
+
+test("an unresolvable PROFILE default fails too - it is intent just as much as a stage model", () => {
+  assert.throws(
+    () => selectStageModel({ profileDefaultModel: "gone-away", resolve: fails("nope"), available: none }),
+    /gone-away/,
+  );
+});
+
+test("no model requested at all is not an error: Pi picks, which is the correct no-opinion path", () => {
+  assert.equal(
+    selectStageModel({
+      resolve: () => assert.fail("must not resolve when nothing was asked for"),
+      available: none,
+    }),
+    undefined,
+  );
+});
+
+test("a stage model resolves and then lands on an authenticable provider", () => {
+  assert.deepEqual(
+    selectStageModel({ stageModel: "opus", resolve: ok(BEDROCK_OPUS), available: () => ANTHROPIC_AVAILABLE }),
+    { id: "claude-opus-4-8", provider: "anthropic" },
+  );
+});
+
+test("the profile default is the fallback for a STAGE model, but never for itself", () => {
+  // Stage named it: the profile's model is available as the last resort.
+  assert.deepEqual(
+    selectStageModel({
+      stageModel: "sonnet",
+      profileDefaultModel: "gpt-5.5",
+      resolve: ok(BEDROCK_SONNET),
+      available: () => CODEX_AVAILABLE,
+    }),
+    CODEX_AVAILABLE.find((m) => m.id === "gpt-5.5"),
+  );
+  // The profile's model IS the request: it cannot also be its own fallback, so no substitution occurs.
+  assert.equal(
+    selectStageModel({
+      profileDefaultModel: "sonnet",
+      resolve: ok(BEDROCK_SONNET),
+      available: () => CODEX_AVAILABLE,
+    }),
+    BEDROCK_SONNET,
+  );
 });

@@ -19,7 +19,36 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`selectStageModel`: an unresolvable model id throws instead of falling through to Pi's default.**
+  The adapter wrote `if (!resolved?.error) { ... }`, which discarded `resolveCliModel`'s error and left
+  the selection `undefined`, so Pi ran the stage on its own default model and the run reported success.
+  This is the mechanism that hid a stale provider catalogue for two minor Pi versions: the portal
+  offered `claude-opus-5`, nodes pinned to 0.80.6 could not resolve it, and every affected run went
+  green on a different model.
+
+  The decision was extracted from the dynamic-import factory into a pure exported
+  `selectStageModel(...)` so it is unit-testable without a live Pi install, matching how `pi-auth.ts`
+  and the mappers are already tested; `defaultCreatePiSession` is now a thin caller that owns only the
+  config-dir teardown on the throw path. Seven tests added in `pi-model-provider.test.ts`, including
+  the no-error-no-model shape that actually caused the silent downgrade.
+
+### Added
+
+- **`scripts/check-pi-pin.mjs`, run in CI.** Asserts this repo's `@earendil-works/pi-coding-agent` pin
+  is `>=` the `PI_CATALOG_VERSION` exported by the INSTALLED `@dahrk/contracts`. Nothing compared the
+  two repos' Pi pins before, and they drifted (0.80.6 here vs 0.80.10 in the catalogue), which is what
+  made the portal offer ids this node could not resolve. Deliberately `>=`, not `==`: a node ahead of
+  the catalogue knows a superset and is harmless, so this repo can still ship ahead of a harness
+  release. Reading the version from the published package also sequences the cross-repo bump correctly,
+  since `@dahrk/contracts` is hand-published.
+
 ### Changed
+
+- Bumped `@earendil-works/pi-coding-agent` 0.80.6 -> 0.82.1, matching the harness's pi-ai bump. Paired
+  with `ARG PI_CODING_AGENT_VERSION` in the harness's `deploy/Dockerfile.edge`, which is guarded there
+  by `deploy/test/pi-version.test.sh`.
 
 - **Comments and fixtures that contradicted the post-rename code (Skakel → Dahrk residue).** The source
   here migrated some time ago; these were the descriptions of it that did not, so each one misstated
