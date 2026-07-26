@@ -6,6 +6,22 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stage that names a model the runtime cannot resolve now fails, instead of silently running on a
+  different one.** Previously an unrecognised model id was discarded and the stage ran on Pi's own
+  default model, reporting success: the run went green, nothing in the trace recorded the substitution,
+  and the only way to notice was to spot that the output did not look like the model you asked for. The
+  stage now fails with the id it was asked for, the reason it could not be resolved, and the models
+  that stage can actually authenticate to. This most often means the node's Pi runtime is older than
+  the model list the hub is offering from, so the message says so and points at upgrading the node.
+
+### Changed
+
+- Upgraded the bundled Pi runtime to `@earendil-works/pi-coding-agent` 0.82.1 (from 0.80.6), which adds
+  the Claude Opus 5 model family, OAuth sign-in for OpenRouter and Kimi Code, and two Qwen Token Plan
+  providers. Nodes on an older release cannot resolve these newer model ids.
+
 ## [0.1.26] - 2026-07-25
 
 ### Added

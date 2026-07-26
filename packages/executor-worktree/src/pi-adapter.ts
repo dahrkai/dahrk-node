@@ -425,7 +425,9 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
 /**
  * The live session factory: embed Pi via `createAgentSession` bound to the stage worktree, with the
  * selected auth profile's providers resolved from the broker hint (DHK-511). The SDK is a pinned
- * dependency (`@earendil-works/pi-coding-agent@0.80.6`, published on npm) but is still loaded through a
+ * dependency (`@earendil-works/pi-coding-agent`, published on npm; the exact pin lives in this
+ * package's `package.json` and is deliberately NOT repeated here, so the two cannot disagree) but is
+ * still loaded through a
  * variable-specifier dynamic import as `any` so `tsc` does not resolve its types at build time: the
  * package is loaded lazily only on the live path, so typecheck and the injected-fake tests never need
  * it resolved. This is the live path exercised end-to-end under a managed node and refined by container
@@ -472,18 +474,19 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   applyApiKeyAuth(hint, ctx.runtimeEnv, authStorage);
   const modelRegistry = ModelRegistry.create(authStorage, join(configDir, "models.json"));
 
+  // Pure decision, so it is unit-tested directly rather than only through the live Pi import. Throws
+  // when the requested model cannot be resolved; the config dir is this caller's to tear down.
   let model: unknown;
-  if (ctx.config.model) {
-    const resolved = resolveCliModel({ cliModel: ctx.config.model, modelRegistry });
-    if (!resolved?.error) {
-      model = pickAuthedModel(resolved?.model, modelRegistry.getAvailable(), hint?.defaultModel);
-    }
-  } else if (hint?.defaultModel) {
-    // No stage model at all: the profile's model is then the only expression of intent, so honour it
-    // rather than leaving Pi on its own global default (which the hermetic config dir has stripped of
-    // any operator preference anyway).
-    const resolved = resolveCliModel({ cliModel: hint.defaultModel, modelRegistry });
-    if (!resolved?.error) model = pickAuthedModel(resolved?.model, modelRegistry.getAvailable());
+  try {
+    model = selectStageModel({
+      stageModel: ctx.config.model,
+      profileDefaultModel: hint?.defaultModel,
+      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRegistry }),
+      available: () => modelRegistry.getAvailable(),
+    });
+  } catch (err) {
+    cleanupStageConfigDir(configDir);
+    throw err;
   }
 
   // The injected stage-complete tool (interactive tool-exit); harmless on batch stages.
@@ -667,6 +670,62 @@ function modelFamily(id: string): string {
  * that was never brokered. Falling back keeps tier aliases meaningful in workflows while letting a pool
  * change provider by changing a profile field.
  */
+/** What Pi's `resolveCliModel` hands back: the model, or an error explaining why not. */
+export interface PiResolvedModel {
+  model?: PiModelLike;
+  error?: string;
+}
+
+/**
+ * Decide which model this stage runs on, and FAIL rather than substitute one.
+ *
+ * WHY THIS THROWS. The previous form was `if (!resolved?.error) { ... }`: the resolver's error was
+ * dropped on the floor, `model` stayed undefined, and Pi then ran the stage on its OWN default model
+ * and reported success. A model id is an operator's explicit instruction, so quietly running a
+ * different one is a wrong answer dressed as a right one - and an undetectable one, because nothing in
+ * the trace records that a substitution happened.
+ *
+ * It is also precisely how a stale provider catalogue stayed invisible across two minor Pi versions:
+ * the portal offered `claude-opus-5`, nodes pinned to an older Pi could not resolve it, and every
+ * affected run still went green. Making this loud is what turns catalogue staleness from a silent
+ * wrong answer into a reported one.
+ *
+ * A stage model wins; failing that the profile's `defaultModel` is the only expression of intent, so
+ * it is honoured rather than leaving Pi on its own global default (which the hermetic per-stage config
+ * dir has stripped of any operator preference anyway). With neither, Pi picks - the correct
+ * no-opinion behaviour, and not an error.
+ */
+export function selectStageModel(args: {
+  stageModel?: string;
+  profileDefaultModel?: string;
+  resolve: (id: string) => PiResolvedModel | undefined;
+  available: () => readonly PiModelLike[] | undefined;
+}): PiModelLike | undefined {
+  const requested = args.stageModel ?? args.profileDefaultModel;
+  if (!requested) return undefined;
+
+  const resolved = args.resolve(requested);
+  if (resolved?.error || !resolved?.model) {
+    const available = args.available() ?? [];
+    // `available()` is what this stage's auth can actually reach, so it is the useful hint - not the
+    // full thousand-model registry. Capped, because a broad key can still make it long.
+    const sample = available.slice(0, 12).map((m) => `${m.provider}/${m.id}`);
+    const detail = resolved?.error ? resolved.error : "the model id is not recognised";
+    throw new Error(
+      `Pi cannot resolve the model '${requested}': ${detail}. ` +
+        (available.length
+          ? `Models this stage can authenticate to (${available.length}): ${sample.join(", ")}` +
+            `${available.length > sample.length ? ", ..." : ""}.`
+          : "This stage has no authenticated models at all; check the auth profile bound to its node pool.") +
+        " If the id is newer than this node's pinned Pi, upgrade dahrk-node.",
+    );
+  }
+
+  // The profile's model is a last-resort fallback only when the STAGE named the model. When the
+  // profile's own model is what we just resolved, it cannot also be its own fallback.
+  return pickAuthedModel(resolved.model, args.available(), args.stageModel ? args.profileDefaultModel : undefined);
+}
+
 export function pickAuthedModel(
   resolved: PiModelLike | undefined,
   available: readonly PiModelLike[] | undefined,

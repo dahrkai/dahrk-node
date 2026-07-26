@@ -34,6 +34,11 @@ jobs:
       # failure, good/bad/no token, --no-service) is regression-guarded without a network or a real hub.
       - name: Test install.sh
         run: bash scripts/test-install.sh
+      # This node's Pi must not be older than the catalogue the hub offers models from, or the portal
+      # advertises ids the node cannot resolve. That drifted unnoticed once (0.80.6 here vs 0.80.10 in
+      # the catalogue) because an unresolvable id used to silently fall back to Pi's default model.
+      - name: Pi runtime is not behind the contracts catalogue
+        run: node scripts/check-pi-pin.mjs
       # Reject internal tracker keys in the changelog before they can reach a release.
       - name: Lint changelog for internal keys
         run: node scripts/lint-changelog.mjs
