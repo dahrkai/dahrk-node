@@ -34,7 +34,7 @@ import type { PolicyAwareRunnerContext } from "../src/runtime-session.js";
 const traceSchema = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@dahrk/contracts"))), "..", "schemas", "trace.schema.json"), "utf8"));
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 ajv.addSchema(traceSchema);
-const validateEvent = ajv.compile({ $ref: "https://skakel.io/schemas/trace.schema.json#/$defs/event" });
+const validateEvent = ajv.compile({ $ref: "https://dahrk.ai/schemas/trace.schema.json#/$defs/event" });
 const pe = (x: unknown): PiEvent => x as PiEvent;
 
 /**

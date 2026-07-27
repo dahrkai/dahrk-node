@@ -19,7 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const traceSchema = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@dahrk/contracts"))), "..", "schemas", "trace.schema.json"), "utf8"));
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 ajv.addSchema(traceSchema);
-const validateEvent = ajv.compile({ $ref: "https://skakel.io/schemas/trace.schema.json#/$defs/event" });
+const validateEvent = ajv.compile({ $ref: "https://dahrk.ai/schemas/trace.schema.json#/$defs/event" });
 
 const m = (x: unknown): SDKMessage => x as SDKMessage;
 const FIXED_TS = "2026-06-21T00:00:00Z";
