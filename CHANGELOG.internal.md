@@ -19,6 +19,17 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **DHK-764: point the four ajv `$ref`s at the `dahrk.ai` schema `$id`.** Updated
+  `packages/executor-worktree/test/claude-mappers.test.ts`,
+  `packages/executor-worktree/test/pi-mappers.test.ts`,
+  `packages/executor-worktree/test/pi-adapter.test.ts`, and
+  `packages/executor-worktree/spike/run.ts` from
+  `https://skakel.io/schemas/trace.schema.json#/$defs/event` to
+  `https://dahrk.ai/schemas/trace.schema.json#/$defs/event`. Bumped `@dahrk/contracts`
+  dependency range from `^0.8.2` to `^0.9.0` in all three package manifests.
+
 ## [0.1.27] - 2026-07-26
 
 ### Fixed
