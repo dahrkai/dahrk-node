@@ -44,6 +44,15 @@ this file is left verbatim.
   `https://dahrk.ai/schemas/trace.schema.json#/$defs/event`. Bumped `@dahrk/contracts`
   dependency range from `^0.8.2` to `^0.9.0` in all three package manifests.
 
+- Pin `@dahrk/contracts` once, in a `catalog:` entry in `pnpm-workspace.yaml`, and point all three
+  dependents at it. Three independent ranges is a standing hazard rather than a tidiness issue:
+  `apps/edge-node/tsup.config.ts` inlines the two workspace packages but keeps `@dahrk/contracts`
+  **external**, so if its range ever lags the libraries', the shipped binary resolves a different
+  contracts copy than they were built against - two schema `$id`s in one install, with nothing in the
+  test suite able to see it. Bumping all three by hand is exactly how that happens; a catalog makes it
+  unrepresentable and reduces adopting a release to a one-line edit. Verified pnpm rewrites `catalog:`
+  to the concrete range at pack time, so the published manifest is unchanged for consumers.
+
 - Render the run's Linear comment thread and one-hop issue manifest into the stage prompt
   (`commentsBlock` / `relatedBlock` in `prompt-assembly.ts`) and onto the worktree
   (`writeComments` / `writeRelatedIssues` in `stage-runner.ts`). Consumes the new

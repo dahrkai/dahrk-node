@@ -2,6 +2,18 @@ packages:
   - "packages/*"
   - "apps/*"
 
+# The ONE place `@dahrk/contracts` is pinned. Three packages depend on it, and before this they each
+# carried their own range, which drifted: `apps/edge-node` sat on `^0.8.2` while `packages/edge` and
+# `packages/executor-worktree` moved to `^0.10.0`. That is worse than it sounds. `apps/edge-node`'s
+# tsup config inlines the two workspace packages but keeps `@dahrk/contracts` EXTERNAL, so the shipped
+# binary resolved contracts from its own stale range - two different copies, with two different schema
+# `$id`s, in one install. Every test passed.
+#
+# A catalog makes that class of drift unrepresentable: the three packages say `catalog:` and cannot
+# disagree, and adopting a new contracts release is a one-line edit here.
+catalog:
+  "@dahrk/contracts": ^0.10.0
+
 onlyBuiltDependencies:
   - esbuild
 

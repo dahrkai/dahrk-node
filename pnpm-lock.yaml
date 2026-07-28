@@ -4,6 +4,12 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@dahrk/contracts':
+      specifier: ^0.10.0
+      version: 0.10.0
+
 importers:
 
   .:
@@ -24,7 +30,7 @@ importers:
         specifier: 0.3.183
         version: 0.3.183(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(zod@3.25.76)
       '@dahrk/contracts':
-        specifier: ^0.10.0
+        specifier: 'catalog:'
         version: 0.10.0
       pino:
         specifier: ^10.3.1
@@ -52,7 +58,7 @@ importers:
   packages/edge:
     dependencies:
       '@dahrk/contracts':
-        specifier: ^0.10.0
+        specifier: 'catalog:'
         version: 0.10.0
       '@dahrk/executor-worktree':
         specifier: workspace:*
@@ -83,7 +89,7 @@ importers:
         specifier: 0.3.183
         version: 0.3.183(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(zod@3.25.76)
       '@dahrk/contracts':
-        specifier: ^0.10.0
+        specifier: 'catalog:'
         version: 0.10.0
       '@earendil-works/pi-coding-agent':
         specifier: 0.82.1
