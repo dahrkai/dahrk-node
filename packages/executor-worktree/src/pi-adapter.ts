@@ -422,16 +422,54 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
   };
 }
 
+/** The exported symbols from `@earendil-works/pi-coding-agent` that `defaultCreatePiSession` uses.
+ *  Declared locally (not imported) because the package is loaded by variable-specifier dynamic import
+ *  at runtime — `tsc` does not resolve its types at build time so the adapter compiles without the SDK.
+ *  DHK-926: typing this cast means a removed or renamed symbol is caught by `assertSdkSymbol` at
+ *  session-factory boot and by the `pi-sdk-exports.test.ts` suite, not silently at inference time. */
+interface PiSdkModule {
+  VERSION: string;
+  /** Combined auth and model registry; replaced the removed `AuthStorage` + `ModelRegistry` (DHK-925). */
+  ModelRuntime: {
+    create(opts: { authPath?: string; modelsPath?: string }): Promise<ModelRuntimeLike>;
+  };
+  DefaultResourceLoader: new (opts: unknown) => { reload(): Promise<void> };
+  SessionManager: { inMemory(cwd: string): unknown };
+  SettingsManager: { create(cwd: string, agentDir: string): unknown };
+  createAgentSession(opts: unknown): Promise<{ session: unknown }>;
+  defineTool(opts: unknown): unknown;
+  getAgentDir(): string;
+  resolveCliModel(opts: { cliModel: string; modelRuntime: ModelRuntimeLike }): PiResolvedModel | undefined;
+}
+
+/** The subset of Pi's `ModelRuntime` that `defaultCreatePiSession` drives: apply brokered API keys
+ *  and read the available-model snapshot. Structurally compatible with `AuthStorageLike` (same
+ *  `setRuntimeApiKey` signature) so it passes straight into `applyApiKeyAuth`. */
+interface ModelRuntimeLike {
+  setRuntimeApiKey(provider: string, key: string): void | Promise<void>;
+  getAvailableSnapshot(): readonly PiModelLike[];
+}
+
+/** Throw a clear error when a required SDK symbol is absent, naming the symbol and the SDK version so
+ *  a bump that drops an export is diagnosed at session-factory construction rather than mid-run. */
+function assertSdkSymbol(name: string, value: unknown, sdkVersion: string): void {
+  if (value === undefined || value === null) {
+    throw new Error(
+      `@earendil-works/pi-coding-agent@${sdkVersion} does not export '${name}'. ` +
+        `This symbol was removed or renamed; upgrade dahrk-node to a compatible release.`,
+    );
+  }
+}
+
 /**
  * The live session factory: embed Pi via `createAgentSession` bound to the stage worktree, with the
  * selected auth profile's providers resolved from the broker hint (DHK-511). The SDK is a pinned
  * dependency (`@earendil-works/pi-coding-agent`, published on npm; the exact pin lives in this
  * package's `package.json` and is deliberately NOT repeated here, so the two cannot disagree) but is
- * still loaded through a
- * variable-specifier dynamic import as `any` so `tsc` does not resolve its types at build time: the
- * package is loaded lazily only on the live path, so typecheck and the injected-fake tests never need
- * it resolved. This is the live path exercised end-to-end under a managed node and refined by container
- * isolation; the adapter orchestration itself is covered by tests through the injected factory.
+ * still loaded through a variable-specifier dynamic import — cast to `PiSdkModule` (DHK-926) rather
+ * than `any` — so `tsc` does not resolve its types at build time: the package is loaded lazily only
+ * on the live path, so typecheck and the injected-fake tests never need it resolved. The required
+ * exports are asserted at construction so a removed symbol fails at boot, not mid-inference.
  *
  * Provider identity comes solely from the hint (`readAuthHint`), never from inferring it out of an
  * env-var name (the old `PROVIDER_BY_ENV` table is gone). The pure resolution/file-writing logic lives
@@ -445,10 +483,11 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
 async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike> {
   const spec = "@earendil-works/pi-coding-agent";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mod: any = await import(spec);
+  const mod = (await import(spec)) as unknown as PiSdkModule;
   const {
-    DefaultResourceLoader,
+    VERSION,
     ModelRuntime,
+    DefaultResourceLoader,
     SessionManager,
     SettingsManager,
     createAgentSession,
@@ -457,26 +496,35 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     resolveCliModel,
   } = mod;
 
+  // DHK-926: assert every required symbol is present so a bump that removes one fails here at boot
+  // (naming the symbol and SDK version) rather than with a bare "cannot read properties of undefined"
+  // mid-inference. VERSION may itself be undefined on a very old SDK — fall back to "unknown".
+  const ver = (VERSION as string | undefined) ?? "unknown";
+  assertSdkSymbol("ModelRuntime", ModelRuntime, ver);
+  assertSdkSymbol("DefaultResourceLoader", DefaultResourceLoader, ver);
+  assertSdkSymbol("SessionManager", SessionManager, ver);
+  assertSdkSymbol("SettingsManager", SettingsManager, ver);
+  assertSdkSymbol("createAgentSession", createAgentSession, ver);
+  assertSdkSymbol("defineTool", defineTool, ver);
+  assertSdkSymbol("getAgentDir", getAgentDir, ver);
+  assertSdkSymbol("resolveCliModel", resolveCliModel, ver);
+
   // The auth-profile hint (DHK-509) is the sole source of provider identity; absent on ambient nodes.
   const hint = readAuthHint(ctx);
   // A fresh per-stage config dir keeps the stage hermetic - Pi never inherits machine-global ~/.pi auth
   // or models config. The OAuth `auth.json` and any custom-provider `models.json` are written into it
-  // BEFORE `ModelRuntime` is pointed at it, so they are loaded on construction.
+  // BEFORE ModelRuntime is pointed at it, so they are loaded on construction.
   const configDir = createStageConfigDir();
   writeStageAuthFile(configDir, hint);
   writeStageCustomProviders(configDir, hint);
 
-  // Pi 0.82.x folded auth + model-registry into a single `ModelRuntime`. Its `create` is async and
-  // takes the staged `auth.json` / `models.json` paths directly, so the hermetic per-stage config dir
-  // is preserved by pointing them at it (never the machine-global ~/.pi).
+  // ModelRuntime replaces the defunct AuthStorage + ModelRegistry pair (DHK-925). It reads auth.json
+  // and models.json on creation, then brokered API-key providers are applied as runtime overrides so
+  // Pi resolves them as if set by the operator and the agent never sees the raw secret.
   const modelRuntime = await ModelRuntime.create({
     authPath: join(configDir, "auth.json"),
     modelsPath: join(configDir, "models.json"),
   });
-  // Brokered API-key providers apply as runtime overrides (the runtime's highest-priority, non-persisted
-  // source) so Pi resolves them as if set by the operator and the agent never sees the raw secret. The
-  // secret rides in `runtimeEnv`; the hint declares which var carries which provider's key. Async in
-  // 0.82.x, so awaited.
   await applyApiKeyAuth(hint, ctx.runtimeEnv, modelRuntime);
 
   // Pure decision, so it is unit-tested directly rather than only through the live Pi import. Throws
@@ -487,8 +535,6 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
       stageModel: ctx.config.model,
       profileDefaultModel: hint?.defaultModel,
       resolve: (id: string) => resolveCliModel({ cliModel: id, modelRuntime }),
-      // `ModelRuntime` implements `Models`; its sync snapshot keeps `selectStageModel` synchronous
-      // (`getAvailable()` is now async).
       available: () => modelRuntime.getAvailableSnapshot(),
     });
   } catch (err) {
@@ -659,8 +705,8 @@ function modelFamily(id: string): string {
  * stage died on its first turn with "No API key found for amazon-bedrock". Nothing about this is
  * specific to Anthropic; the same trap sits under every alias for every provider.
  *
- * `ModelRuntime.getAvailableSnapshot()` is Pi's own answer to "which models can this runtime actually
- * use", and it already accounts for the runtime keys the broker injected. So: if the resolved model's
+ * `registry.getAvailable()` is Pi's own answer to "which models can this auth storage actually use",
+ * and it already accounts for the runtime keys the broker injected. So: if the resolved model's
  * provider is not one of those, prefer the same model family from the available set. Deterministic,
  * and it never invents a model - if nothing available matches, the resolution is left exactly as Pi
  * made it so Pi raises its own clear error rather than one we fabricate.

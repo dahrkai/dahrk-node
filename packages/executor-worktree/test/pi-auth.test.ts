@@ -27,14 +27,14 @@ import {
   writeStageAuthFile,
   writeStageCustomProviders,
   type PiAuthHint,
-  type ApiKeyAuthTarget,
+  type AuthStorageLike,
 } from "../src/pi-auth.js";
 
 /** Records `setRuntimeApiKey` calls so a test asserts on the OUTCOME (which provider got which key).
  *  Async because Pi 0.82.x's `ModelRuntime.setRuntimeApiKey` returns a promise.
  *  The `Promise.resolve()` tick genuinely defers the push so tests that omit `await applyApiKeyAuth`
  *  would see an empty calls array — making the async guard load-bearing, not cosmetic. */
-class RecordingAuthStorage implements ApiKeyAuthTarget {
+class RecordingAuthStorage implements AuthStorageLike {
   calls: Array<[string, string]> = [];
   async setRuntimeApiKey(provider: string, key: string): Promise<void> {
     await Promise.resolve();

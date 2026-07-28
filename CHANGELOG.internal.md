@@ -21,6 +21,20 @@ this file is left verbatim.
 
 ### Changed
 
+- **DHK-926: type the Pi SDK import and assert its exports at boot.** Replaced the untyped
+  `const mod: any = await import(spec)` with a cast to a local `PiSdkModule` interface that
+  declares every symbol `defaultCreatePiSession` destructures. Added `assertSdkSymbol` runtime
+  checks that name the missing symbol and the installed SDK version, so a bump that removes an
+  export fails at session-factory construction rather than mid-inference. Added
+  `test/pi-sdk-exports.test.ts` which resolves the real installed `@earendil-works/pi-coding-agent`
+  and asserts each required export is present. Also migrated the live factory from the removed
+  `AuthStorage` + `ModelRegistry` pair to `ModelRuntime` (DHK-925 fix): `ModelRuntime.create`
+  now receives the hermetic `authPath`/`modelsPath`, brokered API keys are applied via the
+  existing `applyApiKeyAuth` helper (now async to match `ModelRuntime.setRuntimeApiKey`),
+  and `createAgentSession` receives `modelRuntime` in place of the defunct pair.
+  `packages/executor-worktree/src/pi-adapter.ts`, `src/pi-auth.ts`, `test/pi-auth.test.ts`,
+  `test/pi-sdk-exports.test.ts`.
+
 - **DHK-764: point the four ajv `$ref`s at the `dahrk.ai` schema `$id`.** Updated
   `packages/executor-worktree/test/claude-mappers.test.ts`,
   `packages/executor-worktree/test/pi-mappers.test.ts`,
