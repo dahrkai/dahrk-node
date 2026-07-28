@@ -6,6 +6,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every `runtime: pi` stage now constructs a session and runs again.** The 0.82.1 Pi runtime bump
+  dropped the `AuthStorage` export and the `ModelRegistry.create` static, so each Pi stage died at
+  session construction with `Cannot read properties of undefined (reading 'create')`, before any
+  inference and at no cost. The adapter now builds the session on the replacement `ModelRuntime` API,
+  with no change to model selection, auth-profile semantics, or the hermetic per-stage config dir
+  (still never the machine-global `~/.pi`, still torn down on dispose).
+
 ## [0.1.27] - 2026-07-26
 
 ### Fixed

@@ -5,7 +5,7 @@
  * broker (DHK-509), so provider identity is DECLARED, never inferred from an env-var name.
  *
  * Three shapes of provider, three destinations:
- *   - API-key providers (OpenRouter, Kimi, Mistral, Groq, ...) -> `AuthStorage.setRuntimeApiKey`
+ *   - API-key providers (OpenRouter, Kimi, Mistral, Groq, ...) -> `ModelRuntime.setRuntimeApiKey`
  *     (a runtime override, never persisted); the raw secret rides in `runtimeEnv` and never reaches
  *     the agent's own tool calls.
  *   - API-key providers Pi ships no built-in for -> a `models.json` custom-provider entry built from
@@ -42,10 +42,12 @@ export type { ApiKeyProviderHint, CustomProviderModel, OAuthProviderHint, Provid
  *  adapter (and its `@dahrk/executor-worktree` re-export) keep the `PiAuthHint` name. */
 export type PiAuthHint = RuntimeAuthHint;
 
-/** The subset of Pi's `AuthStorage` the API-key path drives; kept local so the helper is SDK-free. */
-export interface AuthStorageLike {
+/** The subset of Pi's `ModelRuntime` the API-key path drives; kept local so the helper is SDK-free.
+ *  In Pi 0.82.x `setRuntimeApiKey` is async (the auth store was folded into `ModelRuntime`), so the
+ *  seam returns a promise the caller awaits. */
+export interface ApiKeyAuthTarget {
   /** Set a runtime API-key override (highest priority, not persisted to disk). */
-  setRuntimeApiKey(provider: string, key: string): void;
+  setRuntimeApiKey(provider: string, key: string): Promise<void>;
 }
 
 /** A Pi `auth.json` credential record (the on-disk shape Pi loads). */
@@ -71,22 +73,23 @@ export function readAuthHint(ctx: RunnerContext): PiAuthHint | undefined {
 }
 
 /**
- * Apply every brokered API-key provider in the hint as a runtime override on `AuthStorage`. Provider
+ * Apply every brokered API-key provider in the hint as a runtime override on `ModelRuntime`. Provider
  * identity is taken from the hint (`provider`), never inferred from the env-var name, and the secret is
  * read from `runtimeEnv` under the hint's `envVar`. A provider whose key never arrived is skipped
  * (the broker minted a hint but the value is absent); a missing hint applies nothing. OAuth providers
- * are ignored here - they persist via `auth.json`, not `setRuntimeApiKey`.
+ * are ignored here - they persist via `auth.json`, not `setRuntimeApiKey`. Async because Pi 0.82.x's
+ * `setRuntimeApiKey` returns a promise; each override is awaited in turn.
  */
-export function applyApiKeyAuth(
+export async function applyApiKeyAuth(
   hint: PiAuthHint | undefined,
   runtimeEnv: Record<string, string> | undefined,
-  authStorage: AuthStorageLike,
-): void {
+  authTarget: ApiKeyAuthTarget,
+): Promise<void> {
   const env = runtimeEnv ?? {};
   for (const p of hint?.providers ?? []) {
     if (p.kind !== "api_key") continue;
     const value = env[p.envVar];
-    if (value) authStorage.setRuntimeApiKey(p.provider, value);
+    if (value) await authTarget.setRuntimeApiKey(p.provider, value);
   }
 }
 

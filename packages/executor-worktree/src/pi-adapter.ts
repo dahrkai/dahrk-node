@@ -439,17 +439,16 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
  *   - API-key providers apply as runtime overrides (`applyApiKeyAuth`); a provider Pi ships no built-in
  *     for gets a `models.json` custom-provider entry from the hint's base URL.
  *   - OAuth-subscription providers persist an `auth.json`, both written into a fresh hermetic per-stage
- *     config dir (never the machine-global `~/.pi`). `AuthStorage`/`ModelRegistry` are pointed at that
- *     dir, and `dispose()` is decorated to tear the whole dir down on teardown.
+ *     config dir (never the machine-global `~/.pi`). `ModelRuntime` is pointed at that dir, and
+ *     `dispose()` is decorated to tear the whole dir down on teardown.
  */
 async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike> {
   const spec = "@earendil-works/pi-coding-agent";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mod: any = await import(spec);
   const {
-    AuthStorage,
     DefaultResourceLoader,
-    ModelRegistry,
+    ModelRuntime,
     SessionManager,
     SettingsManager,
     createAgentSession,
@@ -462,17 +461,23 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   const hint = readAuthHint(ctx);
   // A fresh per-stage config dir keeps the stage hermetic - Pi never inherits machine-global ~/.pi auth
   // or models config. The OAuth `auth.json` and any custom-provider `models.json` are written into it
-  // BEFORE AuthStorage/ModelRegistry are pointed at it, so they are loaded on construction.
+  // BEFORE `ModelRuntime` is pointed at it, so they are loaded on construction.
   const configDir = createStageConfigDir();
   writeStageAuthFile(configDir, hint);
   writeStageCustomProviders(configDir, hint);
 
-  const authStorage = AuthStorage.create(join(configDir, "auth.json"));
-  // Brokered API-key providers apply as runtime overrides (AuthStorage's highest-priority, non-persisted
+  // Pi 0.82.x folded auth + model-registry into a single `ModelRuntime`. Its `create` is async and
+  // takes the staged `auth.json` / `models.json` paths directly, so the hermetic per-stage config dir
+  // is preserved by pointing them at it (never the machine-global ~/.pi).
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(configDir, "auth.json"),
+    modelsPath: join(configDir, "models.json"),
+  });
+  // Brokered API-key providers apply as runtime overrides (the runtime's highest-priority, non-persisted
   // source) so Pi resolves them as if set by the operator and the agent never sees the raw secret. The
-  // secret rides in `runtimeEnv`; the hint declares which var carries which provider's key.
-  applyApiKeyAuth(hint, ctx.runtimeEnv, authStorage);
-  const modelRegistry = ModelRegistry.create(authStorage, join(configDir, "models.json"));
+  // secret rides in `runtimeEnv`; the hint declares which var carries which provider's key. Async in
+  // 0.82.x, so awaited.
+  await applyApiKeyAuth(hint, ctx.runtimeEnv, modelRuntime);
 
   // Pure decision, so it is unit-tested directly rather than only through the live Pi import. Throws
   // when the requested model cannot be resolved; the config dir is this caller's to tear down.
@@ -481,8 +486,10 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     model = selectStageModel({
       stageModel: ctx.config.model,
       profileDefaultModel: hint?.defaultModel,
-      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRegistry }),
-      available: () => modelRegistry.getAvailable(),
+      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRuntime }),
+      // `ModelRuntime` implements `Models`; its sync snapshot keeps `selectStageModel` synchronous
+      // (`getAvailable()` is now async).
+      available: () => modelRuntime.getAvailableSnapshot(),
     });
   } catch (err) {
     cleanupStageConfigDir(configDir);
@@ -593,8 +600,7 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
 
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(ctx.workspace.worktreePath),
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     settingsManager,
     resourceLoader,
     cwd,
@@ -653,8 +659,8 @@ function modelFamily(id: string): string {
  * stage died on its first turn with "No API key found for amazon-bedrock". Nothing about this is
  * specific to Anthropic; the same trap sits under every alias for every provider.
  *
- * `registry.getAvailable()` is Pi's own answer to "which models can this auth storage actually use",
- * and it already accounts for the runtime keys the broker injected. So: if the resolved model's
+ * `ModelRuntime.getAvailableSnapshot()` is Pi's own answer to "which models can this runtime actually
+ * use", and it already accounts for the runtime keys the broker injected. So: if the resolved model's
  * provider is not one of those, prefer the same model family from the available set. Deterministic,
  * and it never invents a model - if nothing available matches, the resolution is left exactly as Pi
  * made it so Pi raises its own clear error rather than one we fabricate.

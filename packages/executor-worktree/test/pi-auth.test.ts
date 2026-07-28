@@ -27,13 +27,17 @@ import {
   writeStageAuthFile,
   writeStageCustomProviders,
   type PiAuthHint,
-  type AuthStorageLike,
+  type ApiKeyAuthTarget,
 } from "../src/pi-auth.js";
 
-/** Records `setRuntimeApiKey` calls so a test asserts on the OUTCOME (which provider got which key). */
-class RecordingAuthStorage implements AuthStorageLike {
+/** Records `setRuntimeApiKey` calls so a test asserts on the OUTCOME (which provider got which key).
+ *  Async because Pi 0.82.x's `ModelRuntime.setRuntimeApiKey` returns a promise.
+ *  The `Promise.resolve()` tick genuinely defers the push so tests that omit `await applyApiKeyAuth`
+ *  would see an empty calls array — making the async guard load-bearing, not cosmetic. */
+class RecordingAuthStorage implements ApiKeyAuthTarget {
   calls: Array<[string, string]> = [];
-  setRuntimeApiKey(provider: string, key: string): void {
+  async setRuntimeApiKey(provider: string, key: string): Promise<void> {
+    await Promise.resolve();
     this.calls.push([provider, key]);
   }
 }
@@ -53,37 +57,37 @@ test("readAuthHint returns undefined on an ambient node that carries no hint", (
 
 // --- applyApiKeyAuth: provider identity from the hint, not the env-var name --------------------
 
-test("a default provider (anthropic) resolves from the hint and applies its runtimeEnv key", () => {
+test("a default provider (anthropic) resolves from the hint and applies its runtimeEnv key", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "anthropic", envVar: "ANTHROPIC_API_KEY" }] };
-  applyApiKeyAuth(hint, { ANTHROPIC_API_KEY: "sk-ant" }, storage);
+  await applyApiKeyAuth(hint, { ANTHROPIC_API_KEY: "sk-ant" }, storage);
   assert.deepEqual(storage.calls, [["anthropic", "sk-ant"]]);
 });
 
-test("a non-default provider (openrouter) resolves to its Pi provider id and key", () => {
+test("a non-default provider (openrouter) resolves to its Pi provider id and key", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "openrouter", envVar: "OPENROUTER_API_KEY" }] };
-  applyApiKeyAuth(hint, { OPENROUTER_API_KEY: "sk-or" }, storage);
+  await applyApiKeyAuth(hint, { OPENROUTER_API_KEY: "sk-or" }, storage);
   assert.deepEqual(storage.calls, [["openrouter", "sk-or"]]);
 });
 
-test("Kimi (moonshot) - another non-default provider - resolves from the hint", () => {
+test("Kimi (moonshot) - another non-default provider - resolves from the hint", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "moonshot", envVar: "MOONSHOT_API_KEY" }] };
-  applyApiKeyAuth(hint, { MOONSHOT_API_KEY: "sk-kimi" }, storage);
+  await applyApiKeyAuth(hint, { MOONSHOT_API_KEY: "sk-kimi" }, storage);
   assert.deepEqual(storage.calls, [["moonshot", "sk-kimi"]]);
 });
 
-test("provider identity comes from the hint even when the env-var name says nothing about it", () => {
+test("provider identity comes from the hint even when the env-var name says nothing about it", async () => {
   // The whole point of the hint: the broker can carry the secret under an opaque var name and the
   // adapter still lands it on the right Pi provider. A static PROVIDER_BY_ENV table could never do this.
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "openrouter", envVar: "DAHRK_RUNTIME_KEY_1" }] };
-  applyApiKeyAuth(hint, { DAHRK_RUNTIME_KEY_1: "sk-or" }, storage);
+  await applyApiKeyAuth(hint, { DAHRK_RUNTIME_KEY_1: "sk-or" }, storage);
   assert.deepEqual(storage.calls, [["openrouter", "sk-or"]]);
 });
 
-test("several API-key providers in one hint each apply", () => {
+test("several API-key providers in one hint each apply", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = {
     providers: [
@@ -91,36 +95,36 @@ test("several API-key providers in one hint each apply", () => {
       { kind: "api_key", provider: "groq", envVar: "GROQ_API_KEY" },
     ],
   };
-  applyApiKeyAuth(hint, { ANTHROPIC_API_KEY: "sk-ant", GROQ_API_KEY: "sk-groq" }, storage);
+  await applyApiKeyAuth(hint, { ANTHROPIC_API_KEY: "sk-ant", GROQ_API_KEY: "sk-groq" }, storage);
   assert.deepEqual(storage.calls, [["anthropic", "sk-ant"], ["groq", "sk-groq"]]);
 });
 
-test("an API-key provider whose env var is absent from runtimeEnv is skipped, not thrown", () => {
+test("an API-key provider whose env var is absent from runtimeEnv is skipped, not thrown", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "openrouter", envVar: "OPENROUTER_API_KEY" }] };
-  applyApiKeyAuth(hint, {}, storage); // the broker minted a hint but the key never arrived
+  await applyApiKeyAuth(hint, {}, storage); // the broker minted a hint but the key never arrived
   assert.deepEqual(storage.calls, []);
 });
 
-test("a hint-less (undefined) call applies nothing and does not throw", () => {
+test("a hint-less (undefined) call applies nothing and does not throw", async () => {
   const storage = new RecordingAuthStorage();
-  applyApiKeyAuth(undefined, { ANTHROPIC_API_KEY: "sk-ant" }, storage);
+  await applyApiKeyAuth(undefined, { ANTHROPIC_API_KEY: "sk-ant" }, storage);
   assert.deepEqual(storage.calls, []);
 });
 
-test("applyApiKeyAuth: undefined runtimeEnv (not just empty object) applies nothing and does not throw", () => {
+test("applyApiKeyAuth: undefined runtimeEnv (not just empty object) applies nothing and does not throw", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = { providers: [{ kind: "api_key", provider: "anthropic", envVar: "ANTHROPIC_API_KEY" }] };
-  applyApiKeyAuth(hint, undefined, storage);
+  await applyApiKeyAuth(hint, undefined, storage);
   assert.deepEqual(storage.calls, [], "undefined runtimeEnv is treated as {} via ?? fallback")
 });
 
-test("OAuth providers in the hint are not treated as API keys", () => {
+test("OAuth providers in the hint are not treated as API keys", async () => {
   const storage = new RecordingAuthStorage();
   const hint: PiAuthHint = {
     providers: [{ kind: "oauth", provider: "openai-chatgpt", access: "at", refresh: "rt", expires: 111 }],
   };
-  applyApiKeyAuth(hint, { OPENAI_API_KEY: "sk-should-not-be-used" }, storage);
+  await applyApiKeyAuth(hint, { OPENAI_API_KEY: "sk-should-not-be-used" }, storage);
   assert.deepEqual(storage.calls, [], "an OAuth subscription is applied via auth.json, never setRuntimeApiKey");
 });
 
