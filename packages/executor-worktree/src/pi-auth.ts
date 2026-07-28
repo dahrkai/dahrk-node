@@ -42,10 +42,12 @@ export type { ApiKeyProviderHint, CustomProviderModel, OAuthProviderHint, Provid
  *  adapter (and its `@dahrk/executor-worktree` re-export) keep the `PiAuthHint` name. */
 export type PiAuthHint = RuntimeAuthHint;
 
-/** The subset of Pi's `AuthStorage` the API-key path drives; kept local so the helper is SDK-free. */
+/** The subset of Pi's `ModelRuntime` the API-key path drives; kept local so the helper is SDK-free.
+ *  `setRuntimeApiKey` may return a `Promise` (Pi 0.82.1's `ModelRuntime` async-refreshes internally),
+ *  so callers must await the result. */
 export interface AuthStorageLike {
   /** Set a runtime API-key override (highest priority, not persisted to disk). */
-  setRuntimeApiKey(provider: string, key: string): void;
+  setRuntimeApiKey(provider: string, key: string): void | Promise<void>;
 }
 
 /** A Pi `auth.json` credential record (the on-disk shape Pi loads). */
@@ -71,22 +73,26 @@ export function readAuthHint(ctx: RunnerContext): PiAuthHint | undefined {
 }
 
 /**
- * Apply every brokered API-key provider in the hint as a runtime override on `AuthStorage`. Provider
+ * Apply every brokered API-key provider in the hint as a runtime override on `authStorage`. Provider
  * identity is taken from the hint (`provider`), never inferred from the env-var name, and the secret is
  * read from `runtimeEnv` under the hint's `envVar`. A provider whose key never arrived is skipped
  * (the broker minted a hint but the value is absent); a missing hint applies nothing. OAuth providers
  * are ignored here - they persist via `auth.json`, not `setRuntimeApiKey`.
+ *
+ * Async because Pi 0.82.1's `ModelRuntime.setRuntimeApiKey` refreshes the model snapshot internally.
+ * Callers must await to ensure API-key providers appear in `getAvailableSnapshot()` before model
+ * selection.
  */
-export function applyApiKeyAuth(
+export async function applyApiKeyAuth(
   hint: PiAuthHint | undefined,
   runtimeEnv: Record<string, string> | undefined,
   authStorage: AuthStorageLike,
-): void {
+): Promise<void> {
   const env = runtimeEnv ?? {};
   for (const p of hint?.providers ?? []) {
     if (p.kind !== "api_key") continue;
     const value = env[p.envVar];
-    if (value) authStorage.setRuntimeApiKey(p.provider, value);
+    if (value) await authStorage.setRuntimeApiKey(p.provider, value);
   }
 }
 
