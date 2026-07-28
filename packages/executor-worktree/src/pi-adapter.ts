@@ -422,16 +422,54 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
   };
 }
 
+/** The exported symbols from `@earendil-works/pi-coding-agent` that `defaultCreatePiSession` uses.
+ *  Declared locally (not imported) because the package is loaded by variable-specifier dynamic import
+ *  at runtime — `tsc` does not resolve its types at build time so the adapter compiles without the SDK.
+ *  DHK-926: typing this cast means a removed or renamed symbol is caught by `assertSdkSymbol` at
+ *  session-factory boot and by the `pi-sdk-exports.test.ts` suite, not silently at inference time. */
+interface PiSdkModule {
+  VERSION: string;
+  /** Combined auth and model registry; replaced the removed `AuthStorage` + `ModelRegistry` (DHK-925). */
+  ModelRuntime: {
+    create(opts: { authPath?: string; modelsPath?: string }): Promise<ModelRuntimeLike>;
+  };
+  DefaultResourceLoader: new (opts: unknown) => { reload(): Promise<void> };
+  SessionManager: { inMemory(cwd: string): unknown };
+  SettingsManager: { create(cwd: string, agentDir: string): unknown };
+  createAgentSession(opts: unknown): Promise<{ session: unknown }>;
+  defineTool(opts: unknown): unknown;
+  getAgentDir(): string;
+  resolveCliModel(opts: { cliModel: string; modelRuntime: ModelRuntimeLike }): PiResolvedModel | undefined;
+}
+
+/** The subset of Pi's `ModelRuntime` that `defaultCreatePiSession` drives: apply brokered API keys
+ *  and read the available-model snapshot. Structurally compatible with `AuthStorageLike` (same
+ *  `setRuntimeApiKey` signature) so it passes straight into `applyApiKeyAuth`. */
+interface ModelRuntimeLike {
+  setRuntimeApiKey(provider: string, key: string): void | Promise<void>;
+  getAvailableSnapshot(): readonly PiModelLike[];
+}
+
+/** Throw a clear error when a required SDK symbol is absent, naming the symbol and the SDK version so
+ *  a bump that drops an export is diagnosed at session-factory construction rather than mid-run. */
+function assertSdkSymbol(name: string, value: unknown, sdkVersion: string): void {
+  if (value === undefined || value === null) {
+    throw new Error(
+      `@earendil-works/pi-coding-agent@${sdkVersion} does not export '${name}'. ` +
+        `This symbol was removed or renamed; upgrade dahrk-node to a compatible release.`,
+    );
+  }
+}
+
 /**
  * The live session factory: embed Pi via `createAgentSession` bound to the stage worktree, with the
  * selected auth profile's providers resolved from the broker hint (DHK-511). The SDK is a pinned
  * dependency (`@earendil-works/pi-coding-agent`, published on npm; the exact pin lives in this
  * package's `package.json` and is deliberately NOT repeated here, so the two cannot disagree) but is
- * still loaded through a
- * variable-specifier dynamic import as `any` so `tsc` does not resolve its types at build time: the
- * package is loaded lazily only on the live path, so typecheck and the injected-fake tests never need
- * it resolved. This is the live path exercised end-to-end under a managed node and refined by container
- * isolation; the adapter orchestration itself is covered by tests through the injected factory.
+ * still loaded through a variable-specifier dynamic import — cast to `PiSdkModule` (DHK-926) rather
+ * than `any` — so `tsc` does not resolve its types at build time: the package is loaded lazily only
+ * on the live path, so typecheck and the injected-fake tests never need it resolved. The required
+ * exports are asserted at construction so a removed symbol fails at boot, not mid-inference.
  *
  * Provider identity comes solely from the hint (`readAuthHint`), never from inferring it out of an
  * env-var name (the old `PROVIDER_BY_ENV` table is gone). The pure resolution/file-writing logic lives
@@ -439,17 +477,17 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
  *   - API-key providers apply as runtime overrides (`applyApiKeyAuth`); a provider Pi ships no built-in
  *     for gets a `models.json` custom-provider entry from the hint's base URL.
  *   - OAuth-subscription providers persist an `auth.json`, both written into a fresh hermetic per-stage
- *     config dir (never the machine-global `~/.pi`). `AuthStorage`/`ModelRegistry` are pointed at that
- *     dir, and `dispose()` is decorated to tear the whole dir down on teardown.
+ *     config dir (never the machine-global `~/.pi`). `ModelRuntime` is pointed at that dir, and
+ *     `dispose()` is decorated to tear the whole dir down on teardown.
  */
 async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike> {
   const spec = "@earendil-works/pi-coding-agent";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mod: any = await import(spec);
+  const mod = (await import(spec)) as unknown as PiSdkModule;
   const {
-    AuthStorage,
+    VERSION,
+    ModelRuntime,
     DefaultResourceLoader,
-    ModelRegistry,
     SessionManager,
     SettingsManager,
     createAgentSession,
@@ -458,21 +496,36 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     resolveCliModel,
   } = mod;
 
+  // DHK-926: assert every required symbol is present so a bump that removes one fails here at boot
+  // (naming the symbol and SDK version) rather than with a bare "cannot read properties of undefined"
+  // mid-inference. VERSION may itself be undefined on a very old SDK — fall back to "unknown".
+  const ver = (VERSION as string | undefined) ?? "unknown";
+  assertSdkSymbol("ModelRuntime", ModelRuntime, ver);
+  assertSdkSymbol("DefaultResourceLoader", DefaultResourceLoader, ver);
+  assertSdkSymbol("SessionManager", SessionManager, ver);
+  assertSdkSymbol("SettingsManager", SettingsManager, ver);
+  assertSdkSymbol("createAgentSession", createAgentSession, ver);
+  assertSdkSymbol("defineTool", defineTool, ver);
+  assertSdkSymbol("getAgentDir", getAgentDir, ver);
+  assertSdkSymbol("resolveCliModel", resolveCliModel, ver);
+
   // The auth-profile hint (DHK-509) is the sole source of provider identity; absent on ambient nodes.
   const hint = readAuthHint(ctx);
   // A fresh per-stage config dir keeps the stage hermetic - Pi never inherits machine-global ~/.pi auth
   // or models config. The OAuth `auth.json` and any custom-provider `models.json` are written into it
-  // BEFORE AuthStorage/ModelRegistry are pointed at it, so they are loaded on construction.
+  // BEFORE ModelRuntime is pointed at it, so they are loaded on construction.
   const configDir = createStageConfigDir();
   writeStageAuthFile(configDir, hint);
   writeStageCustomProviders(configDir, hint);
 
-  const authStorage = AuthStorage.create(join(configDir, "auth.json"));
-  // Brokered API-key providers apply as runtime overrides (AuthStorage's highest-priority, non-persisted
-  // source) so Pi resolves them as if set by the operator and the agent never sees the raw secret. The
-  // secret rides in `runtimeEnv`; the hint declares which var carries which provider's key.
-  applyApiKeyAuth(hint, ctx.runtimeEnv, authStorage);
-  const modelRegistry = ModelRegistry.create(authStorage, join(configDir, "models.json"));
+  // ModelRuntime replaces the defunct AuthStorage + ModelRegistry pair (DHK-925). It reads auth.json
+  // and models.json on creation, then brokered API-key providers are applied as runtime overrides so
+  // Pi resolves them as if set by the operator and the agent never sees the raw secret.
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(configDir, "auth.json"),
+    modelsPath: join(configDir, "models.json"),
+  });
+  await applyApiKeyAuth(hint, ctx.runtimeEnv, modelRuntime);
 
   // Pure decision, so it is unit-tested directly rather than only through the live Pi import. Throws
   // when the requested model cannot be resolved; the config dir is this caller's to tear down.
@@ -481,8 +534,8 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     model = selectStageModel({
       stageModel: ctx.config.model,
       profileDefaultModel: hint?.defaultModel,
-      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRegistry }),
-      available: () => modelRegistry.getAvailable(),
+      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRuntime }),
+      available: () => modelRuntime.getAvailableSnapshot(),
     });
   } catch (err) {
     cleanupStageConfigDir(configDir);
@@ -593,8 +646,7 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
 
   const { session } = await createAgentSession({
     sessionManager: SessionManager.inMemory(ctx.workspace.worktreePath),
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     settingsManager,
     resourceLoader,
     cwd,
