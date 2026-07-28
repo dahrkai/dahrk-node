@@ -44,6 +44,22 @@ this file is left verbatim.
   `https://dahrk.ai/schemas/trace.schema.json#/$defs/event`. Bumped `@dahrk/contracts`
   dependency range from `^0.8.2` to `^0.9.0` in all three package manifests.
 
+- Render the run's Linear comment thread and one-hop issue manifest into the stage prompt
+  (`commentsBlock` / `relatedBlock` in `prompt-assembly.ts`) and onto the worktree
+  (`writeComments` / `writeRelatedIssues` in `stage-runner.ts`). Consumes the new
+  `JobRequest.comments` / `JobRequest.relatedIssues` snapshotted hub-side at intake.
+
+  Comments get their OWN inline budget (`MAX_INLINE_COMMENTS_TOTAL_CHARS`) rather than sharing the
+  documents pool: the documents loop spends its budget in list order and breaks when exhausted, so a
+  shared pool would let a noisy comment thread silently evict the attached spike findings a stage
+  exists to build against. Comment truncation also keeps the NEWEST entries, the opposite of the
+  documents block — a conversation's current state is at its end.
+
+- Bumped `@dahrk/contracts` from `^0.9.0` to `^0.10.0` in all three manifests, which is the release
+  carrying `JobRequest.comments` / `relatedIssues`. 0.10.0 rather than a patch because that release
+  also retires the `skakel.io` schema `$id` (already repointed here by DHK-764 above), and a breaking
+  change must not reach `^0.9.0` consumers automatically.
+
 ## [0.1.27] - 2026-07-26
 
 ### Fixed

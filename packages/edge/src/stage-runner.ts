@@ -272,6 +272,58 @@ function writeAttachedDocuments(ref: WorkspaceRef, docs: JobRequest["attachedDoc
   }
 }
 
+/** Render the issue's comment thread as readable markdown for the scratch file: one section per
+ *  comment, oldest first, headed by author and timestamp. The prompt inlines only the most recent few
+ *  thousand characters, so this file is where an agent reads the parts that were truncated away. */
+function renderCommentsMarkdown(comments: NonNullable<JobRequest["comments"]>): string {
+  const blocks = comments.map((c) => {
+    const who = c.author.trim() || "unknown";
+    const when = c.createdAt ? ` - ${c.createdAt}` : "";
+    return `## ${who}${when}\n\n${c.body.trim()}\n`;
+  });
+  return `# Issue comments\n\n${blocks.join("\n")}`;
+}
+
+/** Persist the issue's comment thread into `.dahrk/scratch/comments.md`. Best-effort, mirroring
+ *  `writeGuidance`. This is the complete thread; the prompt's `<comments>` block is a capped tail of it. */
+function writeComments(ref: WorkspaceRef, comments: JobRequest["comments"]): void {
+  if (!comments || comments.length === 0) return;
+  try {
+    mkdirSync(ref.scratchPath, { recursive: true });
+    writeFileSync(join(ref.scratchPath, "comments.md"), renderCommentsMarkdown(comments));
+  } catch {
+    /* best-effort; a capped excerpt still reaches the agent via the stage prompt */
+  }
+}
+
+/** Render the one-hop issue manifest as a readable markdown table for the scratch file. Metadata only
+ *  (no bodies), matching the prompt's `<related>` block - this is its on-disk companion. */
+function renderRelatedMarkdown(related: NonNullable<JobRequest["relatedIssues"]>): string {
+  const rows = related.map(
+    (r) => `| ${r.relation} | ${r.key} | ${r.title.replace(/\|/g, "\\|")} | ${r.stateName} | ${r.url} |`,
+  );
+  return [
+    "# Related issues",
+    "",
+    "| Relation | Key | Title | State | URL |",
+    "|---|---|---|---|---|",
+    ...rows,
+    "",
+  ].join("\n");
+}
+
+/** Persist the one-hop issue manifest into `.dahrk/scratch/related.md`. Best-effort, mirroring
+ *  `writeGuidance`. */
+function writeRelatedIssues(ref: WorkspaceRef, related: JobRequest["relatedIssues"]): void {
+  if (!related || related.length === 0) return;
+  try {
+    mkdirSync(ref.scratchPath, { recursive: true });
+    writeFileSync(join(ref.scratchPath, "related.md"), renderRelatedMarkdown(related));
+  } catch {
+    /* best-effort; the manifest still reaches the agent via the stage prompt */
+  }
+}
+
 /** Render the run's Linear guidance into a readable markdown block for the scratch file, one
  *  bulleted rule per line annotated with its origin/team. Shared shape with the prompt's `<guidance>`
  *  block (the runner builds the prompt form); this is the on-disk companion. */
@@ -628,6 +680,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         writeIssueContext(ref, job.issueContext);
         writeGuidance(ref, job.guidance);
         writeAttachedDocuments(ref, job.attachedDocuments);
+        writeComments(ref, job.comments);
+        writeRelatedIssues(ref, job.relatedIssues);
         // Pre-create the parent of a declared output artifact so the agent's relative write succeeds
         // even if it does not mkdir first.
         if (agentConfig?.emitArtifact) {
@@ -977,6 +1031,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // with no hint of what it is meant to fix.
           ...(job.checkFailures !== undefined ? { checkFailures: job.checkFailures } : {}),
           ...(job.attachedDocuments !== undefined ? { attachedDocuments: job.attachedDocuments } : {}),
+          ...(job.comments !== undefined ? { comments: job.comments } : {}),
+          ...(job.relatedIssues !== undefined ? { relatedIssues: job.relatedIssues } : {}),
           ...(gateway ? { mcpProxyBaseUrl: gateway.baseUrl } : {}),
           // brokered inference env for a managed node (no operator login). The runtime adapter
           // (Pi) / container executor apply it as the inference process env, so the raw key is

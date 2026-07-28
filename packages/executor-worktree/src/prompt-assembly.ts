@@ -91,6 +91,95 @@ function documentsBlock(ctx: RunnerContext): string {
   return `<documents>\n${parts.join("\n\n")}\n</documents>`;
 }
 
+/** Inline budget for the comment thread, deliberately SEPARATE from the document budget rather than
+ *  drawn from a shared pool. The documents loop spends its pool in list order and breaks when it is
+ *  exhausted, so a single long comment thread sharing that pool could silently evict the attached
+ *  documents - the spike findings the stage exists to build against. Separate budgets make the two
+ *  independent: a noisy ticket costs comment fidelity, never document fidelity. */
+export const MAX_INLINE_COMMENTS_TOTAL_CHARS = 8000;
+/** Per-comment inline cap, so one enormous comment cannot consume the whole thread's budget. */
+export const MAX_INLINE_COMMENT_CHARS = 3000;
+/** Manifest rows to inline. Metadata only, so this is generous; it exists to stop a pathological
+ *  issue graph from crowding out the instruction. */
+export const MAX_INLINE_RELATED = 50;
+
+/** Defang the `<comments>`/`<comment>` closing tags inside untrusted comment text, mirroring
+ *  `neutraliseDelimiters` for documents. Comment bodies are the LEAST trusted input in the prompt -
+ *  anyone who can see the issue can write one - so this matters more here than anywhere else. */
+function neutraliseCommentDelimiters(text: string): string {
+  return text.replace(/<\/(comments?)>/gi, "<​/$1>");
+}
+
+/**
+ * Build the `<comments>` block from the issue's thread.
+ *
+ * Truncation keeps the MOST RECENT comments, the opposite of the documents block. A document is a
+ * standing reference whose opening frames it; a conversation's current state lives at its end, so
+ * dropping the tail would strip exactly the turn that redirected the work. The dropped older comments
+ * are noted and the full thread is always on disk at `.dahrk/scratch/comments.md`.
+ */
+function commentsBlock(ctx: RunnerContext): string {
+  const comments = ctx.comments;
+  if (!comments || comments.length === 0) return "";
+  const path = ".dahrk/scratch/comments.md";
+
+  // Walk backwards (newest first) accumulating within budget, then re-reverse so the block still reads
+  // oldest-to-newest as a conversation should.
+  let budget = MAX_INLINE_COMMENTS_TOTAL_CHARS;
+  const kept: string[] = [];
+  let dropped = 0;
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const comment = comments[i];
+    if (!comment) continue;
+    const body = comment.body.trim();
+    if (budget <= 0) {
+      dropped = i + 1;
+      break;
+    }
+    const cap = Math.max(0, Math.min(MAX_INLINE_COMMENT_CHARS, budget));
+    const truncated = body.length > cap;
+    const excerpt = truncated ? body.slice(0, cap) : body;
+    budget -= excerpt.length;
+    // Attributes are untrusted (an author display name is user-controlled), so strip the quoting
+    // characters exactly as the documents block does.
+    const author = (comment.author || "unknown").replace(/[<>"]/g, "'");
+    const at = comment.createdAt.replace(/[<>"]/g, "'");
+    const tail = truncated ? `\n...(truncated; full thread at ${path})` : "";
+    kept.push(
+      `<comment author="${author}" at="${at}">\n${neutraliseCommentDelimiters(excerpt)}${tail}\n</comment>`,
+    );
+  }
+  if (kept.length === 0) return "";
+  kept.reverse();
+  const note = dropped > 0 ? ` earlier="${dropped} older comment(s) omitted; full thread at ${path}"` : "";
+  return `<comments count="${comments.length}" file="${path}"${note}>\n${kept.join("\n\n")}\n</comments>`;
+}
+
+/**
+ * Build the `<related>` manifest from the issue's one-hop neighbourhood: metadata only, one row per
+ * neighbouring issue.
+ *
+ * This block is why the agent knows there is anything to look at. Bodies are not fetched, so without
+ * it a spike attached to a blocking ticket, or the epic that frames the work, is completely invisible
+ * from inside the run.
+ */
+function relatedBlock(ctx: RunnerContext): string {
+  const related = ctx.relatedIssues;
+  if (!related || related.length === 0) return "";
+  const rows = related.slice(0, MAX_INLINE_RELATED).map((r) => {
+    // Every attribute here is Linear-derived but user-authored (titles especially), so quote-strip
+    // them all; the title is element text and gets the delimiter defang.
+    const rel = r.relation.replace(/[<>"]/g, "'");
+    const key = r.key.replace(/[<>"]/g, "'");
+    const state = r.stateName.replace(/[<>"]/g, "'");
+    const title = r.title.replace(/<\/(related|issue)>/gi, "<​/$1>");
+    return `<issue rel="${rel}" key="${key}" state="${state}">${title}</issue>`;
+  });
+  const omitted = related.length > MAX_INLINE_RELATED ? related.length - MAX_INLINE_RELATED : 0;
+  const note = omitted > 0 ? ` omitted="${omitted}"` : "";
+  return `<related count="${related.length}"${note} file=".dahrk/scratch/related.md">\n${rows.join("\n")}\n</related>`;
+}
+
 /** Defang the `<guidance>`/`<guidance-rule>` closing tags inside guidance text by inserting a
  *  zero-width space, mirroring `neutraliseDelimiters` for documents, so the text cannot close the block
  *  early. Guidance is operator-authored (lower risk than documents) but we stay consistent. */
@@ -191,12 +280,18 @@ export function resolveStagePrompt(ctx: RunnerContext): string {
   const guidance = guidanceBlock(ctx);
   const gateFeedback = gateFeedbackBlock(ctx);
   const docs = documentsBlock(ctx);
+  const comments = commentsBlock(ctx);
+  const related = relatedBlock(ctx);
   // Guidance sits right after the ticket (workspace direction); gate feedback follows it (run-specific
-  // approving-with-guidance), both ahead of any attached documents. Check failures come LAST, closest
-  // to the instruction: it is the most immediate, most actionable context the agent has, and it is the
-  // reason this stage is running at all.
+  // approving-with-guidance), both ahead of any attached documents. The issue's own conversation and
+  // then its neighbourhood manifest follow the documents: they are the widest, least specific context,
+  // so they sit furthest from the instruction. Check failures come LAST, closest to the instruction:
+  // it is the most immediate, most actionable context the agent has, and it is the reason this stage
+  // is running at all.
   const checkFailures = checkFailuresBlock(ctx);
-  const preamble = [ticket, guidance, gateFeedback, docs, checkFailures].filter(Boolean).join("\n\n");
+  const preamble = [ticket, guidance, gateFeedback, docs, comments, related, checkFailures]
+    .filter(Boolean)
+    .join("\n\n");
   return preamble ? `${preamble}\n\n${instruction}` : instruction;
 }
 
@@ -211,7 +306,9 @@ export function hasSystemPrompt(ctx: RunnerContext): boolean {
       (ctx.guidance && ctx.guidance.length > 0) ||
       (ctx.gateFeedback && ctx.gateFeedback.length > 0) ||
       Boolean(ctx.checkFailures) ||
-      (ctx.attachedDocuments && ctx.attachedDocuments.length > 0),
+      (ctx.attachedDocuments && ctx.attachedDocuments.length > 0) ||
+      (ctx.comments && ctx.comments.length > 0) ||
+      (ctx.relatedIssues && ctx.relatedIssues.length > 0),
   );
 }
 

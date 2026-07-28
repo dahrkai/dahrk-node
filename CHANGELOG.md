@@ -6,6 +6,19 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **A stage now sees the issue's comment thread and the issues around it.** Previously an agent got
+  the ticket's title, description and labels, plus at most the single comment that triggered the run,
+  and nothing at all about the issue's parent, its blockers, or the issues related to it. The
+  discussion that decided how the work should be done was invisible to the agent doing it. The stage
+  prompt now carries a `<comments>` block with the thread (the node's own posts excluded, so a stage
+  never reads the previous stage's summary back as human input) and a `<related>` manifest naming the
+  parent, children, blockers and related issues with their state. The full thread and manifest are
+  also written to `.dahrk/scratch/comments.md` and `.dahrk/scratch/related.md`, so an agent can read
+  the parts the prompt had to truncate. An issue with no comments and no relations produces exactly
+  the prompt it did before.
+
 ### Fixed
 
 - **Every `runtime: pi` stage now constructs a session and runs again.** The 0.82.1 Pi runtime bump
