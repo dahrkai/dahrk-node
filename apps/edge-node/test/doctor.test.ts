@@ -18,17 +18,30 @@ test("checkNode: modern Node passes, ancient fails, garbage warns", () => {
   assert.equal(checkNode("not-a-version").status, "warn");
 });
 
-test("checkRuntimes: at least one installed passes and lists versions; none warns", () => {
+test("checkRuntimes: one available passes, and the unavailable ones still say why", () => {
+  // Listing only the good ones is what made the old report unactionable: an operator saw "none
+  // detected", went looking for software to install, and the answer was credentials.
   const some: RuntimeStatus[] = [
-    { runtime: "claude-code", cmd: "claude", installed: true, version: "2.1.0" },
-    { runtime: "codex", cmd: "codex", installed: false },
+    { runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host" },
+    { runtime: "pi", capable: true, credential: "none", available: false, detail: "needs brokered credentials" },
   ];
   const pass = checkRuntimes(some);
   assert.equal(pass.status, "pass");
-  assert.match(pass.detail ?? "", /claude-code \(2\.1\.0\)/);
+  assert.match(pass.detail ?? "", /claude-code \(ambient login on this host\)/);
+  assert.match(pass.detail ?? "", /pi unavailable \(needs brokered credentials\)/);
+});
 
-  const none: RuntimeStatus[] = [{ runtime: "pi", cmd: "pi", installed: false }];
-  assert.equal(checkRuntimes(none).status, "warn");
+test("checkRuntimes: none available warns, and the warning carries every reason", () => {
+  const none: RuntimeStatus[] = [
+    { runtime: "claude-code", capable: true, credential: "none", available: false, detail: "no credentials: log in" },
+    { runtime: "pi", capable: false, credential: "none", available: false, detail: "cannot run here: sdk missing" },
+  ];
+  const warn = checkRuntimes(none);
+  assert.equal(warn.status, "warn");
+  assert.match(warn.detail ?? "", /none available/);
+  // The two halves are distinguishable: one is a login problem, the other a broken install.
+  assert.match(warn.detail ?? "", /no credentials/);
+  assert.match(warn.detail ?? "", /cannot run here/);
 });
 
 test("checkHub: no url fails; welcome passes; an enrolment rejection still counts as reachable", () => {
@@ -87,7 +100,9 @@ test("formatReport: a FAIL drives the summary; warnings alone still read as PASS
 
 // -- runDoctor orchestration (injected deps: no network, no host probing) ---
 
-const okStatuses: RuntimeStatus[] = [{ runtime: "claude-code", cmd: "claude", installed: true, version: "2.1" }];
+const okStatuses: RuntimeStatus[] = [
+  { runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host" },
+];
 
 test("runDoctor: happy path returns exit 0 and prints a green report", async () => {
   const lines: string[] = [];
@@ -133,4 +148,44 @@ test("runDoctor: with no hub url it never probes and still fails on the missing 
   );
   assert.equal(probed, false, "no hub url -> no probe attempted");
   assert.equal(code, 1);
+});
+
+test("runDoctor: the hub saying `brokered` re-probes, so a container is not told it has no runtimes", async () => {
+  // Doctor cannot know the credential mode before it connects, so it probes as ambient (which on a
+  // credential-less container reports nothing available) and then asks. The hub is the authority.
+  const modes: (string | undefined)[] = [];
+  const lines: string[] = [];
+  await runDoctor(
+    { hubUrl: "ws://h:1", token: "sket_good" },
+    {
+      nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      probeRuntimes: async (opts) => {
+        modes.push(opts?.credentialMode);
+        return opts?.credentialMode === "brokered"
+          ? [{ runtime: "pi", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }]
+          : [{ runtime: "pi", capable: true, credential: "none", available: false, detail: "needs brokered credentials" }];
+      },
+      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "brokered" }),
+      out: (l) => lines.push(l),
+    },
+  );
+  assert.deepEqual(modes, ["ambient", "brokered"]);
+  assert.match(lines.join("\n"), /pi \(brokered credentials from the hub\)/);
+});
+
+test("runDoctor: an operator's pinned credential mode is never re-probed away", async () => {
+  const modes: (string | undefined)[] = [];
+  await runDoctor(
+    { hubUrl: "ws://h:1", token: "sket_good", credentialMode: "ambient" },
+    {
+      nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      probeRuntimes: async (opts) => {
+        modes.push(opts?.credentialMode);
+        return okStatuses;
+      },
+      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "brokered" }),
+      out: () => {},
+    },
+  );
+  assert.deepEqual(modes, ["ambient"], "a pin is a deliberate choice; the hub does not overwrite it");
 });

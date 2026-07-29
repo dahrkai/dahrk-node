@@ -163,6 +163,16 @@ test("makeRunner('claude-code') returns a claude runner without importing the li
   assert.equal(runner.runtime, "claude-code");
 });
 
+test("makeRunner: a retired or unknown runtime THROWS rather than quietly running Claude", () => {
+  // `codex` is still in the wire enum pending its harness-side removal (DHK-510), and this used to
+  // fall through to the Claude runner: a codex stage ran on Claude and reported success, so the run
+  // went green on a runtime nobody chose. Failing is strictly better than substituting.
+  assert.throws(
+    () => makeRunner("codex" as Parameters<typeof makeRunner>[0]),
+    /unsupported runtime "codex"/,
+  );
+});
+
 // --- Interactive characterisation: one test per exit kind (the coverage gap this ticket closes) ---
 
 test("runInteractive tool exit: the stage-complete tool settles ok and hands back its summary + document", async () => {

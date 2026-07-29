@@ -29,8 +29,10 @@ Sign up and mint a token at [app.dahrk.ai](https://app.dahrk.ai); full docs live
 
 ## 30-second quickstart
 
-Needs **Node 22+** and a logged-in agent runtime (e.g. the `claude` CLI). Pick any channel; all
-install the same version and provide the `dahrk` command:
+Needs **Node 22+** and a way to authenticate stages: either a logged-in `claude` on this host, or
+`ANTHROPIC_API_KEY` in the environment, or enrolment into a brokered pool (which needs neither). The
+agent runtimes themselves ship inside the client, so there is nothing else to install. Pick any
+channel; all install the same version and provide the `dahrk` command:
 
 ```bash
 npm install -g dahrk-node                          # npm
@@ -70,9 +72,16 @@ dahrk stop        # stop it (it stays stopped until the next `start`)
 dahrk restart     # pick up a new client version, token, or runtime
 ```
 
-The node auto-detects which runtimes are installed (claude / codex / pi), mints and persists a stable
-node id under `~/.dahrk/node.json`, dials out to the hub, and waits for Jobs. It advertises no inbound
-ports; repositories are cloned on demand from each Job's git URL.
+The node works out which runtimes it can actually serve, mints and persists a stable node id under
+`~/.dahrk/node.json`, dials out to the hub, and waits for Jobs. It advertises no inbound ports;
+repositories are cloned on demand from each Job's git URL.
+
+A runtime is advertised only when both halves hold: the node can **execute** it (its SDK ships with
+the client, so this is normally a given) and can **credential** it. On a brokered node the hub
+supplies the key, so everything is servable. On an ambient node a stage borrows a login that already
+exists on the host, which works for Claude and never for Pi - a Pi stage runs in a hermetic config
+directory and deliberately never reads `~/.pi`. Run `dahrk doctor` to see the verdict and reason for
+each runtime.
 
 Only one node runs per machine: they would share this machine's node id and race each other for Jobs, so
 a second `start` refuses rather than dialling the hub twice.
@@ -94,8 +103,9 @@ by hand; `dahrk service uninstall` is how you remove the service entirely, as op
 Because the node id is persisted at `~/.dahrk/node.json`, the service re-attaches as the **same** node
 across restarts - no hand-set `DAHRK_NODE_ID`. The token (and any `--name` / `--hub-url`) is baked into
 the service's environment block, not its command line, so it never shows up in `ps`. Your current `PATH`
-is snapshotted into that block too, so the daemon finds `git` and the runtime CLIs (claude / codex / pi)
-the same way your shell does - start the node from a shell where `dahrk doctor` already sees them.
+is snapshotted into that block too, so the daemon finds `git` - and, on an ambient node, can still see
+the `claude` login - the same way your shell does. Start the node from a shell where `dahrk doctor`
+already reports what you expect.
 
 - **macOS** writes `~/Library/LaunchAgents/ai.dahrk.node.plist` and loads it with `launchctl`.
 - **Linux** writes `~/.config/systemd/user/dahrk-node.service`, runs `systemctl --user enable --now`, and
@@ -237,7 +247,7 @@ env var.
 | `--hub-url` / `DAHRK_HUB_URL` | Hub WebSocket URL (optional; defaults to `wss://api.dahrk.ai`). |
 | `--token` / `DAHRK_ENROL_TOKEN` | Enrolment token (required). |
 | `--name` / `DAHRK_NODE_NAME` | Display-name override (else the hub assigns one). |
-| `DAHRK_RUNTIMES` | Comma list to override runtime auto-detection (`claude-code,codex,pi`). |
+| `DAHRK_RUNTIMES` | Comma list to override runtime auto-detection (`claude-code,pi`). Wins unconditionally. |
 | `DAHRK_REPOS` | Optional self-hosted allowlist of registry repo ids to serve. |
 | `DAHRK_CREDENTIAL_MODE` | `ambient` (host credentials) or `brokered` (hub-brokered tokens). |
 | `DAHRK_NODE_ID` / `DAHRK_TENANT_ID` | Explicit identity overrides (managed profile). |

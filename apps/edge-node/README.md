@@ -2,14 +2,16 @@
 
 The installable **Dahrk** edge client. Install it, run it with an enrolment token, and it becomes a
 self-managed **node** that executes Dahrk workflow stages in an isolated git worktree. It dials OUT to
-the hub over WebSocket (no inbound ports), auto-detects the agent runtimes installed on the host
-(Claude Code, Codex, Pi), and streams progress and results back.
+the hub over WebSocket (no inbound ports), works out which agent runtimes (Claude Code, Pi) it can
+serve, and streams progress and results back.
 
 The npm package is `dahrk-node`; the command it installs is `dahrk`.
 
 ## Install
 
-Needs **Node 22+** and a logged-in agent runtime (e.g. the `claude` CLI).
+Needs **Node 22+** and a way to authenticate stages: a logged-in `claude` on this host, a provider key
+in the environment, or enrolment into a brokered pool (which needs neither). The agent runtimes
+themselves ship inside the client - there is nothing else to install. Run `dahrk doctor` to check.
 
 ```bash
 npm install -g dahrk-node                          # npm

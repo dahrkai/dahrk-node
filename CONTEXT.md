@@ -98,7 +98,7 @@ carrier of context between stages (never a live LLM conversation - stages swap r
 _Avoid_: Checkout, clone, sandbox.
 
 **Runner adapter**:
-A thin wrapper over a vendor agent SDK (Claude Agent SDK, Codex SDK, Pi) implementing the internal
+A thin wrapper over a vendor agent SDK (Claude Agent SDK, Pi) implementing the internal
 `Runner` interface. One per runtime. Produces the normalised trace.
 _Avoid_: Driver, plugin, agent.
 

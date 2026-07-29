@@ -21,7 +21,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Runtime } from "@dahrk/contracts";
 
-const RUNTIMES: readonly Runtime[] = ["claude-code", "codex", "pi"];
+// Deliberately excludes `codex` (DHK-503/DHK-510): a node.json written by an older client may still
+// list it, and dropping it on read is the migration - a value this client cannot serve must not be
+// restored into an advertisement. Unknown values have always been filtered here, so this needs no
+// special case; it just narrows what counts as known.
+const RUNTIMES: readonly Runtime[] = ["claude-code", "pi"];
 const isRuntime = (v: unknown): v is Runtime => (RUNTIMES as readonly unknown[]).includes(v);
 
 /** What `~/.dahrk/node.json` holds. Every field is optional: an older client wrote only `nodeId`, and

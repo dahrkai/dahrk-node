@@ -69,7 +69,8 @@ export interface ToolPresence {
   git: boolean;
   /** An SSH key the agent can push with (a key file or a loaded agent identity). */
   sshKey: boolean;
-  /** The Claude runtime CLI is on PATH (authenticated login is not probed here). */
+  /** The `claude` CLI is on PATH. Note this is evidence of an ambient LOGIN, not of the runtime being
+   *  installed: a stage executes the SDK's own bundled binary, never this one. */
   claude: boolean;
   /** `gh` is installed (ambient GitHub auth for PR opening). */
   gh: boolean;
@@ -141,7 +142,11 @@ export function checkTools(tools: ToolPresence): CheckResult[] {
   return [
     git,
     finding(tools.sshKey, "SSH key", "no key or agent identity found; pushing over SSH will fail"),
-    finding(tools.claude, "Claude runtime", "not on PATH; the node will serve no agent stages"),
+    finding(
+      tools.claude,
+      "Claude login",
+      "no `claude` on PATH; on an ambient node that reads as no credentials, so it serves no Claude stages",
+    ),
     finding(tools.gh, "gh CLI", "not installed; ambient PR opening is unavailable"),
     finding(tools.docker, "docker", "not present; container stages are unavailable"),
   ];

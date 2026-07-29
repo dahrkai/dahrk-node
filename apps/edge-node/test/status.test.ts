@@ -33,7 +33,7 @@ const facts = (over: Partial<StatusFacts> = {}): StatusFacts => ({
   stateFile: "/home/u/.dahrk/node.json",
   state: { nodeId: "node-1", enrolToken: "sket_abc", name: "local-a1", tenantId: "t_default" },
   envToken: false,
-  runtimes: [{ runtime: "claude-code", cmd: "claude", installed: true, version: "1.2.3" }],
+  runtimes: [{ runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host", cliVersion: "1.2.3" }],
   presence: { kind: "running", pid: 42 },
   jobs: [],
   service: { installed: true, running: true, pid: 42 },
@@ -137,7 +137,7 @@ test("opting out of update checks means status says nothing about them at all", 
 test("no service installed, and no runtimes, each explain the consequence", () => {
   const out = report({ presence: { kind: "not-installed" }, runtimes: [] });
   assert.match(out, /Node not installed/);
-  assert.match(out, /none detected - this node will serve no Jobs/);
+  assert.match(out, /none available - this node will serve no Jobs/);
 });
 
 // --- The two-source liveness check: a foreground / pm2 node is a REAL node --------------------
@@ -240,7 +240,7 @@ function deps(over: Partial<StatusDeps> & { stateDir: string }): StatusDeps {
     platform: "darwin",
     homeDir: "/home/u",
     env: { DAHRK_STATE_DIR: over.stateDir },
-    probeRuntimes: async () => [{ runtime: "claude-code", cmd: "claude", installed: true, version: "1.2.3" }],
+    probeRuntimes: async () => [{ runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host", cliVersion: "1.2.3" }],
     fileExists: () => true,
     capture: () => ({ code: 0, stdout: '\t"PID" = 79747;\n' }),
     lockedPid: () => undefined,

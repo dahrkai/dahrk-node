@@ -1,35 +1,82 @@
 /**
- * Runtime auto-detect. On boot a token-only edge probes which agent runtimes are actually
- * installed on the host and advertises only those, so the hub never routes a Job to a runtime the node
- * cannot run. Overridable: `apps/edge-node` uses the operator's `DAHRK_RUNTIMES` when set and only
- * falls back to this probe otherwise.
+ * Runtime auto-detect. On boot a token-only edge works out which agent runtimes it can actually serve
+ * and advertises only those, so the hub never routes a Job to a runtime the node cannot run.
+ * Overridable: `apps/edge-node` uses the operator's `DAHRK_RUNTIMES` when set and only falls back to
+ * this probe otherwise.
  *
- * The probe shells out to each runtime's CLI `--version` (the design-doc contract). Note the runner
- * adapters embed the vendor SDKs rather than the CLI, so a responding `--version` is a proxy for "this
- * runtime is installed and on PATH", which is the routing signal we want. A probe that errors, exits
- * non-zero, or times out is retried before it is treated as "not installed" - a single transient miss
- * (a cold Node CLI on a busy host) must not drop a working runtime from the advertisement (DHK-390);
- * only a command that is genuinely not on PATH is concluded absent without a retry.
+ * WHAT CHANGED, AND WHY. This used to shell out to `claude --version` / `pi --version` and advertise
+ * whatever answered. That measured the wrong thing in both directions, because the host CLI is not
+ * what executes a stage: `claude-adapter.ts` calls `query()` from `@anthropic-ai/claude-agent-sdk`,
+ * which spawns the binary VENDORED INSIDE THAT SDK, and `pi-adapter.ts` runs `createAgentSession()`
+ * from `@earendil-works/pi-coding-agent` in-process. Neither ever invokes the CLI the probe found. So
+ * a container holding a brokered key advertised nothing (it could have run the stage perfectly well),
+ * while a host with a logged-in `pi` advertised `pi` and then failed every Pi Job it was sent, because
+ * the Pi adapter builds a hermetic per-stage config dir and never reads the machine-global `~/.pi`.
+ * Note the converse trap, which cost a wrong assumption while writing this: Pi DOES pick provider keys
+ * up from the process environment, so "no `~/.pi`" is not the same as "no ambient credential" - which
+ * is why the Pi credential question is put to Pi itself rather than guessed at.
  *
- * `probeRuntimeStatuses` returns the richer per-runtime status (installed + reported version) that
- * `dahrk doctor` prints; `detectRuntimes` is the thin routing view (just the installed set).
+ * Advertising is now the conjunction of two INDEPENDENT questions, which the old single probe
+ * conflated:
+ *
+ *   1. CAPABILITY - can this process execute the runtime at all? That is "is the vendored SDK
+ *      resolvable from here", nothing to do with PATH.
+ *   2. CREDENTIALS - is there a way to authenticate a stage? Brokered means the hub puts a key on the
+ *      Job, so anything capable qualifies. Ambient means the stage borrows a login that already
+ *      exists on this host, which is a real signal for Claude and an impossible one for Pi.
+ *
+ * A runtime is advertised iff both hold. `probeRuntimeStatuses` returns the per-runtime reasoning
+ * that `dahrk doctor` prints; `detectRuntimes` is the thin routing view (just the advertisable set).
  */
 import { execFile } from "node:child_process";
-import type { Runtime } from "@dahrk/contracts";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { CredentialMode, Runtime } from "@dahrk/contracts";
+import { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "@dahrk/executor-worktree";
 
-/** One probe per runtime: the CLI to invoke and the `Runtime` it maps to. */
-const PROBES: ReadonlyArray<{ runtime: Runtime; cmd: string }> = [
-  { runtime: "claude-code", cmd: "claude" },
-  { runtime: "pi", cmd: "pi" },
+/** Where a stage's credentials would come from, or `none` if nothing can authenticate it here. */
+export type CredentialSource = "brokered" | "ambient" | "none";
+
+interface RuntimeSpec {
+  runtime: Runtime;
+  /** The npm package the adapter loads. Resolvable = this process can execute the runtime. Owned by
+   *  `executor-worktree`, which is where the importing adapters live and where resolution must happen. */
+  sdk: string;
+  /** The host CLI. Probed ONLY as an ambient-login hint, never as the capability signal. */
+  cmd: string;
+  /** Whether this runtime's ambient credential can come from a host LOGIN (a CLI session / keychain),
+   *  as opposed to only from the environment. Decides whether the CLI probe tells us anything. */
+  ambientLogin: boolean;
+}
+
+const SPECS: readonly RuntimeSpec[] = [
+  { runtime: "claude-code", sdk: RUNTIME_SDK["claude-code"]!, cmd: "claude", ambientLogin: true },
+  // Pi's ambient credential can only ever come from the ENVIRONMENT, never from a host login:
+  // `defaultCreatePiSession` writes a fresh per-stage config dir and points `ModelRuntime` at it,
+  // deliberately never inheriting `~/.pi`. So a logged-in host `pi` proves nothing and is not probed -
+  // but a provider key in the env is picked up by Pi directly, and `piAmbientCredentialAvailable` asks
+  // Pi itself whether one is usable.
+  { runtime: "pi", sdk: RUNTIME_SDK.pi!, cmd: "pi", ambientLogin: false },
 ];
 
-/** A runtime's install status as seen by the version probe. `version` is the trimmed first line of
- *  `<cmd> --version` (possibly `""` if the CLI printed nothing); it is absent iff `installed` is false. */
+/**
+ * One runtime's advertisability, with the reasoning kept rather than collapsed to a boolean - the
+ * operator's next question after "why is this node serving nothing" is always "which half is missing".
+ */
 export interface RuntimeStatus {
   runtime: Runtime;
-  cmd: string;
-  installed: boolean;
-  version?: string;
+  /** The runtime's SDK resolves from here, so a stage could execute. */
+  capable: boolean;
+  /** Where a stage's credentials would come from. `none` means the runtime is not advertisable. */
+  credential: CredentialSource;
+  /** `capable && credential !== "none"` - the routing answer. */
+  available: boolean;
+  /** One phrase explaining this verdict, for `dahrk doctor`. */
+  detail: string;
+  /** The host CLI's version, when one answered. Diagnostic only: it is NOT the version that runs a
+   *  stage (that is the bundled SDK's), and the two routinely differ. */
+  cliVersion?: string;
 }
 
 /** Default per-probe timeout. Raised from the original 3000ms: a cold Node-based CLI (`claude`, `pi`)
@@ -43,13 +90,38 @@ const DEFAULT_TIMEOUT_MS = 5000;
  *  nothing to wait for - and a CLI that keeps erroring is still, correctly, not advertised. */
 const DEFAULT_ATTEMPTS = 2;
 
+/** Env vars that carry a usable Anthropic credential. Either one lets the Claude SDK authenticate
+ *  with no host login at all, which is the common shape in a container that is not brokered. */
+const CLAUDE_CREDENTIAL_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+
+export interface DetectOptions {
+  /** How this node's stages are credentialled. Default `ambient`, matching `EdgeOptions`. */
+  credentialMode?: CredentialMode;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  timeoutMs?: number;
+  attempts?: number;
+  /** Injectable module resolution, so the capability half is testable without touching node_modules. */
+  canResolve?: (specifier: string) => boolean;
+  /** Injectable "can Pi authenticate from this environment", so the credential half is testable
+   *  without constructing a real Pi `ModelRuntime`. */
+  piAmbientCredential?: (env: NodeJS.ProcessEnv) => Promise<boolean>;
+}
+
 /** One `<cmd> --version` invocation. Resolves the trimmed first non-empty output line on exit 0;
  *  otherwise `{ retryable }`, where `retryable` is false ONLY for `ENOENT` (the command is not on
  *  PATH, so no amount of retrying will find it). A timeout, spawn hiccup or non-zero exit is retryable:
  *  it may be transient. Never rejects. */
-function probeOnce(cmd: string, timeoutMs: number): Promise<{ version: string } | { retryable: boolean }> {
+function probeOnce(
+  cmd: string,
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv,
+): Promise<{ version: string } | { retryable: boolean }> {
   return new Promise((resolve) => {
-    execFile(cmd, ["--version"], { timeout: timeoutMs }, (err, stdout) => {
+    // `env` is passed explicitly rather than inherited, so `opts.env` genuinely controls the whole
+    // probe. Inheriting made the PATH lookup answer from the ambient process while the credential
+    // check answered from the caller's env - two halves of one question disagreeing about the host.
+    execFile(cmd, ["--version"], { timeout: timeoutMs, env }, (err, stdout) => {
       if (err) {
         const code = (err as NodeJS.ErrnoException).code;
         return resolve({ retryable: code !== "ENOENT" });
@@ -62,9 +134,14 @@ function probeOnce(cmd: string, timeoutMs: number): Promise<{ version: string } 
 
 /** Probe `<cmd> --version`, retrying a transient failure before concluding absence. Resolves the
  *  reported version string on success, else `undefined` (genuinely not installed). Never rejects. */
-async function probe(cmd: string, timeoutMs: number, attempts: number): Promise<string | undefined> {
+async function probe(
+  cmd: string,
+  timeoutMs: number,
+  attempts: number,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const result = await probeOnce(cmd, timeoutMs);
+    const result = await probeOnce(cmd, timeoutMs, env);
     if ("version" in result) return result.version;
     // Not on PATH: definitively absent, so a retry would only add `attempts * timeoutMs` of latency.
     if (!result.retryable) return undefined;
@@ -73,33 +150,94 @@ async function probe(cmd: string, timeoutMs: number, attempts: number): Promise<
 }
 
 /**
- * Probe every candidate runtime concurrently and return each one's status in a stable order.
- * @param timeoutMs per-probe timeout (default {@link DEFAULT_TIMEOUT_MS}).
- * @param attempts invocations before concluding absence (default {@link DEFAULT_ATTEMPTS}); a single
- *   transient failure is retried so it cannot drop a working runtime from the advertisement.
+ * Is there an ambient Anthropic login on this host?
+ *
+ * An explicit env credential is conclusive. Otherwise fall back to "the `claude` CLI answered", which
+ * is weak but is genuinely the best available signal: on macOS the CLI keeps its OAuth token in the
+ * Keychain, so there is no credentials file to stat, and requiring one would report every logged-in
+ * Mac as having no credentials. The file check covers the Linux/CI shape where there is one.
  */
-export async function probeRuntimeStatuses(
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  attempts = DEFAULT_ATTEMPTS,
-): Promise<RuntimeStatus[]> {
-  const versions = await Promise.all(PROBES.map((p) => probe(p.cmd, timeoutMs, attempts)));
-  return PROBES.map((p, i) => {
-    const version = versions[i];
-    return version === undefined
-      ? { runtime: p.runtime, cmd: p.cmd, installed: false }
-      : { runtime: p.runtime, cmd: p.cmd, installed: true, version };
-  });
+function hasAmbientClaudeLogin(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  cliAnswered: boolean,
+): boolean {
+  if (CLAUDE_CREDENTIAL_ENV.some((k) => (env[k] ?? "").trim() !== "")) return true;
+  if (existsSync(join(home, ".claude", ".credentials.json"))) return true;
+  return cliAnswered;
 }
 
 /**
- * Probe every candidate runtime concurrently and return the ones that responded, in a stable order.
- * @param timeoutMs per-probe timeout (default {@link DEFAULT_TIMEOUT_MS}).
- * @param attempts invocations before concluding absence (default {@link DEFAULT_ATTEMPTS}).
+ * Work out every runtime's advertisability and why, in a stable order.
+ *
+ * The CLI probe still runs, but only where its answer can change something: as the last-resort
+ * ambient-login hint for Claude. It is skipped entirely under `brokered`, where the hub supplies the
+ * credential and the host's PATH is irrelevant - which also means a brokered node stops paying two
+ * process spawns per re-probe.
  */
-export async function detectRuntimes(
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  attempts = DEFAULT_ATTEMPTS,
-): Promise<Runtime[]> {
-  const statuses = await probeRuntimeStatuses(timeoutMs, attempts);
-  return statuses.filter((s) => s.installed).map((s) => s.runtime);
+export async function probeRuntimeStatuses(opts: DetectOptions = {}): Promise<RuntimeStatus[]> {
+  const credentialMode: CredentialMode = opts.credentialMode ?? "ambient";
+  const env = opts.env ?? process.env;
+  const home = opts.homeDir ?? homedir();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const attempts = opts.attempts ?? DEFAULT_ATTEMPTS;
+  const canResolve = opts.canResolve ?? canResolveSdk;
+
+  const ambient = credentialMode === "ambient";
+  const [versions, piAmbient] = await Promise.all([
+    Promise.all(
+      SPECS.map((s) => (ambient && s.ambientLogin ? probe(s.cmd, timeoutMs, attempts, env) : Promise.resolve(undefined))),
+    ),
+    // Only asked when it can change the answer: under `brokered` Pi is credentialled regardless.
+    ambient ? (opts.piAmbientCredential ?? piAmbientCredentialAvailable)(env) : Promise.resolve(false),
+  ]);
+
+  return SPECS.map((spec, i) => {
+    const cliVersion = versions[i];
+    const capable = canResolve(spec.sdk);
+    const base = { runtime: spec.runtime, capable, ...(cliVersion === undefined ? {} : { cliVersion }) };
+
+    if (!capable) {
+      // The install itself is broken: the bundle references an SDK the published manifest did not
+      // pull in. Say which package, because the fix is a reinstall or a release, not a login.
+      return {
+        ...base,
+        credential: "none" as const,
+        available: false,
+        detail: `cannot run here: ${spec.sdk} is not installed (reinstall dahrk-node)`,
+      };
+    }
+    if (credentialMode === "brokered") {
+      return { ...base, credential: "brokered" as const, available: true, detail: "brokered credentials from the hub" };
+    }
+    if (!spec.ambientLogin) {
+      // Pi: the environment is the only ambient source, and Pi itself has just told us whether one of
+      // its providers is usable from it. A host `pi` login is deliberately not consulted.
+      if (piAmbient) {
+        return { ...base, credential: "ambient" as const, available: true, detail: "provider key in the environment" };
+      }
+      return {
+        ...base,
+        credential: "none" as const,
+        available: false,
+        detail:
+          "no provider key in the environment (a Pi stage never reads a `pi` login); set one or enrol into a brokered pool",
+      };
+    }
+    if (hasAmbientClaudeLogin(env, home, cliVersion !== undefined)) {
+      return { ...base, credential: "ambient" as const, available: true, detail: "ambient login on this host" };
+    }
+    return {
+      ...base,
+      credential: "none" as const,
+      available: false,
+      detail: `no credentials: log in with \`${spec.cmd}\`, set ${CLAUDE_CREDENTIAL_ENV[0]}, or enrol into a brokered pool`,
+    };
+  });
+}
+
+/** The routing view: the runtimes this node can actually serve, in a stable order. */
+export async function detectRuntimes(opts: DetectOptions = {}): Promise<Runtime[]> {
+  const statuses = await probeRuntimeStatuses(opts);
+  return statuses.filter((s) => s.available).map((s) => s.runtime);
 }
