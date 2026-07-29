@@ -92,6 +92,18 @@ export function raceNextTurn<T>(
  */
 export const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? process.env.SKAKEL_COALESCE_MS ?? 40);
 
+/**
+ * The hard turn ceiling both runtimes honour (DHK-970): the backstop against an agent stuck in a
+ * productive-looking tool loop, which the time-based watchdogs (the idle window, the stage wall clock)
+ * never trip because it keeps emitting output. Claude hands it to the SDK as `Options.maxTurns`; Pi has
+ * no equivalent SDK option, so its adapter counts Pi's per-turn events and aborts at the ceiling. Shared
+ * here so both runtimes read the SAME env var and default. Read at call time (not a module-load
+ * constant) so a stage can be bounded via the env and a test can shrink it.
+ */
+export function maxTurnCeiling(): number {
+  return Number(process.env.DAHRK_MAX_TURNS ?? process.env.SKAKEL_MAX_TURNS ?? 64);
+}
+
 /** The loop-owned lifecycle levers the interactive settle needs: the cancel signal, a live `cancelled`
  *  predicate (runner state), the runner's `cancel()` (fired on timeout), and whether the stage
  *  instruction already rides in the runtime's system prompt (so the seed can be a short kickoff). */

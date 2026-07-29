@@ -92,6 +92,10 @@ class FakePiSession implements PiSessionLike {
     // execute and produces no action/observation - blocked up front, not run-then-annotated.
     const blockedCallIds = new Set<string>();
     for (const ev of script) {
+      // Once the adapter aborts the in-flight run (e.g. at the turn ceiling, DHK-970), Pi stops driving
+      // the prompt: deliver no further scripted events. This proves the ceiling HALTS the run, not merely
+      // that abort() was called.
+      if (this.aborted) break;
       if (ev.type === "tool_execution_start") {
         const decision = this.gate?.(ev.toolName, ev.args);
         if (decision?.block) {
@@ -102,6 +106,11 @@ class FakePiSession implements PiSessionLike {
       }
       if (ev.type === "tool_execution_end" && blockedCallIds.has(ev.toolCallId)) continue;
       for (const l of [...this.listeners]) l(ev);
+    }
+    // Model the live SDK settling an aborted prompt() with an `aborted` terminal event, so the mapper
+    // sees the `fail` settle a real abort produces rather than a clean end (DHK-970).
+    if (this.aborted) {
+      for (const l of [...this.listeners]) l(pe({ type: "agent_end", messages: [{ stopReason: "aborted" }] }));
     }
   }
   async abort(): Promise<void> {
@@ -229,6 +238,38 @@ test("runBatch: a runtime failure settles status fail with an error event", asyn
   const err = events.find((e) => e.type === "error") as Extract<TraceEvent, { type: "error" }>;
   assert.equal(err.kind, "agent_error");
   assert.equal(err.message, "provider 500");
+});
+
+// DHK-970: Pi turn ceiling. A stage stuck in a productive-looking tool loop trips neither time-based
+// watchdog (it keeps emitting output). The adapter counts Pi's per-turn events and aborts the in-flight
+// prompt() at the shared ceiling (env DAHRK_MAX_TURNS), producing the SAME `fail` terminal state and
+// (absent) failure class Claude yields when it hits Options.maxTurns.
+
+test("DHK-970 runBatch: a runaway stage stops at the shared turn ceiling and settles fail like Claude's maxTurns", async () => {
+  process.env.DAHRK_MAX_TURNS = "3";
+  try {
+    // One prompt() emitting far more than the ceiling of turn cycles, never a dahrk_stage_complete and
+    // never a settling text turn - the runaway the time-based watchdogs never catch.
+    const script: PiEvent[] = [pe({ type: "agent_start" })];
+    for (let i = 0; i < 10; i++) {
+      script.push(
+        pe({ type: "turn_start" }),
+        pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `loop ${i}` } }),
+        pe({ type: "tool_execution_start", toolName: "bash", toolCallId: `c${i}`, args: { command: "true" } }),
+        pe({ type: "tool_execution_end", toolCallId: `c${i}`, content: "", isError: false }),
+        pe({ type: "turn_end", message: { stopReason: "stop" } }),
+      );
+    }
+    const fake = new FakePiSession([script]);
+    const result = await createPiRunner({ createSession: async () => fake }).runBatch(ctx(), () => {});
+
+    assert.equal(fake.aborted, true, "the adapter aborted the in-flight run once the ceiling was reached");
+    assert.equal(fake.prompts.length, 1, "the ceiling is enforced inside the single prompt(), not by a new turn");
+    assert.equal(result.status, "fail", "hitting the ceiling settles fail, as Claude's maxTurns does");
+    assert.equal(result.failureClass, undefined, "no failureClass -> the engine classes it 'agent', same as Claude");
+  } finally {
+    delete process.env.DAHRK_MAX_TURNS;
+  }
 });
 
 test("runInteractive gate exit: opening turn is self-seeded; per-turn stage-exit suppressed; a summary turn produces the recap", async () => {

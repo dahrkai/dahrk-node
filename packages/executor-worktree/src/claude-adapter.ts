@@ -32,13 +32,10 @@ import {
 } from "./runtime-session.js";
 import { resolveStagePrompt, hasSystemPrompt } from "./prompt-assembly.js";
 import { elicitOutcomeReply } from "./elicit-router.js";
-import { runInteractiveLoop, runBatchLoop } from "./turn-loop.js";
+import { runInteractiveLoop, runBatchLoop, maxTurnCeiling } from "./turn-loop.js";
 import { ManagedMailbox } from "./mailbox.js";
 import { createStageCompleteTool, type StageCompleteTool } from "./stage-complete-tool.js";
 import { createAskUserQuestionTool, ASK_USER_QUESTION_ALIAS } from "./ask-user-question-tool.js";
-
-/** Hard turn ceiling so a runaway interactive session cannot loop indefinitely. */
-const MAX_TURNS = Number(process.env.DAHRK_MAX_TURNS ?? process.env.SKAKEL_MAX_TURNS ?? 64);
 
 /** Default worktree-relative path stamped on a document handed back via `dahrk_stage_complete`
  *  when the stage declared no `emitArtifact`. Kept under the scratch output convention so it reads
@@ -489,7 +486,7 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner {
           allowedTools: [stageTool.allowedToolName, askTool.allowedToolName],
           canUseTool: async (toolName, input) =>
             interactiveCanUseTool(summarising.value, stageTool.allowedToolName, ctx, toolName, input),
-          maxTurns: MAX_TURNS,
+          maxTurns: maxTurnCeiling(),
           includePartialMessages: false,
         };
 
