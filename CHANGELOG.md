@@ -48,6 +48,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **A batch stage doing one long tool call that streams no output is no longer killed as stalled.**
+  The batch output-idle watchdog reset only on streamed trace events, so a stage whose sole activity
+  was a single long-running tool call that emits nothing until it exits (classically
+  `pnpm test 2>&1 | tail`, where `tail` buffers) looked identical to a hung runtime: after the one
+  action event there was total silence, and past the stall window (default 300s) the watchdog
+  cancelled a healthy stage, landing `status: timeout` with a `stalled (no output for Ns)` summary.
+  The watchdog now measures agent silence rather than any silence: while a tool call is open it stays
+  disarmed, re-arming when the call returns. A genuinely hung runtime with no call in flight is still
+  cancelled on the window, and check and interactive stages are unaffected.
+
 - **Every `runtime: pi` stage now constructs a session and runs again.** The 0.82.1 Pi runtime bump
   dropped the `AuthStorage` export and the `ModelRegistry.create` static, so each Pi stage died at
   session construction with `Cannot read properties of undefined (reading 'create')`, before any
