@@ -51,3 +51,41 @@ test("brokered runtimeEnv overrides an ambient value of the same key", () => {
     delete process.env.ANTHROPIC_API_KEY;
   }
 });
+
+// --- auth-profile model: coverage beyond the single-key legacy path --------------------------
+
+test("multiple keys in runtimeEnv all reach the subprocess env (multi-credential brokered node)", () => {
+  // The broker can mint more than one credential (e.g. ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL for a
+  // proxy endpoint). All must reach the subprocess unchanged.
+  const opts = runtimeEnvOptions(
+    ctx({ runtimeEnv: { ANTHROPIC_API_KEY: "sk-ant", ANTHROPIC_BASE_URL: "https://proxy.example/v1" } }),
+  );
+  assert.ok(opts.env, "env is populated");
+  assert.equal(opts.env?.ANTHROPIC_API_KEY, "sk-ant", "primary inference key reaches subprocess");
+  assert.equal(opts.env?.ANTHROPIC_BASE_URL, "https://proxy.example/v1", "secondary key reaches subprocess");
+});
+
+test("non-Anthropic key in runtimeEnv passes through: broker can thread any credential under any name", () => {
+  // An opaque key name carries the secret; the Claude adapter must not filter by var name.
+  const opts = runtimeEnvOptions(ctx({ runtimeEnv: { DAHRK_RUNTIME_KEY_1: "sk-alt-value" } }));
+  assert.equal(opts.env?.DAHRK_RUNTIME_KEY_1, "sk-alt-value");
+});
+
+test("runtimeAuth hint present alongside runtimeEnv: env is set correctly (hint does not change output)", () => {
+  // The broker mints both runtimeAuth (provider declaration) and runtimeEnv (the actual secret).
+  // Claude reads only runtimeEnv; the runtimeAuth hint must be transparent to runtimeEnvOptions.
+  const hint = { providers: [{ kind: "api_key" as const, provider: "anthropic", envVar: "ANTHROPIC_API_KEY" }] };
+  const opts = runtimeEnvOptions(
+    { ...ctx({ runtimeEnv: { ANTHROPIC_API_KEY: "sk-brokered" } }), runtimeAuth: hint } as RunnerContext,
+  );
+  assert.ok(opts.env, "env is populated when both runtimeAuth and runtimeEnv are present");
+  assert.equal(opts.env?.ANTHROPIC_API_KEY, "sk-brokered", "the key from runtimeEnv reaches subprocess unchanged");
+});
+
+test("ambient node with runtimeAuth but no runtimeEnv: no env option (the hint alone does not activate brokered auth)", () => {
+  // Self-managed nodes may carry a hint describing their provider without minting runtime credentials.
+  // Absence of runtimeEnv must produce the no-env path, not a broken partial env.
+  const hint = { providers: [{ kind: "api_key" as const, provider: "anthropic", envVar: "ANTHROPIC_API_KEY" }] };
+  const opts = runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext);
+  assert.deepEqual(opts, {}, "no runtimeEnv -> no env option, even when runtimeAuth carries a hint");
+});
