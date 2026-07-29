@@ -29,6 +29,7 @@ import {
   writeStageCustomProviders,
 } from "./pi-auth.js";
 import {
+  HANDED_BACK_ARTIFACT_PATH,
   makeEmit,
   SUMMARISE_PROMPT,
   type PolicyAwareRunnerContext,
@@ -269,6 +270,7 @@ function makePiRuntimeSession(
       const state = newPiBufferState();
       let stageComplete = false;
       let summary: string | undefined;
+      let document: string | undefined;
       let stageCompleteCallId: string | undefined;
       let responseText: string | undefined;
       let status: JobStatus | undefined;
@@ -286,8 +288,9 @@ function makePiRuntimeSession(
         if (ev.type === "tool_execution_start" && ev.toolName === PI_STAGE_COMPLETE_TOOL) {
           stageComplete = true;
           stageCompleteCallId = ev.toolCallId;
-          const args = ev.args as { summary?: string } | undefined;
+          const args = ev.args as { summary?: string; document?: string } | undefined;
           if (args?.summary) summary = args.summary;
+          if (args?.document !== undefined) document = args.document;
           return;
         }
         if (ev.type === "tool_execution_end" && ev.toolCallId === stageCompleteCallId) return;
@@ -306,6 +309,11 @@ function makePiRuntimeSession(
         ...(summary !== undefined ? { summary } : {}),
         ...(responseText !== undefined ? { responseText } : {}),
         ...(status !== undefined ? { status } : {}),
+        // A handed-back document rides out as the stage artifact; the loop gates it on an ok status.
+        // Same shape the Claude adapter produces, so the edge's tool-handoff artifact rung is unchanged.
+        ...(document !== undefined
+          ? { artifact: { path: ctx.config.emitArtifact ?? HANDED_BACK_ARTIFACT_PATH, content: document } }
+          : {}),
       };
     },
     async summariseTurn(): Promise<string> {
@@ -562,8 +570,16 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   const stageComplete = defineTool({
     name: PI_STAGE_COMPLETE_TOOL,
     label: "Stage complete",
-    description: "End the current stage and hand off a one-sentence summary of what was accomplished.",
-    parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] },
+    description:
+      "End the current stage and hand off a one-sentence summary of what was accomplished. When the " +
+      "stage's deliverable is a document (e.g. a specification or report) to be published, pass its " +
+      "full markdown body as `document`; this is the only way an interactive stage can emit a " +
+      "document, since it cannot write files.",
+    parameters: {
+      type: "object",
+      properties: { summary: { type: "string" }, document: { type: "string" } },
+      required: ["summary"],
+    },
     execute: async () => ({ content: [{ type: "text", text: "Stage marked complete." }], details: {} }),
   });
 

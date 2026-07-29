@@ -6,6 +6,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **A Pi stage can now hand back a document from its stage-complete tool.** The injected
+  `dahrk_stage_complete` tool on the Pi runtime takes an optional `document` argument alongside the
+  summary, matching the Claude runtime. A stage that ends by calling the tool with a document now
+  emits that document as its artifact at `.dahrk/scratch/output/document.md` (or the stage's
+  `emitArtifact` path), so a Pi stage feeding a document to the next stage no longer depends on the
+  agent having written a file to a conventional location.
+
 ### Fixed
 
 - **A Pi stage now stops at the same turn ceiling Claude enforces.** Claude caps a stage at

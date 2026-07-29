@@ -72,7 +72,8 @@ export function makeEmit(
  * loop never sees a runtime-specific record. `stageComplete` is the injected stage-complete exit tool
  * firing this turn; `summary` its handoff text; `responseText` the last assistant text (used for the
  * gate recap by runtimes that read it off a turn); `status` the settle status; `artifact` a document
- * handed back in-band (Claude uses it; Pi omits it).
+ * handed back in-band by the stage-complete tool (both runtimes populate it from that tool's optional
+ * `document` argument).
  */
 export type TurnResult = {
   stageComplete: boolean;
@@ -81,6 +82,12 @@ export type TurnResult = {
   status?: JobStatus;
   artifact?: { path: string; content: string };
 };
+
+/** Default worktree-relative path stamped on a document handed back via the stage-complete tool
+ *  when the stage declared no `emitArtifact`. Kept under the scratch output convention so it reads
+ *  naturally in obs; the hub's `attach-document` resolves by content, not this exact path. Shared by
+ *  both adapters so the default artifact path is a single value neither runtime forks. */
+export const HANDED_BACK_ARTIFACT_PATH = ".dahrk/scratch/output/document.md";
 
 /**
  * The loop-facing runtime port: a turn-level seam the shared interactive/batch loops drive. Each

@@ -329,6 +329,67 @@ test("runInteractive tool exit: the injected stage-complete tool ends the stage 
     "stage-complete tool call is control-plane, not stage work");
 });
 
+test("runInteractive tool exit: a handed-back document rides out as the stage artifact at the default scratch path", async () => {
+  const fake = new FakePiSession([
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "What should I do?" } }),
+     pe({ type: "turn_end", message: { stopReason: "stop" } })],
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Working on it." } }),
+     pe({ type: "tool_execution_start", toolName: PI_STAGE_COMPLETE_TOOL, toolCallId: "sc1", args: { summary: "Wrote the spec.", document: "# Spec\n\nThe plan." } }),
+     pe({ type: "tool_execution_end", toolCallId: "sc1", content: "Stage marked complete.", isError: false }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const runner = createPiRunner({ createSession: async () => fake });
+  const result = await runner.runInteractive(
+    ctx({ config: { runtime: "pi", interaction: "interactive", exit: "tool" } as RunnerContext["config"] }),
+    turnsFrom(["do the work"]),
+    () => {},
+  );
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.summary, "Wrote the spec.");
+  // Same shape a Claude stage produces: the document at the default scratch output path.
+  assert.deepEqual(result.artifact, { path: ".dahrk/scratch/output/document.md", content: "# Spec\n\nThe plan." });
+});
+
+test("runInteractive tool exit: emitArtifact overrides the handed-back document path", async () => {
+  const fake = new FakePiSession([
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Opening." } }),
+     pe({ type: "turn_end", message: { stopReason: "stop" } })],
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Done." } }),
+     pe({ type: "tool_execution_start", toolName: PI_STAGE_COMPLETE_TOOL, toolCallId: "sc1", args: { summary: "Wrote the spec.", document: "# Doc" } }),
+     pe({ type: "tool_execution_end", toolCallId: "sc1", content: "Stage marked complete.", isError: false }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const runner = createPiRunner({ createSession: async () => fake });
+  const result = await runner.runInteractive(
+    ctx({ config: { runtime: "pi", interaction: "interactive", exit: "tool", emitArtifact: "docs/spec.md" } as RunnerContext["config"] }),
+    turnsFrom(["go"]),
+    () => {},
+  );
+
+  assert.deepEqual(result.artifact, { path: "docs/spec.md", content: "# Doc" });
+});
+
+test("runInteractive tool exit: no document handed back -> no artifact key", async () => {
+  const fake = new FakePiSession([
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "What should I do?" } }),
+     pe({ type: "turn_end", message: { stopReason: "stop" } })],
+    [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Working on it." } }),
+     pe({ type: "tool_execution_start", toolName: PI_STAGE_COMPLETE_TOOL, toolCallId: "sc1", args: { summary: "Refactored the parser." } }),
+     pe({ type: "tool_execution_end", toolCallId: "sc1", content: "Stage marked complete.", isError: false }),
+     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+  ]);
+  const runner = createPiRunner({ createSession: async () => fake });
+  const result = await runner.runInteractive(
+    ctx({ config: { runtime: "pi", interaction: "interactive", exit: "tool" } as RunnerContext["config"] }),
+    turnsFrom(["do the work"]),
+    () => {},
+  );
+
+  assert.equal(result.status, "ok");
+  assert.ok(!("artifact" in result), "a tool exit with no document hands back no artifact");
+});
+
 test("summarise: reuses the warm session, denies tools, returns the handoff sentence, emits no trace", async () => {
   const traceDuringBatch: TraceEvent[] = [];
   const fake = new FakePiSession([
