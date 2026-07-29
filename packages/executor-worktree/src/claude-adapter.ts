@@ -22,6 +22,7 @@ import {
 import type { JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
 import { consumeClaudeMessage, newBufferState, type BufferState } from "./claude-mappers.js";
 import {
+  HANDED_BACK_ARTIFACT_PATH,
   makeEmit,
   SUMMARISE_PROMPT,
   type EmittableEvent,
@@ -36,11 +37,6 @@ import { runInteractiveLoop, runBatchLoop, maxTurnCeiling } from "./turn-loop.js
 import { ManagedMailbox } from "./mailbox.js";
 import { createStageCompleteTool, type StageCompleteTool } from "./stage-complete-tool.js";
 import { createAskUserQuestionTool, ASK_USER_QUESTION_ALIAS } from "./ask-user-question-tool.js";
-
-/** Default worktree-relative path stamped on a document handed back via `dahrk_stage_complete`
- *  when the stage declared no `emitArtifact`. Kept under the scratch output convention so it reads
- *  naturally in obs; the hub's `attach-document` resolves by content, not this exact path. */
-const HANDED_BACK_ARTIFACT_PATH = ".dahrk/scratch/output/document.md";
 
 /**
  * Anchor every stage to its worktree. The claude_code preset injects the dynamic
