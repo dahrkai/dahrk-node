@@ -19,6 +19,17 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- **DHK-972: Claude brokered-MCP gateway integration test and auth-profile coverage.**
+  `packages/edge/test/claude-mcp-brokered.test.ts` runs the Claude adapter against the real node
+  gateway and a real MCP server, asserting the brokered token never appears in the agent-facing
+  config. `packages/executor-worktree/test/claude-runtime-env.test.ts` is extended with four
+  auth-profile tests: multi-key `runtimeEnv`, opaque key names, `runtimeAuth` hint present alongside
+  `runtimeEnv`, and ambient node with hint but no credentials. `buildBrokeredMcpServers` is now
+  exported from `@dahrk/executor-worktree` so the edge integration test can import it symmetrically
+  with `buildBrokeredPiMcpServers`.
+
 ## [0.1.28] - 2026-07-29
 
 ### Added

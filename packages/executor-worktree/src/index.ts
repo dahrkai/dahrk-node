@@ -80,7 +80,7 @@ export { createCheckRunner, summariseChecks, renderCheckNote, safeStageSegment }
 export type { CheckOutcome } from "./check-runner.js";
 
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
-export { createClaudeRunner } from "./claude-adapter.js";
+export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js";
 /** Which SDK each runtime executes through, resolved from the package that actually imports them. */
 export { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "./runtime-sdks.js";
 /** The Pi runtime adapter: the model-agnostic runtime for the managed node. */
