@@ -14,9 +14,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RunnerContext, TraceEvent } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, PolicyOutcome, RunnerContext, TraceEvent } from "@dahrk/contracts";
 import { createContainerPiSession, createIsolatedPiRunner } from "../src/pi-container.js";
+import { createPiRunner } from "../src/pi-adapter.js";
 import type { PiSessionLike } from "../src/pi-adapter.js";
+import { ManagedMailbox } from "../src/mailbox.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_PI = join(here, "fixtures", "fake-pi-rpc.mjs");
@@ -273,6 +275,116 @@ test("createIsolatedPiRunner: runBatch drives the container factory end-to-end",
   const runCall = calls.find((c) => c.cmd === "docker" && c.args[0] === "run");
   assert.ok(runCall, "docker run was spawned by the isolated runner");
 
+  await runner.cancel();
+});
+
+// ---------------------------------------------------------------------------
+// DHK-981: the tool gate and structured elicitation over RPC, driven end-to-end through
+// createPiRunner over the fake subprocess (no Docker). The fixture emits the two subprocess-initiated
+// request frames (keyed off FAKE_PI_GATE / FAKE_PI_ELICIT env), so this proves the container path
+// enforces policy before execution and can elicit, using the SAME edge-policy / elicit machinery as
+// embedded Pi (mirrors pi-adapter.test.ts's DHK-504 runBatch gate and DHK-505 runInteractive elicit).
+// ---------------------------------------------------------------------------
+
+/** Like `makeFakeSpawn`, but injects env into the fake-pi child so it drives the gate/elicit flows. */
+function makeFakeSpawnWithEnv(calls: Array<{ cmd: string; args: string[] }>, env: Record<string, string>) {
+  return (cmd: string, args: string[], opts: unknown): ReturnType<typeof spawn> => {
+    calls.push({ cmd, args: [...args] });
+    if (cmd === "docker" && args[0] === "kill") {
+      return track(spawn(process.execPath, ["-e", "process.exit(0)"], opts as never));
+    }
+    const o = (opts ?? {}) as { stdio?: unknown };
+    return track(spawn(process.execPath, [FAKE_PI], { ...o, env: { ...process.env, ...env } } as never));
+  };
+}
+
+const humanTurn = (text: string): HumanTurn => ({ text, ts: "2026-07-29T00:00:00Z" });
+
+test("DHK-981 runBatch gate over RPC: a policy-violating tool call is blocked before execution with the same recorded deny/reason", async () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawnWithEnv(calls, { FAKE_PI_GATE: "1" }) });
+  const runner = createPiRunner({ createSession: factory });
+
+  // The edge policy the stage runner supplies: deny `write`, allow everything else - identical to the
+  // embedded gate test, routed through the container transport this time.
+  const consulted: Array<{ tool: string; input: unknown }> = [];
+  const authorizeToolUse = (tool: string, input: unknown): PolicyOutcome => {
+    consulted.push({ tool, input });
+    return tool === "write"
+      ? { verdict: "deny", policy: "fs_confine", reason: "write escapes the worktree" }
+      : { verdict: "allow", policy: "none" };
+  };
+
+  const events: TraceEvent[] = [];
+  const result = await runner.runBatch({ ...ctx(), authorizeToolUse } as RunnerContext, (e) => events.push(e));
+
+  assert.equal(result.status, "ok", "the stage still settles ok - only the denied tool was stopped");
+  // The gate was consulted through the edge policy with the exact tool name/input the container-side
+  // hook carried - so the deny flows through the stage runner's recordDeny path exactly as embedded.
+  assert.deepEqual(
+    consulted.find((c) => c.tool === "write"),
+    { tool: "write", input: { path: "/etc/passwd", content: "x" } },
+    "authorizeToolUse was consulted for the write with its input (the recorded-deny path)",
+  );
+  // Blocked BEFORE execution: the denied write produced neither an action nor an observation - it did
+  // not run and was not run-then-annotated (mirrors the embedded DHK-504 runBatch gate assertions).
+  assert.ok(
+    !events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "write"),
+    "the denied write produced no action - blocked before execution",
+  );
+  assert.ok(
+    !events.some((e) => e.type === "observation" && (e as Extract<TraceEvent, { type: "observation" }>).toolUseId === "w1"),
+    "the denied write produced no observation - it was not run-then-annotated",
+  );
+  // The allowed bash call still ran through the RPC pipe. (The agent-visible deny reason riding back
+  // over the wire in the tool_call_response is asserted at the client seam in pi-rpc-client.test.ts.)
+  assert.ok(
+    events.some((e) => e.type === "action" && (e as Extract<TraceEvent, { type: "action" }>).tool === "bash"),
+    "the allowed bash call executes over RPC",
+  );
+  await runner.cancel();
+});
+
+test("DHK-981 runInteractive elicit over RPC: a structured question reaches emitElicit and the pick returns into the turn", async () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawnWithEnv(calls, { FAKE_PI_ELICIT: "1" }) });
+  const runner = createPiRunner({ createSession: factory });
+
+  const elicited: ElicitQuestion[] = [];
+  const turns = new ManagedMailbox<HumanTurn>();
+  const events: TraceEvent[] = [];
+  const onTrace = (e: TraceEvent): void => {
+    events.push(e);
+    // The human replies exactly when the question is raised, then the turn stream ends so the stage
+    // settles to gate (mirrors the embedded DHK-505 test).
+    if (e.type === "elicitation") {
+      turns.push(humanTurn("Option B"));
+      turns.end();
+    }
+  };
+
+  const interactiveCtx = {
+    ...ctx({ config: { runtime: "pi", interaction: "interactive" } as RunnerContext["config"] }),
+    emitElicit: (q: ElicitQuestion) => elicited.push(q),
+  } as RunnerContext;
+
+  const result = await runner.runInteractive(interactiveCtx, turns, onTrace);
+
+  // emitElicit received the folded ElicitQuestion: the prompt carries each option's description, options
+  // map label -> { label, value: label }, and multiSelect is preserved - byte-identical to embedded Pi.
+  assert.equal(elicited.length, 1, "the question reached the edge emitElicit seam exactly once over RPC");
+  assert.equal(elicited[0]!.prompt, "Which approach?\n\n- Option A: the safe one\n- Option B: the fast one");
+  assert.deepEqual(elicited[0]!.options, [
+    { label: "Option A", value: "Option A" },
+    { label: "Option B", value: "Option B" },
+  ]);
+  assert.equal(elicited[0]!.multiSelect, true);
+  // The human's pick flowed back into the containerised turn as the tool result (Claude-identical wording).
+  assert.ok(
+    events.some((e) => e.type === "response" && ((e as Extract<TraceEvent, { type: "response" }>).text ?? "").includes("The user selected: Option B")),
+    "the pick returned into the turn over the RPC transport",
+  );
+  assert.equal(result.status, "ok");
   await runner.cancel();
 });
 

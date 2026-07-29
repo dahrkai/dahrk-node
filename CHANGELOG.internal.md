@@ -19,7 +19,44 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **DHK-980: reconciled the Pi event union against the shipped SDK declarations and retired the spike
+  posture.** `packages/executor-worktree/src/pi-mappers.ts` carried a "SPIKE POSTURE" header saying its
+  `PiEvent` shapes were authored to vendored docs and "MUST be reconciled against the real SDK types"
+  (a sentence left unfinished). Each variant is now checked against the installed
+  `@earendil-works/pi-coding-agent@0.82.1` declarations (`AgentSessionEvent`, the base
+  `@earendil-works/pi-agent-core` `AgentEvent`, and `@earendil-works/pi-ai`'s `AssistantMessage` /
+  `AssistantMessageEvent` / `Usage`). Two substantive corrections: `tool_execution_end` carries
+  `result`, not `content` (the mapper read the wrong field, emptying every Pi tool observation - see the
+  public note), and eight event types the SDK emits but the union did not classify (`agent_settled`,
+  `entry_appended`, `session_info_changed`, `thinking_level_changed`, `summarization_retry_scheduled`,
+  `summarization_retry_attempt_start`, `summarization_retry_finished`, `bash_execution_update`) are now
+  recognised noise rather than falling through as unknowns. The noise list is a single `const`
+  (`PI_NOISE_EVENT_TYPES`) driving both the `PiNoiseType` union and the `mapPiEvent` classification, so
+  the two can no longer drift apart. New `packages/executor-worktree/src/pi-event-conformance.ts` is a
+  type-only compile-time guard (the analogue of `test/pi-sdk-exports.test.ts` for event shapes) that
+  reddens `tsc` if a Pi bump renames a mapped field or adds an unclassified event type; `pi-adapter.ts`
+  loads the SDK by dynamic import, so this static assertion is the only thing that surfaces such drift.
+  The normalised envelope is unchanged - the existing cross-runtime acceptance test still asserts Pi and
+  Claude produce identical envelopes.
+- **DHK-975: Correct stale Codex and tool-policy comments in the runtime adapters.**
+  Removed Codex references from `overlay.ts` (file-header and inline branch comment) and
+  `pi-adapter.test.ts` (file-header and test title). Replaced the superseded "policy enforcement is
+  M6 future work" note in `claude-adapter.ts` `baseOptions` with a description of the wired
+  `canUseTool` gate. No behaviour change.
+
 ### Added
+
+- **DHK-973: Stage-runner integration suite now runs for both runtimes (claude-code and pi).**
+  `packages/edge/test/stage-runner.test.ts` is parameterised over both runtimes via `forBothRuntimes`:
+  16 runtime-agnostic scenarios (trace/finalise, telemetry-only, tenant matching, retention, watchdogs,
+  cancellation, runtimeEnv injection, deny recording, progress relay, toolUseId correlation, setup step,
+  DHK-371 busy-leak guard) now produce a `[claude-code]` and a `[pi]` variant each (32 tests). The
+  "Claude-style" qualifier is removed from the pre-execution authorisation test name now that it is
+  proven to hold for Pi too. One scenario (tenant-guard refuses) stays single-runtime with an inline
+  note (guard fires before makeRunner is called; runtime is irrelevant). Non-runtime scenarios
+  (artifact resolution, runPush, runtimeUsesMcpGateway) are unchanged.
 
 - **DHK-972: Claude brokered-MCP gateway integration test and auth-profile coverage.**
   `packages/edge/test/claude-mcp-brokered.test.ts` runs the Claude adapter against the real node

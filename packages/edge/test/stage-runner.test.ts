@@ -4,6 +4,10 @@
  * and a capturing TraceSink, asserting: every event is streamed with a contiguous seq,
  * the finalised frame carries the authoritative count + archive key, and heavy payloads
  * are offered to the sink for upload. No hub, no network.
+ *
+ * All runtime-agnostic scenarios are driven for both supported runtimes (claude-code and
+ * pi) via `forBothRuntimes`, so the runtime-neutral stage-runner layer is proven neutral
+ * (DHK-973). Single-runtime tests carry an inline reason.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, TraceEvent, TraceMeta } from "@dahrk/contracts";
+import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, Runtime, TraceEvent, TraceMeta } from "@dahrk/contracts";
 import { createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
 import {
   createStageRunner,
@@ -20,6 +24,15 @@ import {
   type BlobPutRequestArgs,
   type TraceSink,
 } from "../src/stage-runner.js";
+
+const RUNTIMES: Runtime[] = ["claude-code", "pi"];
+
+/** Run a test scenario for both supported runtimes. The test name gains a `[runtime]` suffix. */
+function forBothRuntimes(name: string, fn: (runtime: Runtime) => Promise<void>): void {
+  for (const runtime of RUNTIMES) {
+    test(`${name} [${runtime}]`, () => fn(runtime));
+  }
+}
 
 function initRepo(dir: string): void {
   const git = (...args: string[]): void => void execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -31,7 +44,7 @@ function initRepo(dir: string): void {
   git("commit", "-m", "init");
 }
 
-test("stage runner streams the trace and finalises with count + archive key", async () => {
+forBothRuntimes("stage runner streams the trace and finalises with count + archive key", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -65,7 +78,7 @@ test("stage runner streams the trace and finalises with count + archive key", as
     jobId: "job-sr-1",
     awakeableId: "awk-1",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     // gitUrl is the local source repo: the edge clones it on demand into the mirror cache.
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
@@ -95,7 +108,7 @@ test("stage runner streams the trace and finalises with count + archive key", as
   }
 });
 
-test("a telemetry-only Job (no workspaceRef) runs in scratch with no clone attempted", async () => {
+forBothRuntimes("a telemetry-only Job (no workspaceRef) runs in scratch with no clone attempted", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-meta-"));
   const scratchRoot = join(root, "scratch");
 
@@ -131,7 +144,7 @@ test("a telemetry-only Job (no workspaceRef) runs in scratch with no clone attem
     jobId: "job-meta-1",
     awakeableId: "awk-meta",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     issueContext: "# Telemetry\n\nRun health: degraded.",
     timeout: 60,
   };
@@ -156,6 +169,9 @@ test("a telemetry-only Job (no workspaceRef) runs in scratch with no clone attem
   }
 });
 
+// Single-runtime (claude-code): the tenant guard fires before the runner is constructed, so the
+// runtime in agentConfig has no effect on the outcome. Running it for both runtimes would add no
+// coverage of the runtime-agnostic layer.
 test("a tenant-bound node refuses a Job for another tenant (no worktree built)", async () => {
   // A git service whose clone path throws if ever entered: proof the guard short-circuits BEFORE the
   // worktree is created for a mismatched tenant.
@@ -188,7 +204,7 @@ test("a tenant-bound node refuses a Job for another tenant (no worktree built)",
   assert.match(result.summary ?? "", /refuses a job for tenant "t_default"/);
 });
 
-test("a matching-tenant Job runs normally under a tenant-bound node", async () => {
+forBothRuntimes("a matching-tenant Job runs normally under a tenant-bound node", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-tenant-"));
   const scratchRoot = join(root, "scratch");
   const runner = createStageRunner({
@@ -211,7 +227,7 @@ test("a matching-tenant Job runs normally under a tenant-bound node", async () =
     jobId: "job-match-1",
     awakeableId: "awk-match",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     issueContext: "# Telemetry",
     timeout: 60,
   };
@@ -224,7 +240,7 @@ test("a matching-tenant Job runs normally under a tenant-bound node", async () =
   }
 });
 
-test("retention tears down old run worktrees and keeps the newest", async () => {
+forBothRuntimes("retention tears down old run worktrees and keeps the newest", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-ret-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -256,7 +272,7 @@ test("retention tears down old run worktrees and keeps the newest", async () => 
     jobId: `job-${n}`,
     awakeableId: `awk-${n}`,
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
   });
@@ -274,7 +290,7 @@ test("retention tears down old run worktrees and keeps the newest", async () => 
   }
 });
 
-test("a stage that exceeds its timeout is killed and marked `timeout` (job.timeout kill)", async () => {
+forBothRuntimes("a stage that exceeds its timeout is killed and marked `timeout` (job.timeout kill)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-to-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -289,11 +305,11 @@ test("a stage that exceeds its timeout is killed and marked `timeout` (job.timeo
   // A runner whose run hangs until cancel() aborts it - exactly how the real adapters behave on
   // AbortController.abort(): runBatch resolves gracefully with a non-ok status, it does not throw.
   // The stage runner's wall-clock kill must fire cancel() at job.timeout and force status `timeout`.
-  const makeHangingRunner = (runtime: Runner["runtime"]): Runner => {
+  const makeHangingRunner = (rt: Runner["runtime"]): Runner => {
     let release: (() => void) | undefined;
     const aborted = new Promise<void>((r) => (release = r));
     return {
-      runtime,
+      runtime: rt,
       async runBatch() {
         await aborted;
         return { status: "fail" };
@@ -326,7 +342,7 @@ test("a stage that exceeds its timeout is killed and marked `timeout` (job.timeo
     jobId: "job-sr-to-1",
     awakeableId: "awk-to",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 0.05, // 50ms wall-clock; the hanging runner only completes when the kill fires cancel()
   };
@@ -340,7 +356,7 @@ test("a stage that exceeds its timeout is killed and marked `timeout` (job.timeo
   }
 });
 
-test("a batch stage that streams no output for `stallMs` is cancelled and marked `timeout` (stall watchdog)", async () => {
+forBothRuntimes("a batch stage that streams no output for `stallMs` is cancelled and marked `timeout` (stall watchdog)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-stall-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -355,11 +371,11 @@ test("a batch stage that streams no output for `stallMs` is cancelled and marked
   // A runner that hangs producing no trace at all - the orphaned-subprocess case. With no wall clock
   // (job.timeout absent), only the batch output-idle watchdog can end it: it fires cancel() after
   // `stallMs` of silence, and the stage is reported `timeout` with a distinct `stalled` summary.
-  const makeSilentRunner = (runtime: Runner["runtime"]): Runner => {
+  const makeSilentRunner = (rt: Runner["runtime"]): Runner => {
     let release: (() => void) | undefined;
     const aborted = new Promise<void>((r) => (release = r));
     return {
-      runtime,
+      runtime: rt,
       async runBatch() {
         await aborted;
         return { status: "fail" };
@@ -392,7 +408,7 @@ test("a batch stage that streams no output for `stallMs` is cancelled and marked
     jobId: "job-sr-stall-1",
     awakeableId: "awk-stall",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     // No `timeout`: the wall clock is opt-in and absent here, so the stall watchdog is the only guard.
   };
@@ -411,7 +427,7 @@ test("a batch stage that streams no output for `stallMs` is cancelled and marked
   }
 });
 
-test("a batch stage that keeps streaming resets the stall watchdog and is never cancelled", async () => {
+forBothRuntimes("a batch stage that keeps streaming resets the stall watchdog and is never cancelled", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-nostall-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -423,15 +439,15 @@ test("a batch stage that keeps streaming resets the stall watchdog and is never 
     requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
   };
 
-  // A runner that streams a `thought` every 20ms for ~200ms, then finishes ok. Every event bumps the
-  // 50ms watchdog, so no single gap exceeds the window and the stage is never cancelled - proving an
-  // actively-working batch stage outlives a stall window many times its own length.
-  const makeStreamingRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  // A runner that streams a `thought` every 5ms for ~100ms, then finishes ok. Every event bumps the
+  // 50ms watchdog; 5ms intervals give a 10x margin vs the 50ms window, so the stage is never cancelled
+  // even under concurrent test load - proving an actively-working batch stage outlives the watchdog.
+  const makeStreamingRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(_ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
-      for (let i = 0; i < 10; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-        onTrace({ seq: i, ts: new Date().toISOString(), type: "thought", runtime, text: `tick ${i}` });
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        onTrace({ seq: i, ts: new Date().toISOString(), type: "thought", runtime: rt, text: `tick ${i}` });
       }
       return { status: "ok" };
     },
@@ -459,7 +475,7 @@ test("a batch stage that keeps streaming resets the stall watchdog and is never 
     jobId: "job-sr-nostall-1",
     awakeableId: "awk-nostall",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
   };
 
@@ -475,7 +491,7 @@ test("a batch stage that keeps streaming resets the stall watchdog and is never 
   }
 });
 
-test("a batch stage doing one long non-streaming tool call outlives the stall window (DHK-955)", async () => {
+forBothRuntimes("a batch stage doing one long non-streaming tool call outlives the stall window (DHK-955)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-toolcall-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -491,13 +507,13 @@ test("a batch stage doing one long non-streaming tool call outlives the stall wi
   // output while it runs (200ms >> the 50ms stall window), then returns and the stage finishes ok.
   // With the watchdog measuring *any* silence this was cancelled mid-tool-call; measuring *agent*
   // silence (the open call suspends the timer) lets the healthy stage run to completion.
-  const makeToolCallRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeToolCallRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(_ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
       const ts = new Date().toISOString();
-      onTrace({ seq: 0, ts, type: "action", runtime, tool: "Bash", toolUseId: "call-1", input: { cmd: "pnpm test | tail" } });
+      onTrace({ seq: 0, ts, type: "action", runtime: rt, tool: "Bash", toolUseId: "call-1", input: { cmd: "pnpm test | tail" } });
       await new Promise((r) => setTimeout(r, 200)); // the tool runs, streaming nothing
-      onTrace({ seq: 1, ts: new Date().toISOString(), type: "observation", runtime, toolUseId: "call-1", output: { ok: true } });
+      onTrace({ seq: 1, ts: new Date().toISOString(), type: "observation", runtime: rt, toolUseId: "call-1", output: { ok: true } });
       return { status: "ok" };
     },
     async runInteractive() {
@@ -524,7 +540,7 @@ test("a batch stage doing one long non-streaming tool call outlives the stall wi
     jobId: "job-sr-toolcall-1",
     awakeableId: "awk-toolcall",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
   };
 
@@ -540,7 +556,7 @@ test("a batch stage doing one long non-streaming tool call outlives the stall wi
   }
 });
 
-test("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)", async () => {
+forBothRuntimes("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-rtenv-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -555,8 +571,8 @@ test("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)"
   // A runner that records the ctx it is handed, so we can assert the stage runner set runtimeEnv from
   // the Job (the adapter would apply it as the inference process env; here we only check the seam).
   const seen: RunnerContext[] = [];
-  const makeCapturingRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeCapturingRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(ctx) {
       seen.push(ctx);
       return { status: "ok" };
@@ -590,7 +606,7 @@ test("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)"
     jobId,
     awakeableId: "awk-rtenv",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
     ...(runtimeEnv ? { runtimeEnv } : {}),
@@ -633,7 +649,7 @@ test("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)"
   }
 });
 
-test("Claude-style runner authorization denies a policy-blocked tool before execution", async () => {
+forBothRuntimes("runner authorization denies a policy-blocked tool before execution (pre-execution hook)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-auth-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -647,8 +663,8 @@ test("Claude-style runner authorization denies a policy-blocked tool before exec
     requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
   };
 
-  const makeAuthorizingRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeAuthorizingRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(ctx) {
       const verdict = (ctx as RunnerContext & { authorizeToolUse?: (tool: string, input: unknown) => { verdict: string } })
         .authorizeToolUse?.("Bash", { command: "sudo true" });
@@ -679,7 +695,7 @@ test("Claude-style runner authorization denies a policy-blocked tool before exec
     jobId: "job-auth-1",
     awakeableId: "awk-auth",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch" },
+    agentConfig: { runtime, interaction: "batch" },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     policies: [{ shell_guard: { mode: "deny" } }],
     timeout: 60,
@@ -823,7 +839,7 @@ test("a session that cannot pre-block hard-fails on an fs_confine escape (DHK-98
   }
 });
 
-test("repeated identical policy denials surface only one human-visible error (DHK-493)", async () => {
+forBothRuntimes("repeated identical policy denials surface only one human-visible error (DHK-493)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-denyspam-"));
   const repo = join(root, "repo");
   execFileSync("mkdir", ["-p", repo]);
@@ -838,8 +854,8 @@ test("repeated identical policy denials surface only one human-visible error (DH
   };
 
   // A runner that attempts the SAME denied command several times, as a capped or looping agent would.
-  const makeSpammingRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeSpammingRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(ctx) {
       const authorize = (ctx as RunnerContext & { authorizeToolUse?: (tool: string, input: unknown) => { verdict: string } })
         .authorizeToolUse;
@@ -873,7 +889,7 @@ test("repeated identical policy denials surface only one human-visible error (DH
     jobId: "job-denyspam-1",
     awakeableId: "awk-denyspam",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch" },
+    agentConfig: { runtime, interaction: "batch" },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     policies: [{ shell_guard: { mode: "deny" } }],
     timeout: 60,
@@ -1009,7 +1025,7 @@ test("runPush mode:backup fails truthfully when the run has no live worktree", a
   assert.equal(calls.length, 0, "neither backupPush nor createWorktree was called");
 });
 
-test("DHK-371: a job that throws before `finish` must not leave the run marked busy for ever", async () => {
+forBothRuntimes("DHK-371: a job that throws before `finish` must not leave the run marked busy for ever", async (runtime) => {
   // The leak: `inFlight` was incremented at job start but only decremented inside `finish`, which a throw
   // before it (e.g. `createWorktree` failing on a stale branch claim) skipped entirely. The run then stayed
   // "busy" for the life of the process, so every reaper/retention pass keyed on `isBusy` skipped it -
@@ -1042,7 +1058,7 @@ test("DHK-371: a job that throws before `finish` must not leave the run marked b
     jobId: "job-explode",
     awakeableId: "awk-explode",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
   };
@@ -1060,7 +1076,7 @@ test("DHK-371: a job that throws before `finish` must not leave the run marked b
   }
 });
 
-test("action and observation progress frames carry a shared toolUseId through a parallel/deferred sequence", async () => {
+forBothRuntimes("action and observation progress frames carry a shared toolUseId through a parallel/deferred sequence", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-corr-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -1072,16 +1088,16 @@ test("action and observation progress frames carry a shared toolUseId through a 
   // action A with observation B; only the toolUseId makes correlation robust (DHK-384). tu-A's output
   // is > PREVIEW (500) chars to prove a result is no longer clipped mid-content.
   const bigOutput = "x".repeat(2000);
-  const makeInterleavedRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeInterleavedRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch(_ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
       const ts = new Date().toISOString();
       const events: TraceEvent[] = [
-        { seq: 0, runtime, type: "action", ts, tool: "ToolSearch", toolUseId: "tu-A", input: { q: "A" } },
-        { seq: 1, runtime, type: "action", ts, tool: "Read", toolUseId: "tu-B", input: { q: "B" } },
-        { seq: 2, runtime, type: "observation", ts, toolUseId: "tu-B", output: { ok: "B" } },
-        { seq: 3, runtime, type: "observation", ts, toolUseId: "tu-A", output: bigOutput },
-        { seq: 4, runtime, type: "response", ts, text: "done" },
+        { seq: 0, runtime: rt, type: "action", ts, tool: "ToolSearch", toolUseId: "tu-A", input: { q: "A" } },
+        { seq: 1, runtime: rt, type: "action", ts, tool: "Read", toolUseId: "tu-B", input: { q: "B" } },
+        { seq: 2, runtime: rt, type: "observation", ts, toolUseId: "tu-B", output: { ok: "B" } },
+        { seq: 3, runtime: rt, type: "observation", ts, toolUseId: "tu-A", output: bigOutput },
+        { seq: 4, runtime: rt, type: "response", ts, text: "done" },
       ];
       for (const event of events) onTrace(event);
       return { status: "ok" };
@@ -1110,7 +1126,7 @@ test("action and observation progress frames carry a shared toolUseId through a 
     jobId: "job-corr-1",
     awakeableId: "awk-corr",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
   };
@@ -1141,7 +1157,7 @@ test("action and observation progress frames carry a shared toolUseId through a 
   }
 });
 
-test("a repo `setup` step runs in the worktree before the agent, and is folded into the trace (DHK-731)", async () => {
+forBothRuntimes("a repo `setup` step runs in the worktree before the agent, and is folded into the trace (DHK-731)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -1171,7 +1187,7 @@ test("a repo `setup` step runs in the worktree before the agent, and is folded i
     jobId: "job-setup-ok",
     awakeableId: "awk-setup-ok",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     // `setup` rides the WorkspaceRef, which is where the hub attaches it and where
     // `@dahrk/contracts` declares it. Setting it at the Job ROOT (as this test used to) is what
     // kept DHK-731 dead in production invisible to CI: the node read the root too, and
@@ -1199,7 +1215,7 @@ test("a repo `setup` step runs in the worktree before the agent, and is folded i
   }
 });
 
-test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-731)", async () => {
+forBothRuntimes("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-731)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-fail-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -1217,8 +1233,8 @@ test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-
   // A runner that would return ok if it ever ran; setup must fail the stage BEFORE it is constructed,
   // so the agent never touches the broken tree.
   let ranAgent = false;
-  const makeGuardRunner = (runtime: Runner["runtime"]): Runner => ({
-    runtime,
+  const makeGuardRunner = (rt: Runner["runtime"]): Runner => ({
+    runtime: rt,
     async runBatch() {
       ranAgent = true;
       return { status: "ok" };
@@ -1248,7 +1264,7 @@ test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-
     jobId: "job-setup-fail",
     awakeableId: "awk-setup-fail",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     // `setup` rides the WorkspaceRef, which is where the hub attaches it and where
     // `@dahrk/contracts` declares it. Setting it at the Job ROOT (as this test used to) is what
     // kept DHK-731 dead in production invisible to CI: the node read the root too, and
@@ -1278,7 +1294,7 @@ test("a failing repo `setup` fails the stage cleanly before the agent runs (DHK-
   }
 });
 
-test("no repo `setup` means no setup trace frames and no behaviour change (DHK-731)", async () => {
+forBothRuntimes("no repo `setup` means no setup trace frames and no behaviour change (DHK-731)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-setup-absent-"));
   const repo = join(root, "repo");
   const worktrees = join(root, "wt");
@@ -1307,7 +1323,7 @@ test("no repo `setup` means no setup trace frames and no behaviour change (DHK-7
     jobId: "job-setup-absent",
     awakeableId: "awk-setup-absent",
     executorType: "worktree",
-    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
     workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
     timeout: 60,
   };

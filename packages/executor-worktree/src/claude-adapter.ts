@@ -266,8 +266,7 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     },
     ...sandboxOptions(ctx),
     // Inherit the REPO's .mcp.json / .claude settings (build spec section 9): do NOT set
-    // strictMcpConfig. Policy enforcement around tools is M6; M4 allows tools to run and the
-    // stage runner intercepts denied actions at the trace level.
+    // strictMcpConfig. Tool-policy enforcement is wired via `canUseTool` on each Options object.
     // Deliberately EXCLUDE "user": a stage must be hermetic to the worktree and not inherit the
     // edge operator's ~/.claude (their CLAUDE.md, settings, memory), which is machine-specific and
     // bleeds non-deterministic context across edges. "project"/"local" honour the repo's own
