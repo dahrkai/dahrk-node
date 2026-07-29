@@ -29,6 +29,16 @@ this file is left verbatim.
 
 ### Added
 
+- **DHK-973: Stage-runner integration suite now runs for both runtimes (claude-code and pi).**
+  `packages/edge/test/stage-runner.test.ts` is parameterised over both runtimes via `forBothRuntimes`:
+  16 runtime-agnostic scenarios (trace/finalise, telemetry-only, tenant matching, retention, watchdogs,
+  cancellation, runtimeEnv injection, deny recording, progress relay, toolUseId correlation, setup step,
+  DHK-371 busy-leak guard) now produce a `[claude-code]` and a `[pi]` variant each (32 tests). The
+  "Claude-style" qualifier is removed from the pre-execution authorisation test name now that it is
+  proven to hold for Pi too. One scenario (tenant-guard refuses) stays single-runtime with an inline
+  note (guard fires before makeRunner is called; runtime is irrelevant). Non-runtime scenarios
+  (artifact resolution, runPush, runtimeUsesMcpGateway) are unchanged.
+
 - **DHK-972: Claude brokered-MCP gateway integration test and auth-profile coverage.**
   `packages/edge/test/claude-mcp-brokered.test.ts` runs the Claude adapter against the real node
   gateway and a real MCP server, asserting the brokered token never appears in the agent-facing
