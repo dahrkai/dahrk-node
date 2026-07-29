@@ -37,7 +37,7 @@ import {
   type TurnResult,
 } from "./runtime-session.js";
 import { elicitOutcomeReply } from "./elicit-router.js";
-import { runInteractiveLoop, runBatchLoop } from "./turn-loop.js";
+import { runInteractiveLoop, runBatchLoop, maxTurnCeiling } from "./turn-loop.js";
 import { askQuestionsSequentially } from "./ask-user-question-tool.js";
 
 /**
@@ -254,6 +254,13 @@ function makePiRuntimeSession(
   hooks: RuntimeSessionHooks,
   interactive: boolean,
 ): RuntimeSession {
+  // DHK-970: the shared turn ceiling, the Pi analogue of Claude's `Options.maxTurns`. Pi has no SDK
+  // option to pass it to, so the adapter enforces it: Pi drives many internal agent turns inside one
+  // `prompt()`, streaming a `turn_end` per turn, and nothing else counts them. `turnsUsed` is
+  // session-scoped (this closure outlives each `sendTurn`, so an interactive stage's turns accumulate
+  // across turns, mirroring Claude's per-session `maxTurns`; a batch stage has one `prompt()` anyway).
+  const ceiling = maxTurnCeiling();
+  let turnsUsed = 0;
   return {
     get sessionId(): string | undefined {
       return s.sessionId;
@@ -267,6 +274,15 @@ function makePiRuntimeSession(
       let status: JobStatus | undefined;
       const unsub = s.subscribe((ev) => {
         const rawRef = ctx.writeRaw?.(ev);
+        // Count Pi's per-turn boundary and abort the in-flight `prompt()` once the ceiling is reached
+        // (DHK-970). Pi settles the aborted run with a `stopReason: "aborted"` terminal event, which
+        // `settleStatus` maps to `fail` with no `failureClass` - the SAME terminal state and `agent`
+        // failure class Claude produces on `error_max_turns`. The abort is deliberately NOT routed
+        // through the runner's `cancel()`/`cancelled` flag, so it reads as an agent runaway, not a cancel.
+        if (ev.type === "turn_end") {
+          turnsUsed += 1;
+          if (turnsUsed >= ceiling) void s.abort();
+        }
         if (ev.type === "tool_execution_start" && ev.toolName === PI_STAGE_COMPLETE_TOOL) {
           stageComplete = true;
           stageCompleteCallId = ev.toolCallId;

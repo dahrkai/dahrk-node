@@ -6,6 +6,17 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Pi stage now stops at the same turn ceiling Claude enforces.** Claude caps a stage at
+  `DAHRK_MAX_TURNS` (default 64) agent turns, the backstop against an agent stuck in a tool loop. Pi
+  had no equivalent: its only bounds were time-based (the interactive idle window and the stage wall
+  clock), and an agent making steady progress through a useless loop tripped neither, because it kept
+  emitting output and simply burned budget until the wall clock fired. The Pi adapter now counts Pi's
+  per-turn events and aborts the run at the same ceiling, reading the same `DAHRK_MAX_TURNS` env var
+  and default so the two runtimes are configured identically. Hitting the ceiling produces the same
+  terminal state and failure classification as Claude hitting its limit, not a new one.
+
 ## [0.1.28] - 2026-07-29
 
 ### Added
