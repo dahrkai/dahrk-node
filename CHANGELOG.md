@@ -15,6 +15,20 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   `emitArtifact` path), so a Pi stage feeding a document to the next stage no longer depends on the
   agent having written a file to a conventional location.
 
+### Changed
+
+- **A Pi interactive stage now receives its instruction as a system prompt, matching the Claude
+  runtime.** Previously the Pi runtime delivered the whole resolved stage prompt (ticket context,
+  guidance, gate feedback, attached documents, comments and check failures) as a synthetic opening
+  user turn, so the model read its standing instructions as though a human had just typed them and
+  they competed with the actual conversation rather than framing it. The Pi adapter now appends the
+  stage instruction to the session's system prompt through the resource loader, exactly as the Claude
+  runtime does, and opens the interview with a short kickoff turn instead. Pi's own default system
+  prompt is preserved in full (its tools, guidelines, skills block and the context files it reads
+  natively), because the instruction is appended to those sections rather than replacing them. A
+  bare-skill stage, which carries no system prompt, is unchanged. Batch stages are unchanged: they
+  still deliver the prompt as their single user turn, as they always have.
+
 ### Fixed
 
 - **A Pi tool observation now carries the tool's output in the trace.** The Pi event mapper read the

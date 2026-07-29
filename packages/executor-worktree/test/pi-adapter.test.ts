@@ -1,7 +1,7 @@
 /**
  * Pi runtime adapter tests. The acceptance check: a Pi-runtime stage runs
  * batch + interactive + summarise to completion and the emitted trace matches the SAME
- * normalised envelope the Claude/Codex adapters produce (the fixture).
+ * normalised envelope the Claude adapter produces (the fixture).
  *
  * The real `@earendil-works/pi-coding-agent` SDK makes live inference calls and is not
  * installed here, so we drive the adapter through its injected session factory with a
@@ -23,6 +23,7 @@ import type { PiEvent } from "../src/pi-mappers.js";
 import {
   createPiRunner,
   piToolCallDecision,
+  buildAppendSystemPromptOverride,
   type AskUserQuestions,
   type PiSessionLike,
   PI_STAGE_COMPLETE_TOOL,
@@ -169,7 +170,7 @@ test("makeRunner('pi') returns a Pi runner without importing the live SDK", () =
   assert.equal(runner.runtime, "pi");
 });
 
-test("ACCEPTANCE runBatch: the emitted trace matches the Claude/Codex envelope ( fixture)", async () => {
+test("ACCEPTANCE runBatch: the emitted trace matches the Claude envelope (fixture)", async () => {
   const events: TraceEvent[] = [];
   const raw: unknown[] = [];
   const fake = new FakePiSession([STAGE_SCRIPT]);
@@ -290,9 +291,11 @@ test("runInteractive gate exit: opening turn is self-seeded; per-turn stage-exit
 
   assert.equal(result.status, "ok");
   assert.equal(result.summary, "Explained the fix; tests pass.");
-  // The opening turn is self-seeded from the resolved prompt (ticket brief) before any human input,
-  // and the human turn follows it.
-  assert.match(fake.prompts[0] ?? "", /Fix the failing tests\./, "opening turn seeded from resolveStagePrompt");
+  // DHK-977: the stage instruction now rides in the appended system prompt (not a synthetic user turn),
+  // so the opening turn is a short kickoff - the same first-turn behaviour as Claude's interactive path -
+  // and the human turn follows it. It must NOT re-seed the whole resolved prompt.
+  assert.match(fake.prompts[0] ?? "", /Begin now/, "opening turn is a short kickoff, not the resolved prompt");
+  assert.doesNotMatch(fake.prompts[0] ?? "", /Fix the failing tests\./, "the stage instruction is not re-seeded as a user turn");
   assert.equal(fake.prompts[1], "what is wrong?", "the human turn follows the seed");
   // The conversational turn emits a response but NOT a per-turn stage-exit (the stage runner owns it).
   assert.ok(events.some((e) => e.type === "response"));
@@ -303,6 +306,58 @@ test("runInteractive gate exit: opening turn is self-seeded; per-turn stage-exit
 // with zero human turns) is proven runtime-agnostically in `shared-loop.test.ts` against the
 // `FakeRuntimeSession`. Its Pi-specific facet (the seeded turn's text streams through `consumePiEvent`
 // into a `response` event) is still covered by the gate-exit test above.
+
+// DHK-977: the stage instruction is delivered as an appended system prompt, not a synthetic user turn.
+const gateExitScripts = (): ScriptStep[] => [
+  [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "What is the objective?" } }),
+   pe({ type: "turn_end", message: { stopReason: "stop" } })],
+  [pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Explained the fix." } }),
+   pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+];
+
+test("DHK-977 buildAppendSystemPromptOverride preserves Pi's default sections and appends the stage prompt", () => {
+  const override = buildAppendSystemPromptOverride("STAGE INSTRUCTION");
+  assert.ok(override, "an override function is built when a stage prompt is present");
+  // Spreading `base` keeps Pi's own default sections (tools, guidelines, skills block, context files)
+  // and adds the stage prompt LAST - the whole point of the append variant over a full override.
+  assert.deepEqual(
+    override!(["<tools>", "<guidelines>", "<skills>", "CLAUDE.md"]),
+    ["<tools>", "<guidelines>", "<skills>", "CLAUDE.md", "STAGE INSTRUCTION"],
+    "Pi's default system prompt sections survive and the stage prompt is appended after them",
+  );
+});
+
+test("DHK-977 buildAppendSystemPromptOverride returns undefined with no stage prompt, leaving Pi's default untouched", () => {
+  assert.equal(buildAppendSystemPromptOverride(undefined), undefined);
+  assert.equal(buildAppendSystemPromptOverride(""), undefined);
+});
+
+test("DHK-977 runInteractive: the resolved stage prompt is handed to the session factory as the appended system prompt", async () => {
+  const fake = new FakePiSession(gateExitScripts());
+  let capturedAppend: string | undefined;
+  const runner = createPiRunner({
+    createSession: async (_ctx, appendSystemPrompt) => {
+      capturedAppend = appendSystemPrompt;
+      return fake;
+    },
+  });
+  await runner.runInteractive(ctx(), turnsFrom([]), () => {});
+  assert.match(capturedAppend ?? "", /Fix the failing tests\./, "the ticket brief rides in the appended system prompt, not a user turn");
+});
+
+test("DHK-977 runBatch: no appended system prompt - the shared batch loop still delivers the prompt as its user turn (parity with Claude batch)", async () => {
+  const fake = new FakePiSession([STAGE_SCRIPT]);
+  let capturedAppend: string | undefined = "SENTINEL";
+  const runner = createPiRunner({
+    createSession: async (_ctx, appendSystemPrompt) => {
+      capturedAppend = appendSystemPrompt;
+      return fake;
+    },
+  });
+  await runner.runBatch(ctx(), () => {});
+  assert.equal(capturedAppend, undefined, "batch passes no append, so the stage prompt is not duplicated into the system prompt");
+  assert.match(fake.prompts[0] ?? "", /Fix the failing tests\./, "batch still sends the resolved prompt as its single user turn");
+});
 
 test("runInteractive tool exit: the injected stage-complete tool ends the stage and yields its summary", async () => {
   const events: TraceEvent[] = [];

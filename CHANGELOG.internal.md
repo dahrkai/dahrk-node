@@ -40,6 +40,11 @@ this file is left verbatim.
   loads the SDK by dynamic import, so this static assertion is the only thing that surfaces such drift.
   The normalised envelope is unchanged - the existing cross-runtime acceptance test still asserts Pi and
   Claude produce identical envelopes.
+- **DHK-975: Correct stale Codex and tool-policy comments in the runtime adapters.**
+  Removed Codex references from `overlay.ts` (file-header and inline branch comment) and
+  `pi-adapter.test.ts` (file-header and test title). Replaced the superseded "policy enforcement is
+  M6 future work" note in `claude-adapter.ts` `baseOptions` with a description of the wired
+  `canUseTool` gate. No behaviour change.
 
 ### Added
 
