@@ -22,13 +22,27 @@
  *   - `abort` -> `{type:"abort"}` resolves on its command ack; `get_state` returns
  *     `data.sessionId`, a best-effort resume token.
  *
+ * Bidirectional for the gate + elicitation (DHK-981): the protocol is otherwise one-directional
+ * (events out, commands in), but the pre-execution tool gate (DHK-504) and structured elicitation
+ * (DHK-505) both need the SUBPROCESS to ask the host and block on the answer. So two inbound request
+ * frames are handled in `#onLine`, each answered with a matching `*_response` frame written back to
+ * the child's stdin, routed through the SAME edge policy / elicit machinery the embedded path uses:
+ *   - `{type:"tool_call_request", id, toolName, input}` -> the containerised Pi's pre-execution hook
+ *     vetting a tool call. Answered `{type:"tool_call_response", id, block, reason?}`. No gate
+ *     registered -> `block:false` (allow), matching embedded "no gate = the tool runs".
+ *   - `{type:"elicit_request", id, questions}` -> the containerised `ask_user_question` tool raising a
+ *     structured question. Answered `{type:"elicit_response", id, text}` with the human's pick (or the
+ *     shared no-reply soft note when no handler is registered / the handler throws). These requests use
+ *     the subprocess's own id space and never touch `#pendingResponses` (those are host-initiated).
+ *
  * Degradation (Open Question 1): the RPC session has no `agent` handle, so `summarise`'s
  * tool-denial (which mutates `s.agent.state.tools`) is a no-op here. Accepted for the first cut
  * (meta-loop stages are telemetry-only); `agent` is intentionally omitted from this class.
  */
 import { StringDecoder } from "node:string_decoder";
 import { parsePiEvent, type PiEvent } from "./pi-mappers.js";
-import type { PiSessionLike } from "./pi-adapter.js";
+import { elicitOutcomeReply } from "./elicit-router.js";
+import type { AskUserQuestions, PiSessionLike } from "./pi-adapter.js";
 
 /**
  * A strict LF-only JSONL splitter. `push` accepts a chunk (Buffer or string) and returns the
@@ -116,6 +130,24 @@ function deferred<T>(): Deferred<T> {
 const isResponse = (msg: unknown): msg is PiRpcResponse =>
   typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === "response";
 
+/** A subprocess-initiated request to vet a tool call before it runs (DHK-981/DHK-504). */
+interface PiToolCallRequest {
+  type: "tool_call_request";
+  id?: string;
+  toolName: string;
+  input: unknown;
+}
+/** A subprocess-initiated request to raise a structured question (DHK-981/DHK-505). */
+interface PiElicitRequest {
+  type: "elicit_request";
+  id?: string;
+  questions: AskUserQuestions;
+}
+const isToolCallRequest = (msg: unknown): msg is PiToolCallRequest =>
+  typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === "tool_call_request";
+const isElicitRequest = (msg: unknown): msg is PiElicitRequest =>
+  typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === "elicit_request";
+
 export class PiRpcSession implements PiSessionLike {
   #sessionId: string | undefined;
   #listeners: Array<(ev: PiEvent) => void> = [];
@@ -127,6 +159,10 @@ export class PiRpcSession implements PiSessionLike {
   #disposed = false;
   readonly #child: PiRpcChild;
   #kill: (() => void | Promise<void>) | undefined;
+  /** The adapter's pre-execution tool gate (DHK-504); consulted for each `tool_call_request`. */
+  #toolCallGate: ((toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined) | undefined;
+  /** The adapter's structured-question dispatcher (DHK-505); consulted for each `elicit_request`. */
+  #askHandler: ((questions: AskUserQuestions) => Promise<string>) | undefined;
 
   constructor(child: PiRpcChild, options: PiRpcSessionOptions = {}) {
     this.#child = child;
@@ -150,6 +186,20 @@ export class PiRpcSession implements PiSessionLike {
     return () => {
       this.#listeners = this.#listeners.filter((l) => l !== listener);
     };
+  }
+
+  /** Register the pre-execution tool gate (DHK-504); the adapter wires this to the edge policy. Once
+   *  set, an inbound `tool_call_request` is answered by consulting it, so a container-isolated stage
+   *  enforces policy before a tool runs, exactly as embedded Pi does. */
+  setToolCallGate(gate: (toolName: string, input: unknown) => { block?: boolean; reason?: string } | undefined): void {
+    this.#toolCallGate = gate;
+  }
+
+  /** Register the structured-question dispatcher (DHK-505); the adapter wires this to the shared elicit
+   *  router. Once set, an inbound `elicit_request` is routed through it to a Linear elicitation and the
+   *  human's pick is handed back to the containerised turn. */
+  setAskUserQuestionHandler(handler: (questions: AskUserQuestions) => Promise<string>): void {
+    this.#askHandler = handler;
   }
 
   async prompt(text: string): Promise<void> {
@@ -217,6 +267,18 @@ export class PiRpcSession implements PiSessionLike {
     return d.promise;
   }
 
+  /** Write a subprocess-request reply as one LF-terminated JSON line. Unlike `#send`, it allocates no
+   *  pending-response entry (the id belongs to the subprocess's request, not a host-initiated command)
+   *  and is a no-op once disposed, so a late reply cannot throw on a closed stream. */
+  #reply(obj: Record<string, unknown>): void {
+    if (this.#disposed) return;
+    try {
+      this.#child.stdin?.write(`${JSON.stringify(obj)}\n`);
+    } catch {
+      /* stream may already be closed */
+    }
+  }
+
   #onLine(line: string): void {
     let msg: unknown;
     try {
@@ -233,6 +295,36 @@ export class PiRpcSession implements PiSessionLike {
           pending.resolve(msg);
         }
       }
+      return;
+    }
+    // Subprocess-initiated requests (DHK-981). Handled BEFORE `parsePiEvent` (they are not agent
+    // events) and always answered - even with no gate/handler or after a dispose race - so the
+    // containerised agent never blocks forever waiting on the host.
+    if (isToolCallRequest(msg)) {
+      const decision = this.#toolCallGate?.(msg.toolName, msg.input);
+      this.#reply({
+        type: "tool_call_response",
+        id: msg.id,
+        block: Boolean(decision?.block),
+        ...(decision?.reason ? { reason: decision.reason } : {}),
+      });
+      return;
+    }
+    if (isElicitRequest(msg)) {
+      const { id, questions } = msg;
+      const handler = this.#askHandler;
+      // Fire the handler and write the reply asynchronously so the synchronous reader loop is not
+      // stalled: subsequent lines (and the elicit reply's own turn events) keep flowing. On any throw,
+      // fall back to the shared no-reply soft note rather than leaving the container parked.
+      void (async () => {
+        let text: string;
+        try {
+          text = handler ? await handler(questions) : elicitOutcomeReply({ kind: "noreply" });
+        } catch {
+          text = elicitOutcomeReply({ kind: "noreply" });
+        }
+        this.#reply({ type: "elicit_response", id, text });
+      })();
       return;
     }
     // Anything that is not a command response should be an agent event. Validate it at this boundary
