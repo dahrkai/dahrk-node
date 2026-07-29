@@ -451,13 +451,27 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
  *  at runtime — `tsc` does not resolve its types at build time so the adapter compiles without the SDK.
  *  DHK-926: typing this cast means a removed or renamed symbol is caught by `assertSdkSymbol` at
  *  session-factory boot and by the `pi-sdk-exports.test.ts` suite, not silently at inference time. */
+/** The subset of Pi's `DefaultResourceLoaderOptions` the factory sets. Declared locally (the SDK types
+ *  are not resolved at build time - the package is a variable-specifier dynamic import), so a renamed
+ *  option is caught by tsc against this shape. `additionalSkillPaths` is the seam DHK-979 uses to inject
+ *  pinned skills straight from the pack cache without copying them into the worktree - Pi's resource
+ *  loader takes additional skill directories as arbitrary paths. */
+interface DefaultResourceLoaderOptions {
+  cwd: string;
+  agentDir: string;
+  settingsManager: unknown;
+  extensionFactories: unknown[];
+  /** Extra skill directories loaded in addition to the project/agent defaults (DHK-979). */
+  additionalSkillPaths?: string[];
+}
+
 interface PiSdkModule {
   VERSION: string;
   /** Combined auth and model registry; replaced the removed `AuthStorage` + `ModelRegistry` (DHK-925). */
   ModelRuntime: {
     create(opts: { authPath?: string; modelsPath?: string }): Promise<ModelRuntimeLike>;
   };
-  DefaultResourceLoader: new (opts: unknown) => { reload(): Promise<void> };
+  DefaultResourceLoader: new (opts: DefaultResourceLoaderOptions) => { reload(): Promise<void> };
   SessionManager: { inMemory(cwd: string): unknown };
   SettingsManager: { create(cwd: string, agentDir: string): unknown };
   createAgentSession(opts: unknown): Promise<{ session: unknown }>;
@@ -653,13 +667,19 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     },
   };
   // Supplying our own ResourceLoader replaces the one `createAgentSession` would build, so replicate the
-  // SDK's own default construction (dist/core/sdk.js) field-for-field and only ADD `extensionFactories`,
-  // then reload ourselves (the SDK reloads only a loader it built): skill/prompt-template/context-file
-  // loading is unchanged, and the inline gate extension is registered. `getAgentDir()` is the SDK's own
-  // default agent dir (`~/.pi/agent`); `SettingsManager.create(cwd, agentDir)` matches the SDK default.
+  // SDK's own default construction (dist/core/sdk.js) field-for-field and only ADD `extensionFactories`
+  // (and DHK-979's `additionalSkillPaths`), then reload ourselves (the SDK reloads only a loader it
+  // built): skill/prompt-template/context-file loading is unchanged, and the inline gate extension is
+  // registered. `getAgentDir()` is the SDK's own default agent dir (`~/.pi/agent`);
+  // `SettingsManager.create(cwd, agentDir)` matches the SDK default.
   const cwd = ctx.workspace.worktreePath;
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
+  // Pinned skills the overlay injected by path (DHK-979): the stage runner carries their pack-cache dirs
+  // on the ctx (not in `@dahrk/contracts`, so read defensively). Pointing the loader at them makes each
+  // pinned skill loadable and model-invocable without a single byte copied into the worktree - the
+  // projection the Claude adapter cannot do. Absent/empty -> the loader is byte-for-byte unchanged.
+  const injectedSkillPaths = (ctx as { injectedSkillPaths?: string[] }).injectedSkillPaths;
   // Brokered MCP (DHK-507): when the stage declares MCP servers and the node started its gateway
   // proxy (`mcpProxyBaseUrl`), add the bridge extension that registers each brokered server's tools,
   // routed through `127.0.0.1/<id>`. Absent -> only `toolGateExtension`, so the no-MCP session is
@@ -673,6 +693,7 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     agentDir,
     settingsManager,
     extensionFactories,
+    ...(injectedSkillPaths && injectedSkillPaths.length > 0 ? { additionalSkillPaths: injectedSkillPaths } : {}),
   });
   await resourceLoader.reload();
 

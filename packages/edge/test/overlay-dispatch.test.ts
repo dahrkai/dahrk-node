@@ -1,7 +1,8 @@
 /**
- * The stage runner overlays a Job's pinned components into the worktree `.claude/` at dispatch when a
- * PackCache is configured: a Claude job materialises the files; a job with no `provision` is
- * unchanged; a Codex job surfaces warnings and writes nothing. Real worktree (git) + mock runner.
+ * The stage runner projects a Job's pinned components into the worktree at dispatch when a PackCache
+ * is configured: a Claude job materialises the files; a Pi job injects its skill by path (nothing
+ * written); a job with no `provision` is unchanged; a Codex job surfaces warnings and writes nothing.
+ * Real worktree (git) + mock runner.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -68,7 +69,7 @@ function setup(root: string) {
   return { repo, skill, runner, progress };
 }
 
-function jobOf(repo: string, runtime: "claude-code" | "codex", provision?: ComponentRef[]): JobRequest {
+function jobOf(repo: string, runtime: "claude-code" | "codex" | "pi", provision?: ComponentRef[]): JobRequest {
   return {
     tenantId: "t_default",
     runId: `run-${runtime}`,
@@ -104,6 +105,22 @@ test("a job with no provision runs unchanged (no provision note)", async () => {
     const result = await runner.runJob(jobOf(repo, "claude-code"));
     assert.equal(result.status, "ok");
     assert.equal(progress.some((p) => p.text?.includes("provision:")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Pi job injects its pinned skill by path (nothing written) and reports it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-ovl-"));
+  try {
+    const { repo, skill, runner, progress } = setup(root);
+    const result = await runner.runJob(jobOf(repo, "pi", [skill.ref]));
+    assert.equal(result.status, "ok");
+    const note = progress.find((p) => p.text?.includes("provision:"));
+    assert.ok(note, "a provision note is surfaced for pi");
+    // The skill is injected by path, not written into the worktree.
+    assert.match(note!.text!, /0 written/);
+    assert.match(note!.text!, /1 injected/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

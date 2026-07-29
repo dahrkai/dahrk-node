@@ -8,6 +8,17 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A Pi stage now receives pinned skills and commands, not just Claude.** Dahrk can serve pinned
+  components (skills, commands, subagents) into a run's worktree so a customer need not vendor a
+  skills pack into their own repo. Until now the overlay only did anything for Claude and wrote
+  nothing for every other runtime. A Pi stage now gets its pinned skills injected by path, pointed at
+  straight from the content-addressed pack cache with nothing copied into the worktree, so the model
+  can invoke them; its pinned commands reshaped into Pi prompt templates under `.pi/prompts/`, keeping
+  the same repo-local precedence and idempotence as Claude; and its pinned subagents
+  warned-and-skipped, because Pi ships no subagents by design. Claude's behaviour is unchanged. The
+  provisioning note now also reports how many components were injected by path alongside those written
+  to disk.
+
 - **A Pi stage can now hand back a document from its stage-complete tool.** The injected
   `dahrk_stage_complete` tool on the Pi runtime takes an optional `document` argument alongside the
   summary, matching the Claude runtime. A stage that ends by calling the tool with a document now

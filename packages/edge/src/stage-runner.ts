@@ -176,6 +176,11 @@ type PolicyAwareRunnerContext = RunnerContext & {
   authorizeToolUse?: (toolName: string, input: unknown) => PolicyOutcome;
   /** Surface an interactive-stage `AskUserQuestion` as a Linear `select` elicitation (DHK-344). */
   emitElicit?: (question: ElicitQuestion) => void;
+  /** Absolute pack-cache directories of skills injected-by-path for Pi (DHK-979). The overlay computes
+   *  them at dispatch (nothing is copied into the worktree); the Pi adapter points its resource loader
+   *  at them via `additionalSkillPaths`. Not in the pinned `@dahrk/contracts`, so carried on the local
+   *  ctx shape (the same defensive idiom as `setup`); absent/empty for Claude and skill-less stages. */
+  injectedSkillPaths?: string[];
 };
 
 /** Upload bytes to a hub-minted presigned URL (heavy trace payloads bypass the control socket). */
@@ -827,11 +832,14 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           };
         };
 
-        // Component provisioning: overlay the run's pinned skills/commands/agents into the
-        // worktree `.claude/` before the runner starts, normalised per runtime (Claude writes files
-        // with repo-local precedence; Codex warns and skips). Idempotent, so re-dispatch on the sticky
-        // worktree is safe. Fail closed: a missing pinned component is a correctness problem, not
-        // cosmetic, so a materialise/overlay error fails the stage rather than running without it.
+        // Component provisioning: project the run's pinned skills/commands/agents into the worktree
+        // before the runner starts, normalised per runtime (Claude writes `.claude/` files with
+        // repo-local precedence; Pi injects skills by path, reshapes commands into `.pi/prompts/`, warns
+        // on subagents; Codex warns and skips). Idempotent, so re-dispatch on the sticky worktree is
+        // safe. Fail closed: a missing pinned component is a correctness problem, not cosmetic, so a
+        // materialise/overlay error fails the stage rather than running without it.
+        // Skills Pi consumes by path (never copied) are carried onto `ctx` below for its resource loader.
+        let injectedSkillPaths: string[] = [];
         if (deps.packCache && job.provision && job.provision.length > 0) {
           try {
             const overlay = await overlayComponents({
@@ -840,7 +848,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
               components: job.provision,
               cache: deps.packCache,
             });
-            const detail = `provision: ${overlay.written.length} written, ${overlay.skippedRepoLocal.length} repo-local, ${overlay.warnings.length} warning(s)`;
+            injectedSkillPaths = overlay.injected;
+            const detail = `provision: ${overlay.written.length} written, ${overlay.injected.length} injected, ${overlay.skippedRepoLocal.length} repo-local, ${overlay.warnings.length} warning(s)`;
             streamEvent(
               writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "provision", detail }),
             );
@@ -1041,6 +1050,9 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           config: agentConfig ?? ({ runtime: "claude-code" } as AgentConfig),
           workspace: ref,
           sessionId: job.sessionId,
+          // Skills the overlay injected by path for Pi (DHK-979): the adapter points its resource loader
+          // at these pack-cache dirs. Empty for Claude and skill-less stages, so the ctx is unchanged there.
+          ...(injectedSkillPaths.length > 0 ? { injectedSkillPaths } : {}),
           ...(job.issueContext !== undefined ? { issueContext: job.issueContext } : {}),
           ...(job.guidance !== undefined ? { guidance: job.guidance } : {}),
           ...(job.gateFeedback !== undefined ? { gateFeedback: job.gateFeedback } : {}),
