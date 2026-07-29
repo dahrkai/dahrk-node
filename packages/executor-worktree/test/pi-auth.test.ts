@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import type { RunnerContext } from "@dahrk/contracts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   readAuthHint,
   applyApiKeyAuth,
@@ -26,6 +27,9 @@ import {
   cleanupStageConfigDir,
   writeStageAuthFile,
   writeStageCustomProviders,
+  piSessionDir,
+  ensureSessionDir,
+  findResumableSession,
   type PiAuthHint,
   type AuthStorageLike,
 } from "../src/pi-auth.js";
@@ -352,4 +356,70 @@ test("the written auth.json never contains an API key (secrets that route via se
   } finally {
     cleanupStageConfigDir(dir);
   }
+});
+
+// --- Run-scoped Pi session directory (DHK-978): durable transcript, NOT the throwaway config dir ---
+// The deliberate contrast with createStageConfigDir above: credentials go to a throwaway `tmpdir()`
+// mkdtemp torn down per stage; the durable session transcript is rooted UNDER the run's scratch tree so
+// it is inspectable for debugging, resumable across a retry, and reaped with the run - never ~/.pi, and
+// never readable from one run to another (each run has its own worktree/scratch tree).
+
+const wsCtx = (scratchPath: string): RunnerContext =>
+  ({ workspace: { worktreePath: "/tmp/wt", scratchPath } } as unknown as RunnerContext);
+
+test("piSessionDir roots the session dir under the run's scratch tree, never the user's home", () => {
+  const dir = piSessionDir(wsCtx("/tmp/run-abc/.dahrk/scratch"));
+  assert.equal(dir, join("/tmp/run-abc/.dahrk/scratch", "pi-sessions"));
+  assert.ok(dir.startsWith("/tmp/run-abc/.dahrk/scratch"), "it lives inside the run-scoped scratch tree");
+  assert.ok(!dir.startsWith(join(homedir(), ".pi")), "it never lands in the machine-global ~/.pi");
+  assert.ok(!dir.startsWith(homedir()), "it never lands anywhere under the user's home");
+});
+
+test("piSessionDir gives two runs disjoint directories, so one run cannot read another's transcript", () => {
+  // Done-when #5: nothing from one run is readable by another. Each run's scratchPath is its own
+  // worktree tree, so the derived session dirs are disjoint by construction.
+  const a = piSessionDir(wsCtx("/tmp/run-a/.dahrk/scratch"));
+  const b = piSessionDir(wsCtx("/tmp/run-b/.dahrk/scratch"));
+  assert.notEqual(a, b);
+  assert.ok(!a.startsWith(b) && !b.startsWith(a), "neither run's session dir contains the other's");
+});
+
+test("ensureSessionDir creates the run-scoped dir (recursively) and returns it", () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-pi-sess-"));
+  try {
+    const dir = ensureSessionDir(join(root, "nested", "pi-sessions"));
+    assert.ok(existsSync(dir), "the session dir now exists");
+    assert.equal(dir, join(root, "nested", "pi-sessions"));
+    assert.doesNotThrow(() => ensureSessionDir(dir), "ensuring an existing dir is a no-op");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("findResumableSession locates this run's session file by id, so a retry resumes it", () => {
+  // Pi names each session file `<timestamp>_<sessionId>.jsonl`, so the id is honoured by matching the
+  // file in the run-scoped dir rather than starting cold (done-when #3).
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-pi-sess-"));
+  try {
+    const file = join(dir, "2026-07-29T18-00-00-000Z_sess-xyz.jsonl");
+    writeFileSync(file, "{}\n");
+    writeFileSync(join(dir, "2026-07-29T17-00-00-000Z_other.jsonl"), "{}\n");
+    assert.equal(findResumableSession(dir, "sess-xyz"), file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findResumableSession returns undefined when the id has no file (resume target absent -> start fresh)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-pi-sess-"));
+  try {
+    writeFileSync(join(dir, "2026-07-29T17-00-00-000Z_other.jsonl"), "{}\n");
+    assert.equal(findResumableSession(dir, "missing"), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findResumableSession returns undefined when the session dir does not exist yet (first stage of a run)", () => {
+  assert.equal(findResumableSession(join(tmpdir(), "dahrk-pi-does-not-exist-xyz"), "any"), undefined);
 });

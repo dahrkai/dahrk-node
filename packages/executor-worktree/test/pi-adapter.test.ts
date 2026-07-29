@@ -24,7 +24,9 @@ import {
   createPiRunner,
   piToolCallDecision,
   buildAppendSystemPromptOverride,
+  selectPiSessionManager,
   type AskUserQuestions,
+  type PiSessionManagerStatics,
   type PiSessionLike,
   PI_STAGE_COMPLETE_TOOL,
 } from "../src/pi-adapter.js";
@@ -164,6 +166,82 @@ const STAGE_SCRIPT: PiEvent[] = [
   pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "All three tests pass." } }),
   pe({ type: "agent_end", messages: [{ stopReason: "stop", usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1 } }] }),
 ];
+
+// DHK-978: durable, run-scoped sessions. `selectPiSessionManager` is the pure resume decision (the Pi
+// analogue of the Claude adapter's `resume: ctx.sessionId`): with a resumable session file for the
+// handed-in id it OPENS that durable session (resume across a retry); otherwise it CREATEs a fresh
+// durable session bound to the run-scoped dir. The SDK statics and the file resolver are injected so the
+// decision is proven with spies, never touching the live SDK or the filesystem.
+
+/** A spy for Pi's `SessionManager` durable statics: records which was called with what, and returns a
+ *  sentinel so the test can assert the selected manager is threaded through. */
+const spySessionStatics = (): {
+  statics: PiSessionManagerStatics;
+  createCalls: unknown[][];
+  openCalls: unknown[][];
+} => {
+  const createCalls: unknown[][] = [];
+  const openCalls: unknown[][] = [];
+  const statics: PiSessionManagerStatics = {
+    create: (...args: unknown[]) => {
+      createCalls.push(args);
+      return { kind: "created" };
+    },
+    open: (...args: unknown[]) => {
+      openCalls.push(args);
+      return { kind: "opened" };
+    },
+  };
+  return { statics, createCalls, openCalls };
+};
+
+test("DHK-978 selectPiSessionManager: a handed-in id with a matching file OPENS the durable session (resume)", () => {
+  const { statics, createCalls, openCalls } = spySessionStatics();
+  const mgr = selectPiSessionManager({
+    sdkSessionManager: statics,
+    dir: "/run/scratch/pi-sessions",
+    cwd: "/run/wt",
+    sessionId: "sess-xyz",
+    resolveSessionFile: (dir, id) => `${dir}/2026_${id}.jsonl`,
+  });
+  assert.deepEqual(mgr, { kind: "opened" }, "the opened durable manager is returned");
+  assert.deepEqual(openCalls, [["/run/scratch/pi-sessions/2026_sess-xyz.jsonl", "/run/scratch/pi-sessions", "/run/wt"]],
+    "open is called with the resolved file, the run-scoped dir, and the worktree cwd");
+  assert.equal(createCalls.length, 0, "create is not called when resuming");
+});
+
+test("DHK-978 selectPiSessionManager: a handed-in id with NO matching file starts a fresh durable session", () => {
+  const { statics, createCalls, openCalls } = spySessionStatics();
+  const mgr = selectPiSessionManager({
+    sdkSessionManager: statics,
+    dir: "/run/scratch/pi-sessions",
+    cwd: "/run/wt",
+    sessionId: "gone",
+    resolveSessionFile: () => undefined, // the resume target has vanished
+  });
+  assert.deepEqual(mgr, { kind: "created" });
+  assert.deepEqual(createCalls, [["/run/wt", "/run/scratch/pi-sessions"]],
+    "create is bound to the worktree cwd and the run-scoped dir");
+  assert.equal(openCalls.length, 0);
+});
+
+test("DHK-978 selectPiSessionManager: no handed-in id CREATEs a fresh durable session and never resolves a file", () => {
+  const { statics, createCalls, openCalls } = spySessionStatics();
+  let resolverCalls = 0;
+  const mgr = selectPiSessionManager({
+    sdkSessionManager: statics,
+    dir: "/run/scratch/pi-sessions",
+    cwd: "/run/wt",
+    resolveSessionFile: () => {
+      resolverCalls += 1;
+      return undefined;
+    },
+  });
+  assert.deepEqual(mgr, { kind: "created" });
+  assert.deepEqual(createCalls, [["/run/wt", "/run/scratch/pi-sessions"]]);
+  assert.equal(openCalls.length, 0);
+  assert.equal(resolverCalls, 0, "with no id there is nothing to resume, so the resolver is never consulted");
+});
 
 test("makeRunner('pi') returns a Pi runner without importing the live SDK", () => {
   const runner = makeRunner("pi");

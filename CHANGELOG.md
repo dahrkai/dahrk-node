@@ -8,6 +8,18 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A Pi stage now writes a durable, run-scoped session instead of an in-memory one that vanished.**
+  The Pi runtime built its session with the in-memory manager, which persisted nothing, so a stage's
+  transcript was gone the moment the stage ended and the session id it reported was not resumable. The
+  adapter now points Pi at a durable session directory under the run's own scratch tree
+  (`<worktree>/.dahrk/scratch/pi-sessions`), never the machine-global `~/.pi` and disjoint between runs
+  by construction, so nothing from one run is readable by another. The transcript is inspectable after
+  the run for debugging and is reaped with the run's worktree on every terminus, cancellation and
+  failure included. Handing the adapter a session id now resumes that session, so a retry within a
+  stage continues rather than starting cold, matching how the Claude runtime consumes its resume token.
+  Cross-stage conversation continuity is deliberately unchanged: the engine summary remains the
+  cross-stage carrier, because stages swap runtimes.
+
 - **A container-isolated Pi stage now enforces the tool gate and can ask a structured question.**
   When Pi runs inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), the
   pre-execution tool gate and structured elicitation previously did nothing: the RPC session did not
