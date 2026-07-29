@@ -144,9 +144,11 @@ function pathsIn(input: unknown): string[] {
  * is a bug rather than a use case. An agent hunting for a package ran `find /` and scanned the
  * operator's whole machine; this is what stops that, before the tool runs.
  *
- * On the Claude runtime this is a genuine pre-execution block (the adapter's `canUseTool` consults
- * it). Codex and Pi expose no such hook, so there it can only be caught after the fact - which the
- * stage runner escalates to a stage failure rather than a note nobody reads.
+ * A session with a wired pre-execution gate turns this into a genuine block before the tool runs
+ * (Claude's `canUseTool`, embedded Pi's `setToolCallGate`). A session without one (container Pi) can
+ * only catch it after the fact - which the stage runner escalates to a stage failure rather than a
+ * note nobody reads, keyed off the session's `enforcesPreExecution` capability, not the runtime name
+ * (DHK-983).
  *
  * `DAHRK_FS_CONFINE=0` disables it, and `DAHRK_FS_EXTRA_ROOTS` widens it: a fail-closed heuristic on
  * machines we cannot hot-patch needs a valve an operator can reach without waiting for a release.

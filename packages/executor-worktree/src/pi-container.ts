@@ -32,6 +32,7 @@ import type { Runner, RunnerContext } from "@dahrk/contracts";
 import { PiRpcSession } from "./pi-rpc-client.js";
 import { createPiRunner, resolveStageModelId } from "./pi-adapter.js";
 import type { PiSessionFactory, PiSessionLike } from "./pi-adapter.js";
+import type { PreExecutionCapability } from "./runtime-session.js";
 
 const DEFAULT_IMAGE = process.env.DAHRK_PI_IMAGE ?? process.env.SKAKEL_PI_IMAGE ?? "dahrk/pi:latest";
 
@@ -134,6 +135,8 @@ export function createContainerPiSession(opts: ContainerPiSessionOpts = {}): PiS
  * Pass to `deps.makeRunner` on managed nodes where container isolation is required. For
  * the embedded non-isolated path, use `createPiRunner()` directly.
  */
-export function createIsolatedPiRunner(opts: ContainerPiSessionOpts = {}): Runner {
+export function createIsolatedPiRunner(opts: ContainerPiSessionOpts = {}): Runner & PreExecutionCapability {
+  // The container RPC session omits `setToolCallGate`, so this runner reports `enforcesPreExecution`
+  // false (DHK-983): a confinement breach on this path is a genuine escape the edge must hard-fail.
   return createPiRunner({ createSession: createContainerPiSession(opts) });
 }

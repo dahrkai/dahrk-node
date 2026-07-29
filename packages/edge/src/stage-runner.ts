@@ -47,6 +47,7 @@ import {
   type GitService,
   type PackCache,
   type CheckOutcome,
+  type PreExecutionCapability,
   type ReapReport,
 } from "@dahrk/executor-worktree";
 import { buildRules } from "./builtins.js";
@@ -931,12 +932,16 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // Reset per stage (this closure is per job); the trace + agent-facing observation still record
         // every deny, we only collapse the human-visible comment to one per distinct reason.
         const surfacedDenyReasons = new Set<string>();
-        // DHK-392: a confinement breach caught only AFTER the tool ran. Claude blocks pre-execution
-        // (`canUseTool`), so this can only happen on Codex/Pi, which expose no such hook - there the
-        // command has already scanned whatever it scanned, and a quiet note on the summary would be a
-        // lie. Escalated to a stage failure below. Gated on runtime, not inferred: on Claude a
-        // pre-denied tool can still surface an action event here, and that must NOT fail the stage.
-        let escapedUnblocked = false;
+        // DHK-392/DHK-983: an `fs_confine` deny that re-evaluates only AFTER the action surfaced on the
+        // trace. Whether that is a *blocked* deny or an unblockable *escape* turns on whether the session
+        // pre-blocks tool calls, NOT on the runtime name: a session with a wired pre-execution gate
+        // (Claude's `canUseTool`, embedded Pi's `setToolCallGate`) stopped the call before it ran, so the
+        // surfaced action is already blocked and must NOT fail the stage; a session without one (container
+        // Pi) let the command run first, so the breach already happened and a quiet note would be a lie.
+        // We record the raw fact here and classify it at stage exit, once the session's capability
+        // (`enforcesPreExecution`) is known - the runtime name cannot express it (embedded and container
+        // Pi share the name "pi" but differ on the gate).
+        let fsConfineDeniedPostHoc = false;
         const authorisedActions: string[] = [];
         const runtime = agentConfig?.runtime;
         const actionKey = (tool: string, input: unknown): string => {
@@ -998,7 +1003,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
                 bumpStall();
                 streamEvent(writer.append(event));
                 recordDeny(verdict, event.toolUseId);
-                if (verdict.policy === "fs_confine" && runtime !== "claude-code") escapedUnblocked = true;
+                if (verdict.policy === "fs_confine") fsConfineDeniedPostHoc = true;
                 return;
               }
             }
@@ -1165,13 +1170,24 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // only in the summary below, so a stall is legible in the trace without a new JobStatus variant.
         let status: JobStatus = timedOut || stalled ? "timeout" : result.status;
 
-        // The one deny that DOES kill the stage (DHK-392). On a runtime with no pre-execution hook the
-        // confinement breach was detected after the fact: the command already read what it read. That
-        // is not a guardrail the agent routed around, it is a guardrail that arrived late, and the
-        // honest signal is a loud failure rather than a note at the end of a green stage.
-        if (status === "ok" && escapedUnblocked) {
+        // DHK-983: does the session that just ran pre-block tool calls? The adapters surface this as
+        // `enforcesPreExecution` (Claude always true; embedded Pi true once its gate wired; container Pi
+        // false). Read defensively - it is additive over the published `Runner`, the same forward-compat
+        // idiom as the Job fields above - and only after the run, so a lazily-opened Pi session has
+        // registered its gate. A runner that predates the capability falls back to the old runtime-name
+        // proxy, so its behaviour is unchanged.
+        const enforcesPreExecution =
+          (runner as Partial<PreExecutionCapability>).enforcesPreExecution ?? runtime === "claude-code";
+
+        // The one deny that DOES kill the stage (DHK-392/DHK-983). When the session could NOT pre-block
+        // the call, the confinement breach was detected after the fact: the command already read what it
+        // read. That is not a guardrail the agent routed around, it is one that arrived late, and the
+        // honest signal is a loud failure rather than a note at the end of a green stage. When the session
+        // DID pre-block (Claude, embedded Pi), the same surfaced deny is already a clean blocked deny, so
+        // the stage stays ok and the deny rides out as a note.
+        if (status === "ok" && fsConfineDeniedPostHoc && !enforcesPreExecution) {
           status = "fail";
-          const msg = `stage reached outside the run's worktree and the ${runtime} runtime could not block it before it ran`;
+          const msg = `stage reached outside the run's worktree and the session could not block it before it ran (${runtime ?? traceRuntime} has no pre-execution gate)`;
           writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "fs-confine-escape", message: msg });
           deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: msg });
         }

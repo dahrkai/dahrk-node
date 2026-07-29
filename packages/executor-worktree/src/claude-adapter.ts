@@ -27,6 +27,7 @@ import {
   SUMMARISE_PROMPT,
   type EmittableEvent,
   type PolicyAwareRunnerContext,
+  type PreExecutionCapability,
   type RuntimeSession,
   type RuntimeSessionHooks,
   type TurnResult,
@@ -228,7 +229,7 @@ const defaultCreateClaudeSession: CreateClaudeSession = ({ prompt, options }) =>
   };
 };
 
-export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner {
+export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExecutionCapability {
   const createSession = deps.createSession ?? defaultCreateClaudeSession;
   const abortController = new AbortController();
   let cancelled = false;
@@ -419,6 +420,10 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner {
 
   return {
     runtime: "claude-code",
+
+    // DHK-983: Claude always wires `canUseTool`, so every tool call is vetted before it runs. A
+    // confinement deny that surfaces on the trace is therefore a blocked deny, never an escape.
+    enforcesPreExecution: true,
 
     async runBatch(ctx, onTrace) {
       const hooks: RuntimeSessionHooks = { emit: makeEmit("claude-code", onTrace), ask: defaultAsk };
