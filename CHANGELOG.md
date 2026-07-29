@@ -8,6 +8,18 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A container-isolated Pi stage now enforces the tool gate and can ask a structured question.**
+  When Pi runs inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), the
+  pre-execution tool gate and structured elicitation previously did nothing: the RPC session did not
+  implement either registrar, and because both are optional they registered as silent no-ops, so a
+  container-isolated stage ran with only post-hoc trace annotation and could not ask a question
+  mid-stage. The RPC protocol is now bidirectional for these two concerns: the containerised agent
+  asks the host to vet a tool call before it runs (a policy-violating call is blocked before
+  execution, with the denial reason handed back to the agent) and to surface a multiple-choice
+  question (routed to a Linear elicitation, the human's pick returned into the turn). Both flow
+  through the same edge policy and elicit machinery as embedded Pi, so a denial produces the same
+  recorded deny and the same agent-visible reason.
+
 - **A Pi stage can now hand back a document from its stage-complete tool.** The injected
   `dahrk_stage_complete` tool on the Pi runtime takes an optional `document` argument alongside the
   summary, matching the Claude runtime. A stage that ends by calling the tool with a document now

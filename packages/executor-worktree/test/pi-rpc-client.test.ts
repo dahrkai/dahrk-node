@@ -15,6 +15,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PiEvent } from "../src/pi-mappers.js";
 import { PiRpcSession, createLineDecoder } from "../src/pi-rpc-client.js";
+import { elicitOutcomeReply } from "../src/elicit-router.js";
+import type { AskUserQuestions } from "../src/pi-adapter.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_PI = join(here, "fixtures", "fake-pi-rpc.mjs");
@@ -127,6 +129,106 @@ test("PiRpcSession satisfies the PiSessionLike contract the adapter drives", () 
   assert.equal(typeof session.prompt, "function");
   assert.equal(typeof session.abort, "function");
   assert.equal(typeof session.dispose, "function");
+  // DHK-981: the container path now implements the gate + elicit registrars, so the optional
+  // capability members are present (no longer a silent optional-chaining no-op).
+  assert.equal(typeof session.setToolCallGate, "function", "setToolCallGate is implemented (gate capability present)");
+  assert.equal(typeof session.setAskUserQuestionHandler, "function", "setAskUserQuestionHandler is implemented (elicit capability present)");
+  session.dispose();
+});
+
+// DHK-981 seam 1: the RPC wire is now bidirectional for gate + elicit. A subprocess-initiated
+// `tool_call_request` / `elicit_request` is routed through the SAME registered gate/handler the
+// embedded path uses, and the correct `*_response` frame is written back to the subprocess's stdin.
+// Driven over PassThrough streams (no Docker, no fixture) so the wire behaviour is observed directly.
+
+/** Let the client's reader loop process the queued stdout line and write its reply back to stdin. */
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+test("PiRpcSession tool gate: a tool_call_request is answered with the registered gate's deny decision", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const written: string[] = [];
+  stdin.on("data", (c) => written.push(c.toString()));
+  const session = new PiRpcSession({ stdin, stdout }, {});
+
+  const seen: Array<{ toolName: string; input: unknown }> = [];
+  session.setToolCallGate((toolName, input) => {
+    seen.push({ toolName, input });
+    return toolName === "write" ? { block: true, reason: "write escapes the worktree" } : undefined;
+  });
+
+  stdout.write(JSON.stringify({ type: "tool_call_request", id: "tcr-1", toolName: "write", input: { path: "/etc/passwd" } }) + "\n");
+  await tick();
+
+  const frames = written.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const reply = frames.find((f) => f.type === "tool_call_response");
+  assert.ok(reply, "a tool_call_response was written back to the subprocess");
+  assert.equal(reply.id, "tcr-1", "the subprocess's request id is echoed verbatim");
+  assert.equal(reply.block, true, "the deny verdict blocks the call");
+  assert.equal(reply.reason, "write escapes the worktree", "the policy reason rides back to the agent");
+  assert.deepEqual(seen, [{ toolName: "write", input: { path: "/etc/passwd" } }], "the gate was consulted with the exact toolName/input");
+  session.dispose();
+});
+
+test("PiRpcSession tool gate: no gate registered -> the call is allowed (block:false)", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const written: string[] = [];
+  stdin.on("data", (c) => written.push(c.toString()));
+  const session = new PiRpcSession({ stdin, stdout }, {});
+
+  stdout.write(JSON.stringify({ type: "tool_call_request", id: "tcr-2", toolName: "bash", input: { command: "ls" } }) + "\n");
+  await tick();
+
+  const reply = written.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((f) => f.type === "tool_call_response");
+  assert.ok(reply, "a tool_call_response was written back even with no gate");
+  assert.equal(reply.id, "tcr-2");
+  assert.equal(reply.block, false, "no gate registered -> tool runs, matching embedded 'no gate = allow'");
+  assert.equal(reply.reason, undefined, "no reason when nothing is blocked");
+  session.dispose();
+});
+
+test("PiRpcSession elicit: an elicit_request routes through the registered handler and its return rides back", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const written: string[] = [];
+  stdin.on("data", (c) => written.push(c.toString()));
+  const session = new PiRpcSession({ stdin, stdout }, {});
+
+  const questions: AskUserQuestions = [
+    { question: "Which approach?", options: [{ label: "A", description: "safe" }, { label: "B", description: "fast" }], multiSelect: true },
+  ];
+  let received: AskUserQuestions | undefined;
+  session.setAskUserQuestionHandler(async (qs) => {
+    received = qs;
+    return "The user selected: B";
+  });
+
+  stdout.write(JSON.stringify({ type: "elicit_request", id: "er-1", questions }) + "\n");
+  await tick();
+
+  const reply = written.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((f) => f.type === "elicit_response");
+  assert.ok(reply, "an elicit_response was written back");
+  assert.equal(reply.id, "er-1");
+  assert.equal(reply.text, "The user selected: B", "the human's pick returns into the turn");
+  assert.deepEqual(received, questions, "the handler received the exact questions");
+  session.dispose();
+});
+
+test("PiRpcSession elicit: no handler registered -> the byte-identical noreply soft note is returned", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const written: string[] = [];
+  stdin.on("data", (c) => written.push(c.toString()));
+  const session = new PiRpcSession({ stdin, stdout }, {});
+
+  stdout.write(JSON.stringify({ type: "elicit_request", id: "er-2", questions: [{ question: "Which?", options: [{ label: "X" }] }] }) + "\n");
+  await tick();
+
+  const reply = written.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((f) => f.type === "elicit_response");
+  assert.ok(reply, "an elicit_response was written back even with no handler (never leave the container blocked)");
+  assert.equal(reply.id, "er-2");
+  assert.equal(reply.text, elicitOutcomeReply({ kind: "noreply" }), "no handler -> the shared noreply soft note");
   session.dispose();
 });
 
