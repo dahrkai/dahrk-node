@@ -4,10 +4,11 @@
  * the same logical stage. We also assert the CYPACK-1177 buffered-response rule over Pi's streamed
  * deltas, and that every emitted event validates against the contract schema.
  *
- * No live calls, no credentials: the fixtures are hand-authored to the vendored Pi docs (sdk.md event
- * list, session-format.md `Usage`). Note that Pi streams deltas and settles at `turn_end`/`agent_end`;
- * we compare the normalised TYPE SEQUENCE plus the discriminating fields (the envelope is cross-runtime
- * uniform), not byte-equality of the source records.
+ * No live calls, no credentials: the fixtures are hand-authored to the installed SDK's declarations
+ * (a `tool_execution_end` carries `result`, not `content`), and `pi-event-conformance.ts` fails `tsc`
+ * if those shapes drift. Note that Pi streams deltas and settles at `turn_end`/`agent_end`; we compare
+ * the normalised TYPE SEQUENCE plus the discriminating fields (the envelope is cross-runtime uniform),
+ * not byte-equality of the source records.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -59,7 +60,7 @@ test("ACCEPTANCE: a Pi event stream maps to the SAME envelope sequence as Claude
     pe({ type: "turn_start" }),
     pe({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "Plan: run the tests." } }),
     pe({ type: "tool_execution_start", toolName: "bash", toolCallId: "call_1", args: { command: "pnpm test" } }),
-    pe({ type: "tool_execution_end", toolCallId: "call_1", content: "3 passing", isError: false }),
+    pe({ type: "tool_execution_end", toolCallId: "call_1", result: "3 passing", isError: false }),
     pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "All three tests pass." } }),
     pe({ type: "agent_end", messages: [{ stopReason: "stop", usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1 } }] }),
   ]);
@@ -113,7 +114,7 @@ test("CYPACK-1177: the response is the last assistant text; a tool-ended turn po
     pe({ type: "turn_start" }),
     pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Calling the tool now." } }),
     pe({ type: "tool_execution_start", toolName: "bash", toolCallId: "t2", args: { command: "ls" } }),
-    pe({ type: "tool_execution_end", toolCallId: "t2", content: "a.ts\nb.ts", isError: false }),
+    pe({ type: "tool_execution_end", toolCallId: "t2", result: "a.ts\nb.ts", isError: false }),
     pe({ type: "turn_end", message: { stopReason: "toolUse" } }),
     pe({ type: "turn_start" }),
     pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Two files: a.ts and b.ts." } }),
@@ -136,7 +137,7 @@ test("a bare tool-ended prompt yields no response at all", () => {
   const events = drivePi([
     pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Running it." } }),
     pe({ type: "tool_execution_start", toolName: "bash", toolCallId: "t1", args: {} }),
-    pe({ type: "tool_execution_end", toolCallId: "t1", content: "done" }),
+    pe({ type: "tool_execution_end", toolCallId: "t1", result: "done" }),
     pe({ type: "agent_end", messages: [{ stopReason: "toolUse" }] }),
   ]);
   assert.deepEqual(events.map((e) => e.type), ["action", "observation", "state"]);
@@ -156,7 +157,7 @@ test("interactive turns suppress the per-turn stage-exit; a large tool output su
   const big = "Y".repeat(12_000);
   const events = drivePi([
     pe({ type: "tool_execution_start", toolName: "bash", toolCallId: "c1", args: { command: "cat big" } }),
-    pe({ type: "tool_execution_end", toolCallId: "c1", content: big, isError: false }),
+    pe({ type: "tool_execution_end", toolCallId: "c1", result: big, isError: false }),
     pe({ type: "agent_end", messages: [{ stopReason: "stop" }] }),
   ]);
   const obs = events[1] as Extract<TraceEvent, { type: "observation" }>;
@@ -180,6 +181,12 @@ test("a failed agent_end maps to an error plus a failed stage-exit; noise and un
   // Lifecycle noise is recognised with no events; an unknown event type is flagged unrecognised.
   assert.equal(mapPiEvent(pe({ type: "compaction_start" })).recognised, true);
   assert.deepEqual(mapPiEvent(pe({ type: "compaction_start" })).events, []);
+  // Event types the SDK emits that carry no normalised payload are recognised noise, not unknowns, so
+  // they are not confused with a genuinely new event type we might need to trace.
+  for (const t of ["agent_settled", "entry_appended", "thinking_level_changed", "bash_execution_update"]) {
+    assert.equal(mapPiEvent(pe({ type: t })).recognised, true, `${t} is recognised SDK noise`);
+    assert.deepEqual(mapPiEvent(pe({ type: t })).events, []);
+  }
   assert.equal(mapPiEvent(pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } })).recognised, true);
   assert.equal(mapPiEvent(pe({ type: "some_future_event" })).recognised, false);
 });
