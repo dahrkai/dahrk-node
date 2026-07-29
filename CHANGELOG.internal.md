@@ -21,6 +21,13 @@ this file is left verbatim.
 
 ### Changed
 
+- **DHK-971: remove the mock runner's read of the dead `StageConfig.tools` field.**
+  `packages/executor-worktree/src/mock-runner.ts` `runBatch` read `ctx.config.tools?.[0]` to
+  pick the tool name it emits in the mock action trace event. No other code in the node reads
+  the field. The line is replaced with the literal `"shell"` (the previous fallback) so the mock
+  trace is unchanged. No test depended on the tools-array path; all 277 tests pass. The field
+  still exists in `@dahrk/contracts` — its removal is the follow-up DHK-984 (harness side).
+
 - **DHK-980: reconciled the Pi event union against the shipped SDK declarations and retired the spike
   posture.** `packages/executor-worktree/src/pi-mappers.ts` carried a "SPIKE POSTURE" header saying its
   `PiEvent` shapes were authored to vendored docs and "MUST be reconciled against the real SDK types"
