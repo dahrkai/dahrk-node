@@ -1,9 +1,8 @@
 /**
- * Pure Pi (`@earendil-works/pi-coding-agent`) session-event -> normalised trace envelope
- * mapping. Spike B: this de-risks the envelope mapping BEFORE the full runtime
- * adapter. It maps Pi `AgentSessionEvent`s DIRECTLY onto the SAME envelope the
- * Claude mapper produces, so a cross-runtime reader (a later stage, an `on_fail`
- * re-run, the optimiser) never sees a runtime-specific shape.
+ * Pure Pi (`@earendil-works/pi-coding-agent`) session-event -> normalised trace envelope mapping. It
+ * maps Pi `AgentSessionEvent`s DIRECTLY onto the SAME envelope the Claude mapper produces, so a
+ * cross-runtime reader (a later stage, an `on_fail` re-run, the optimiser) never sees a
+ * runtime-specific shape.
  *
  * The load-bearing difference from Claude: Pi STREAMS assistant text and reasoning as
  * `message_update` deltas rather than delivering whole messages/items, so the response cannot
@@ -14,13 +13,17 @@
  * boundary; `suppressStageExit` drops the per-turn marker on the interactive path, mirroring the
  * Claude mapper (the stage runner owns the single final stage-exit).
  *
- * SPIKE POSTURE: the `PiEvent` shapes below are a spike-local structural SUBSET of Pi's real
- * `AgentSessionEvent` union, authored to the vendored docs (sdk.md event list; session-format.md
- * `Usage`/`ToolResultMessage`). The docs name `toolName`/`isError` on the events but do not spell
- * out the tool-call id / args field names on the *event* object; `toolCallId`/`args` here are the
- * documented `ToolCall` shape and MUST be reconciled against the real SDK types in.
- * Keeping this dependency-free (no `@earendil-works/pi-coding-agent` import) is deliberate: T6 adds
- * the dependency; this spike proves the mapping first.
+ * The `PiEvent` shapes below are a hand-authored structural SUBSET of Pi's `AgentSessionEvent` union
+ * (`@earendil-works/pi-coding-agent`; its base variants come from `@earendil-works/pi-agent-core`'s
+ * `AgentEvent`, its message/usage shapes from `@earendil-works/pi-ai`). They carry only the fields the
+ * mapper reads; each deliberate narrowing - an optional where the SDK is required, an unread field
+ * omitted - is noted at the variant. The subset is checked against the real declarations at compile
+ * time by `pi-event-conformance.ts`: it reddens `tsc` if a Pi bump renames a field the mapper reads or
+ * adds an event `type` we do not classify. That static assertion is the ONLY thing that surfaces this
+ * drift, because `pi-adapter.ts` loads the SDK by dynamic import so the compiler never resolves it
+ * against the mapper - the analogue of `test/pi-sdk-exports.test.ts` for the event shapes. No SDK
+ * VALUE is imported (the conformance module's references are `import type`, erased at runtime), so the
+ * mapper stays pure and free of a runtime dependency on the SDK.
  *
  * Pure: no SDK calls, no I/O.
  */
@@ -28,7 +31,9 @@ import type { JobStatus, TraceMeta } from "@dahrk/contracts";
 import type { EmittableEvent } from "./runtime-session.js";
 import { decideResponse } from "./response-rule.js";
 
-/** Pi `Usage` (session-format.md): note `cacheWrite`, which we normalise to `cacheCreate`. */
+/** The four token counters the envelope needs, a subset of pi-ai's `Usage`. Its `cacheWrite` is the
+ *  cache-creation counter we normalise to `cacheCreate`; the SDK's `Usage` also carries `cacheWrite1h`,
+ *  `reasoning`, `totalTokens` and a `cost` breakdown, none of which the envelope tracks. */
 export interface PiUsage {
   input: number;
   output: number;
@@ -36,42 +41,74 @@ export interface PiUsage {
   cacheWrite: number;
 }
 
-/** The settling assistant message carried on `turn_end`/`agent_end`. */
+/** The settling assistant message carried on `turn_end`/`agent_end` - a structural subset of pi-ai's
+ *  `AssistantMessage`, whose `stopReason` union is reproduced here verbatim. `usage` and `stopReason`
+ *  are required on `AssistantMessage`, but the settle carrier is typed `AgentMessage` (a union that
+ *  also admits user/tool-result messages omitting them), so they stay optional; `settleStatus` reads a
+ *  missing `stopReason` as `ok`. */
 export interface PiAssistantSummary {
   usage?: PiUsage;
   stopReason?: "stop" | "length" | "toolUse" | "error" | "aborted";
   errorMessage?: string;
 }
 
-/** The streamed body of a `message_update`. `text_delta`/`thinking_delta` are owned by the buffered
- *  state machine (their `delta` accumulates); any other kind is recognised metadata, not normalised.
- *  A single open shape (not a discriminated union) so `.delta` access is narrowing-free. */
+/** The streamed body of a `message_update` (pi-ai's `AssistantMessageEvent`). `text_delta`/
+ *  `thinking_delta` are owned by the buffered state machine (their `delta: string` accumulates); every
+ *  other variant (`start`, `text_end`, `toolcall_*`, `done`, `error`, ...) is recognised metadata, not
+ *  normalised. A single open shape (not a discriminated union) so `.delta` access is narrowing-free;
+ *  `delta` is optional because the non-delta variants omit it, though it is required on the two we read. */
 export interface PiAssistantMessageEvent {
   type: string;
   delta?: string;
   [k: string]: unknown;
 }
 
-/** Recognised Pi lifecycle/interim event kinds carrying no normalised payload: captured in the raw
- *  sidecar, mapped to no trace event. */
-export type PiNoiseType =
-  | "message_start"
-  | "message_end"
-  | "agent_start"
-  | "turn_start"
-  | "tool_execution_update"
-  | "queue_update"
-  | "compaction_start"
-  | "compaction_end"
-  | "auto_retry_start"
-  | "auto_retry_end";
+/** Every recognised Pi lifecycle/interim event kind carrying no normalised payload: captured in the
+ *  raw sidecar, mapped to no trace event. This is the complete set of `AgentSessionEvent` types the SDK
+ *  can emit that the mapper does not turn into a trace event (the mapped kinds - `message_update`,
+ *  `tool_execution_start`/`_end`, `turn_end`, `agent_end` - are the rest of the union). It is the
+ *  single source of truth for the union type below and the noise check in `mapPiEvent`, and
+ *  `pi-event-conformance.ts` asserts that this list plus the mapped kinds exhaust the SDK's event types
+ *  so a Pi bump that adds a new event we should classify reddens `tsc`. */
+export const PI_NOISE_EVENT_TYPES = [
+  "message_start",
+  "message_end",
+  "agent_start",
+  "turn_start",
+  "agent_settled",
+  "tool_execution_update",
+  "queue_update",
+  "compaction_start",
+  "compaction_end",
+  "entry_appended",
+  "session_info_changed",
+  "thinking_level_changed",
+  "auto_retry_start",
+  "auto_retry_end",
+  "summarization_retry_scheduled",
+  "summarization_retry_attempt_start",
+  "summarization_retry_finished",
+  "bash_execution_update",
+] as const;
+
+export type PiNoiseType = (typeof PI_NOISE_EVENT_TYPES)[number];
+
+/** Runtime membership test for the noise set, so `mapPiEvent` classifies known-noise kinds without
+ *  duplicating the list above as switch cases. */
+const PI_NOISE_TYPES: ReadonlySet<string> = new Set(PI_NOISE_EVENT_TYPES);
 
 export type PiEvent =
   | { type: "message_update"; assistantMessageEvent: PiAssistantMessageEvent }
   | { type: "tool_execution_start"; toolName: string; toolCallId: string; args?: unknown }
-  | { type: "tool_execution_end"; toolCallId: string; content?: unknown; isError?: boolean }
+  // The tool output is the SDK's `result` (NOT `content` - the field the spike misread, so every Pi
+  // observation carried an empty output). Optional here because the RPC path's untrusted JSON may omit
+  // it, in which case the observation carries no output, exactly as a Claude tool_result with no content.
+  | { type: "tool_execution_end"; toolCallId: string; result?: unknown; isError?: boolean }
   | { type: "turn_end"; message?: PiAssistantSummary; toolResults?: unknown[] }
-  | { type: "agent_end"; messages?: PiAssistantSummary[] }
+  // `willRetry` marks an `agent_end` the SDK will follow with a retry; the settle path does not yet
+  // branch on it (it emits the per-turn stage-exit regardless, unchanged from the spike), but it is
+  // kept for fidelity so the conformance guard can pin the field.
+  | { type: "agent_end"; messages?: PiAssistantSummary[]; willRetry?: boolean }
   | { type: PiNoiseType };
 
 /**
@@ -145,7 +182,7 @@ export function mapPiEvent(ev: PiEvent): MapResult {
     case "tool_execution_end":
       return {
         events: [
-          { type: "observation", toolUseId: ev.toolCallId, output: ev.content, isError: Boolean(ev.isError) },
+          { type: "observation", toolUseId: ev.toolCallId, output: ev.result, isError: Boolean(ev.isError) },
         ],
         recognised: true,
       };
@@ -163,20 +200,11 @@ export function mapPiEvent(ev: PiEvent): MapResult {
     }
     // Streamed deltas: owned by the buffered state machine, no discrete event here.
     case "message_update":
-    // Lifecycle / interim noise: recognised, captured in the raw sidecar, not normalised.
-    case "message_start":
-    case "message_end":
-    case "agent_start":
-    case "turn_start":
-    case "tool_execution_update":
-    case "queue_update":
-    case "compaction_start":
-    case "compaction_end":
-    case "auto_retry_start":
-    case "auto_retry_end":
       return { events: [], recognised: true };
     default:
-      return { events: [], recognised: false };
+      // Lifecycle / interim noise (`PI_NOISE_EVENT_TYPES`): recognised, captured in the raw sidecar,
+      // not normalised. Anything else is a genuinely unknown event type, flagged unrecognised.
+      return { events: [], recognised: PI_NOISE_TYPES.has(ev.type) };
   }
 }
 

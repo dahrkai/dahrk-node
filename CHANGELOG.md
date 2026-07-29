@@ -31,6 +31,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **A Pi tool observation now carries the tool's output in the trace.** The Pi event mapper read the
+  tool result off a `content` field, but Pi's `tool_execution_end` event names it `result`, so every
+  Pi tool observation reached the trace with an empty output. It now reads `result`, so a reader of a
+  Pi stage's trace sees the tool output, matching the Claude runtime. The mapper's event shapes are now
+  reconciled against the installed SDK's type declarations and pinned by a compile-time check, so a
+  future Pi bump that renames a field or adds an event kind the mapper drops fails the build instead of
+  quietly degrading the trace.
+
 - **A Pi stage now stops at the same turn ceiling Claude enforces.** Claude caps a stage at
   `DAHRK_MAX_TURNS` (default 64) agent turns, the backstop against an agent stuck in a tool loop. Pi
   had no equivalent: its only bounds were time-based (the interactive idle window and the stage wall
