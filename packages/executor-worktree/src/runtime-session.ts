@@ -36,6 +36,18 @@ export type PolicyAwareRunnerContext = RunnerContext & {
 };
 
 /**
+ * Whether the session this runner drives blocks a policy-violating tool call BEFORE it runs (DHK-983).
+ * The edge keys its confinement-escape decision off this capability, NOT off the runtime name: an
+ * `fs_confine` deny that surfaces after the fact is a *blocked* deny when the session pre-blocks (Claude's
+ * `canUseTool`, embedded Pi's wired `setToolCallGate`), but a genuine *escape* - the tool already ran -
+ * when it does not (container Pi's RPC session omits the gate). Additive over the published `Runner`,
+ * so the edge reads it defensively until `@dahrk/contracts` declares it.
+ */
+export interface PreExecutionCapability {
+  readonly enforcesPreExecution: boolean;
+}
+
+/**
  * The engine-owned summarisation prompt (build spec section 9): one constrained turn that
  * produces the stage's user-facing recap. It is read by a human in Linear (as a response
  * activity and folded into the whole-run recap comment), NOT fed to the next stage, so it is

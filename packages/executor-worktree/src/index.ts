@@ -79,6 +79,10 @@ export { createMockRunner } from "./mock-runner.js";
 export { createCheckRunner, summariseChecks, renderCheckNote, safeStageSegment } from "./check-runner.js";
 export type { CheckOutcome } from "./check-runner.js";
 
+/** Whether a runner's session pre-blocks tool calls, so the edge can tell a blocked deny from a
+ *  confinement escape by capability rather than runtime name (DHK-983). */
+export type { PreExecutionCapability } from "./runtime-session.js";
+
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
 export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js";
 /** Which SDK each runtime executes through, resolved from the package that actually imports them. */

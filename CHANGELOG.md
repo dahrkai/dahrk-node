@@ -31,6 +31,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **An embedded Pi stage is no longer wrongly failed when its own gate blocked a confinement breach.**
+  When a tool action reaches outside the run's worktree, the node decides whether that was a call the
+  runtime blocked before it ran (record the deny, keep going) or one that already ran and cannot be
+  taken back (hard-fail the stage). That decision was keyed off the runtime's name, treating anything
+  that was not `claude-code` as unable to block. Since the Pi pre-execution gate landed, an embedded Pi
+  stage whose gate did block the call was still hard-failed as though nothing could stop it. The node
+  now keys the decision off whether the session in use actually enforces pre-execution, so an embedded
+  Pi stage records a normal blocked deny while a session that genuinely cannot pre-block (container Pi)
+  still hard-fails, preserving the security property.
 - **A Pi stage now stops at the same turn ceiling Claude enforces.** Claude caps a stage at
   `DAHRK_MAX_TURNS` (default 64) agent turns, the backstop against an agent stuck in a tool loop. Pi
   had no equivalent: its only bounds were time-based (the interactive idle window and the stage wall

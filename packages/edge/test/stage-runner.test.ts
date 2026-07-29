@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, TraceEvent, TraceMeta } from "@dahrk/contracts";
-import { createGitService, createMockRunner } from "@dahrk/executor-worktree";
+import { createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
 import {
   createStageRunner,
   resolveStageArtifact,
@@ -694,6 +694,132 @@ test("Claude-style runner authorization denies a policy-blocked tool before exec
     assert.ok(progress.some((p) => p.kind === "error" && /shell command blocked/.test(p.text ?? "")));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// DHK-983: the confinement-escape decision keys off whether the SESSION pre-blocks tool calls
+// (`enforcesPreExecution`), NOT off the runtime name. A runner whose session pre-blocks (Claude's
+// canUseTool, embedded Pi's wired gate) that surfaces an fs_confine-denying action on the trace has
+// merely had a call BLOCKED - the stage stays ok with a recorded deny. A runner whose session cannot
+// pre-block (container Pi) let the command run first, so the same surfaced action is a genuine escape
+// that must hard-fail. Both directions, both runtimes.
+
+/** A runner that emits ONE confinement-escaping action straight onto the trace (never pre-authorised),
+ *  mimicking a tool call that surfaces after the fact, then settles ok. `enforcesPreExecution` models
+ *  whether its session has a wired pre-execution gate. */
+const makeEscapingRunner = (
+  runtime: Runner["runtime"],
+  enforcesPreExecution: boolean,
+): Runner & PreExecutionCapability => ({
+  runtime,
+  enforcesPreExecution,
+  async runBatch(_ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
+    onTrace({
+      seq: 0,
+      ts: new Date().toISOString(),
+      type: "action",
+      runtime,
+      tool: "Bash",
+      toolUseId: "escape-1",
+      input: { command: "ls /Volumes" }, // a mounted-volume scan, outside the worktree -> fs_confine deny
+    });
+    return { status: "ok" };
+  },
+  async runInteractive() {
+    return { status: "ok", summary: "n/a" };
+  },
+  async summarise() {
+    return "n/a";
+  },
+  async cancel() {},
+});
+
+const mkEscapeJob = (runtime: Runner["runtime"], repo: string, id: string): JobRequest => ({
+  tenantId: "t_default",
+  runId: `run-${id}`,
+  stageId: "build",
+  jobId: `job-${id}`,
+  awakeableId: `awk-${id}`,
+  executorType: "worktree",
+  agentConfig: { runtime, interaction: "batch" },
+  workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+  timeout: 60,
+});
+
+const hasPolicyDeny = (streamed: TraceEvent[]): boolean =>
+  streamed.some((e) => e.type === "state" && (e as { event?: string }).event === "policy-deny");
+// The escape surfaces to the human on a `sendProgress` error frame (the terminal trace event is
+// archived, not streamed live), so the progress frame is what a test can observe.
+const escapeSurfaced = (progress: JobProgress[]): boolean =>
+  progress.some((p) => p.kind === "error" && /could not block it before it ran/.test(p.text ?? ""));
+
+test("a pre-blocking session's fs_confine deny is a blocked deny, not an escape (DHK-983)", async () => {
+  // Both runtimes: an `enforcesPreExecution` session keeps the stage ok even though "pi" is not
+  // "claude-code" - the old runtime-name check wrongly hard-failed embedded Pi here.
+  for (const runtime of ["pi", "claude-code"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "dahrk-sr-preblock-"));
+    const repo = join(root, "repo");
+    execFileSync("mkdir", ["-p", repo]);
+    initRepo(repo);
+
+    const streamed: TraceEvent[] = [];
+    const progress: JobProgress[] = [];
+    const sink: TraceSink = {
+      event: (f) => void streamed.push(f.event),
+      finalised: () => undefined,
+      requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+    };
+    const runner = createStageRunner({
+      gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+      makeRunner: (rt) => makeEscapingRunner(rt, true),
+      rules: [],
+      sendProgress: (p) => void progress.push(p),
+      trace: sink,
+    });
+
+    try {
+      const result = await runner.runJob(mkEscapeJob(runtime, repo, `preblock-${runtime}`));
+      assert.equal(result.status, "ok", `${runtime}: a pre-blocked confinement deny keeps the stage ok`);
+      assert.ok(hasPolicyDeny(streamed), `${runtime}: the deny is still recorded`);
+      assert.ok(!escapeSurfaced(progress), `${runtime}: a pre-blocked deny is NOT an escape hard-failure`);
+      assert.match(result.summary ?? "", /blocked/, `${runtime}: the blocked deny rides out as a note`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a session that cannot pre-block hard-fails on an fs_confine escape (DHK-983)", async () => {
+  // Both runtimes: with `enforcesPreExecution` false the breach already happened, so even "claude-code"
+  // hard-fails - proving the decision reads the capability, not the runtime name. Guards the security
+  // property (container Pi) against regression.
+  for (const runtime of ["pi", "claude-code"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "dahrk-sr-escape-"));
+    const repo = join(root, "repo");
+    execFileSync("mkdir", ["-p", repo]);
+    initRepo(repo);
+
+    const progress: JobProgress[] = [];
+    const sink: TraceSink = {
+      event: () => undefined,
+      finalised: () => undefined,
+      requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+    };
+    const runner = createStageRunner({
+      gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+      makeRunner: (rt) => makeEscapingRunner(rt, false),
+      rules: [],
+      sendProgress: (p) => void progress.push(p),
+      trace: sink,
+    });
+
+    try {
+      const result = await runner.runJob(mkEscapeJob(runtime, repo, `escape-${runtime}`));
+      assert.equal(result.status, "fail", `${runtime}: an unblockable confinement escape hard-fails the stage`);
+      assert.ok(escapeSurfaced(progress), `${runtime}: the escape is surfaced to the human`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
