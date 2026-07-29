@@ -56,4 +56,11 @@ test("Pi SDK exports every symbol defaultCreatePiSession depends on", async () =
     "function",
     "ModelRuntime#setRuntimeApiKey must exist (applyApiKeyAuth awaits it)",
   );
+
+  // DHK-978: the durable session statics `selectPiSessionManager` drives, replacing `inMemory`. A bump
+  // that drops or renames either must go red here (naming the version) rather than silently at the first
+  // managed Pi stage, where a durable session would fail to construct.
+  const SessionManager = sdk.SessionManager as { create?: unknown; open?: unknown };
+  assert.equal(typeof SessionManager.create, "function", "SessionManager.create static must be callable (durable, run-scoped)");
+  assert.equal(typeof SessionManager.open, "function", "SessionManager.open static must be callable (resume across a retry)");
 });

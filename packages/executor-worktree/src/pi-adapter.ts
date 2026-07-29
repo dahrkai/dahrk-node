@@ -27,6 +27,9 @@ import {
   cleanupStageConfigDir,
   writeStageAuthFile,
   writeStageCustomProviders,
+  piSessionDir,
+  ensureSessionDir,
+  findResumableSession,
 } from "./pi-auth.js";
 import {
   HANDED_BACK_ARTIFACT_PATH,
@@ -258,6 +261,39 @@ export function buildAppendSystemPromptOverride(
 ): ((base: string[]) => string[]) | undefined {
   if (!appendSystemPrompt) return undefined;
   return (base) => [...base, appendSystemPrompt];
+}
+
+/**
+ * The durable `SessionManager` statics DHK-978 drives (a subset of Pi's class statics), kept local so
+ * the resume decision below is testable against a spy without the live SDK. Both take the run-scoped
+ * session directory as an explicit parameter, which is what lets the adapter point Pi at a directory it
+ * owns (under the run's scratch tree) rather than the machine-global `~/.pi`.
+ *   - `create(cwd, sessionDir)` starts a fresh durable session persisted into `sessionDir`.
+ *   - `open(path, sessionDir, cwdOverride)` reopens an existing session file (resume across a retry).
+ */
+export interface PiSessionManagerStatics {
+  create(cwd: string, sessionDir?: string, options?: unknown): unknown;
+  open(path: string, sessionDir?: string, cwdOverride?: string): unknown;
+}
+
+/**
+ * The pure resume decision (DHK-978), the Pi analogue of the Claude adapter's `resume: ctx.sessionId`.
+ * When the adapter was handed a session id AND a durable file for it exists in the run-scoped `dir`,
+ * OPEN that session so a retry within a stage resumes rather than starting cold; otherwise CREATE a
+ * fresh durable session bound to the same run-scoped `dir` (never `~/.pi`). Both the SDK statics and the
+ * file resolver are injected so the decision is unit-tested with spies and only `defaultCreatePiSession`
+ * names the live API. Returns the SDK `SessionManager` instance to hand to `createAgentSession`.
+ */
+export function selectPiSessionManager(args: {
+  sdkSessionManager: PiSessionManagerStatics;
+  dir: string;
+  cwd: string;
+  sessionId?: string;
+  resolveSessionFile: (dir: string, sessionId: string) => string | undefined;
+}): unknown {
+  const file = args.sessionId ? args.resolveSessionFile(args.dir, args.sessionId) : undefined;
+  if (file) return args.sdkSessionManager.open(file, args.dir, args.cwd);
+  return args.sdkSessionManager.create(args.cwd, args.dir);
 }
 
 /** The initial `hooks.ask` before an interactive loop installs the router-backed one. Never invoked on
@@ -505,7 +541,9 @@ interface PiSdkModule {
     create(opts: { authPath?: string; modelsPath?: string }): Promise<ModelRuntimeLike>;
   };
   DefaultResourceLoader: new (opts: unknown) => { reload(): Promise<void> };
-  SessionManager: { inMemory(cwd: string): unknown };
+  /** DHK-978: the durable statics (`create`/`open`) the run-scoped session dir is threaded through,
+   *  replacing the in-memory `SessionManager.inMemory(cwd)` that persisted nothing. */
+  SessionManager: PiSessionManagerStatics;
   SettingsManager: { create(cwd: string, agentDir: string): unknown };
   createAgentSession(opts: unknown): Promise<{ session: unknown }>;
   defineTool(opts: unknown): unknown;
@@ -730,8 +768,22 @@ async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: s
   });
   await resourceLoader.reload();
 
+  // DHK-978: a DURABLE, run-scoped session replaces the in-memory manager that persisted nothing. The
+  // dir lives under the run's scratch tree (never `~/.pi`, disjoint between runs), so the transcript is
+  // inspectable after the run and reaped with it by `teardownRun` on every terminus (cancel/failure
+  // included) - deliberately NOT torn down by the per-stage `dispose` decorated below, which would
+  // defeat both the after-run transcript and resuming across a retry. Handing `ctx.sessionId` resumes
+  // that session (the Pi analogue of the Claude adapter's `resume`), else a fresh durable one is created.
+  const sessionDir = ensureSessionDir(piSessionDir(ctx));
+  const sessionManager = selectPiSessionManager({
+    sdkSessionManager: SessionManager,
+    dir: sessionDir,
+    cwd,
+    sessionId: ctx.sessionId,
+    resolveSessionFile: findResumableSession,
+  });
   const { session } = await createAgentSession({
-    sessionManager: SessionManager.inMemory(ctx.workspace.worktreePath),
+    sessionManager,
     modelRuntime,
     settingsManager,
     resourceLoader,

@@ -18,7 +18,7 @@
  * `PiModelLike` pattern in pi-adapter.ts) so it is unit-tested in isolation without a live Pi install:
  * the live factory `defaultCreatePiSession` is a thin caller of these helpers.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -167,4 +167,50 @@ export function writeStageCustomProviders(dir: string, hint: PiAuthHint | undefi
   const path = join(dir, "models.json");
   writeFileSync(path, JSON.stringify(models, null, 2));
   return path;
+}
+
+/**
+ * The run-scoped directory Pi persists its durable session (transcript) into (DHK-978). Deliberately
+ * UNLIKE `createStageConfigDir` above, which mints a throwaway `tmpdir()` mkdtemp for credentials torn
+ * down per stage: the session transcript must instead be
+ *   - rooted under the run's own scratch tree (`<worktree>/.dahrk/scratch`), so it is never the
+ *     machine-global `~/.pi` and is disjoint between runs by construction (each run owns its worktree)
+ *     - nothing from one run is readable by another;
+ *   - inspectable after the run for debugging, and stable across a stage's attempts so a retry can
+ *     resume it rather than start cold;
+ *   - cleaned up on the run terminus (cancel and failure included) by the same `teardownRun` that reaps
+ *     the scratch tree - NOT torn down inside the adapter's per-stage `dispose`, which would defeat both
+ *     the after-run transcript and the resume.
+ * Pure path derivation (no I/O), so the never-home and cross-run-isolation guarantees are unit-testable.
+ */
+export function piSessionDir(ctx: RunnerContext): string {
+  return join(ctx.workspace.scratchPath, "pi-sessions");
+}
+
+/** Create the run-scoped session dir (recursive, idempotent) and return it, so Pi can write into it on
+ *  the first stage of a run before any file exists. Distinct from the throwaway config dir's mkdtemp:
+ *  this path is deterministic and run-scoped so a retry lands in the same place. */
+export function ensureSessionDir(dir: string): string {
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Resolve the durable session file for `sessionId` within the run-scoped `dir`, or `undefined` when no
+ * such file exists (the resume target is absent - the first attempt of a stage, or a vanished session -
+ * so the caller starts a fresh durable session instead). Pi names each session file
+ * `<timestamp>_<sessionId>.jsonl`, so the id handed back from a prior attempt (DHK-978 done-when #3) is
+ * honoured by matching the file whose name ends with `_<sessionId>.jsonl` rather than reconstructing a
+ * path (the timestamp prefix is not knowable). A missing dir yields `undefined`, never throws.
+ */
+export function findResumableSession(dir: string, sessionId: string): string | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return undefined; // the session dir does not exist yet (first stage of a run)
+  }
+  const suffix = `_${sessionId}.jsonl`;
+  const match = names.find((n) => n.endsWith(suffix));
+  return match ? join(dir, match) : undefined;
 }
