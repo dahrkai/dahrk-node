@@ -36,6 +36,7 @@ import {
   makeEmit,
   SUMMARISE_PROMPT,
   type PolicyAwareRunnerContext,
+  type PreExecutionCapability,
   type RuntimeSession,
   type RuntimeSessionHooks,
   type TurnResult,
@@ -143,10 +144,16 @@ export function piToolCallDecision(
  * flow through the stage runner's existing `recordDeny` path and allowed actions are deduped from
  * `onTrace` exactly as for Claude - no new recording mechanism. `ctx` is cast to the policy-aware shape
  * the stage runner supplies (as the elicit path already casts for `emitElicit`).
+ *
+ * Returns whether the gate was actually wired (DHK-983): the embedded session exposes `setToolCallGate`
+ * and so pre-blocks, while the container RPC session omits it (the call is a silent `?.` no-op), so it
+ * does not. The runner surfaces this as `enforcesPreExecution` for the edge's escape decision.
  */
-function registerToolCallGate(s: PiSessionLike, ctx: RunnerContext): void {
+function registerToolCallGate(s: PiSessionLike, ctx: RunnerContext): boolean {
   const policyCtx = ctx as PolicyAwareRunnerContext;
+  const enforces = typeof s.setToolCallGate === "function";
   s.setToolCallGate?.((toolName, input) => piToolCallDecision(policyCtx, toolName, input));
+  return enforces;
 }
 
 /** One brokered MCP server as the Pi extension consumes it: transport + the node-local proxy url the
@@ -404,12 +411,16 @@ function makePiRuntimeSession(
   };
 }
 
-export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
+export function createPiRunner(deps: PiRunnerDeps = {}): Runner & PreExecutionCapability {
   const createSession = deps.createSession ?? defaultCreatePiSession;
   const abortController = new AbortController();
   const signal = abortController.signal;
   let cancelled = false;
   let session: PiSessionLike | undefined;
+  // Whether the session in use pre-blocks tool calls (DHK-983). Set once the session is opened and its
+  // gate registered: true for the embedded session (`setToolCallGate` wired), false for the container
+  // RPC session (no such hook). Read by the edge to tell a blocked deny from a confinement escape.
+  let enforcesPreExecution = false;
 
   /** Open the session once and keep it warm so `summarise()` reuses the batch session. The interactive
    *  path passes the stage instruction as `appendSystemPrompt` (DHK-977); batch omits it. */
@@ -440,10 +451,17 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
   return {
     runtime: "pi",
 
+    // DHK-983: true only once a session that wires `setToolCallGate` has been opened (embedded Pi);
+    // the container RPC session leaves it false. A getter, not a snapshot, because the session is
+    // opened lazily inside `runBatch`/`runInteractive` - the edge reads this after the run has started.
+    get enforcesPreExecution() {
+      return enforcesPreExecution;
+    },
+
     async runBatch(ctx, onTrace) {
       const hooks: RuntimeSessionHooks = { emit: makeEmit("pi", onTrace), ask: defaultAsk };
       const s = await openSession(ctx);
-      registerToolCallGate(s, ctx);
+      enforcesPreExecution = registerToolCallGate(s, ctx);
       const rt = makePiRuntimeSession(s, ctx, hooks, false);
       const result = await runBatchLoop(rt, ctx, hooks, { cancelled: () => cancelled });
       // An ok batch keeps the session warm for the engine-owned summarise turn (its true terminus, which
@@ -461,7 +479,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
       // carries no system prompt, so it still seeds the resolved instruction as the opening turn.
       const inSystemPrompt = hasSystemPrompt(ctx);
       const s = await openSession(ctx, inSystemPrompt ? resolveStagePrompt(ctx) : undefined);
-      registerToolCallGate(s, ctx);
+      enforcesPreExecution = registerToolCallGate(s, ctx);
       // DHK-505: route the live session's injected `ask_user_question` tool through the shared elicit
       // router. The loop assembles the router-backed hooks and calls this factory with them, so the
       // handler is wired to the FINAL `ask` at construction (no lazy read of a swapped field). A batch of
