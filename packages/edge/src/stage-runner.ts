@@ -973,8 +973,14 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // streamed trace event is a sign of life, so bumping it here keeps an actively-working stage
         // alive; a no-op until the watchdog is armed.
         let bumpStall: () => void = () => {};
+        // Tool calls the agent has opened but not yet observed to return (DHK-955). A single long tool
+        // call that streams no intermediate output (classically `pnpm test | tail`) looks identical to
+        // a hung runtime: one `action` event, then total silence until it exits. While a call is open,
+        // that silence is expected - the runtime is legitimately blocked on the tool, not hung - so
+        // `bumpStall` suspends the watchdog until the set drains. `action`/`observation` pair by
+        // `toolUseId` (DHK-384), so interleaved/parallel calls track correctly.
+        const openToolCalls = new Set<string>();
         const onTrace = (event: TraceEvent): void => {
-          bumpStall();
           if (event.type === "action") {
             const key = actionKey(event.tool, event.input);
             const authorised = authorisedActions.indexOf(key);
@@ -986,13 +992,25 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
                 rules,
               );
               if (verdict.verdict === "deny") {
+                // A denied action never runs, so it opens no call - do not add it to the set (its
+                // synthetic observation bypasses onTrace, which would leak the entry and disable the
+                // watchdog forever). It is still a sign of life, so re-arm before returning.
+                bumpStall();
                 streamEvent(writer.append(event));
                 recordDeny(verdict, event.toolUseId);
                 if (verdict.policy === "fs_confine" && runtime !== "claude-code") escapedUnblocked = true;
                 return;
               }
             }
+            // An authorised tool call is now in flight: mark it open BEFORE bumping so the watchdog
+            // does not re-arm while it runs.
+            openToolCalls.add(event.toolUseId);
+          } else if (event.type === "observation") {
+            // The call has returned: drop it BEFORE bumping so this event re-arms the watchdog once
+            // nothing else is open.
+            openToolCalls.delete(event.toolUseId);
           }
+          bumpStall();
           streamEvent(writer.append(event));
           if (event.type !== "state") deps.sendProgress({ jobId, kind: event.type, ts: event.ts, ...previewOf(event) });
         };
@@ -1111,6 +1129,11 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         if (stallMs > 0) {
           bumpStall = (): void => {
             if (stallTimer) clearTimeout(stallTimer);
+            stallTimer = undefined;
+            // A tool call is in flight (DHK-955): the runtime is legitimately blocked on it, so the
+            // silence is not a hang. Leave the watchdog disarmed until the matching observation drains
+            // the set and re-arms it. Measures agent silence, not any silence.
+            if (openToolCalls.size > 0) return;
             stallTimer = setTimeout(() => {
               stalled = true;
               void runner.cancel();

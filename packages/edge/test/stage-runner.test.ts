@@ -475,6 +475,71 @@ test("a batch stage that keeps streaming resets the stall watchdog and is never 
   }
 });
 
+test("a batch stage doing one long non-streaming tool call outlives the stall window (DHK-955)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-toolcall-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+
+  const sink: TraceSink = {
+    event: () => undefined,
+    finalised: () => undefined,
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+
+  // The `pnpm test | tail` shape: the agent opens ONE tool call, the tool streams no intermediate
+  // output while it runs (200ms >> the 50ms stall window), then returns and the stage finishes ok.
+  // With the watchdog measuring *any* silence this was cancelled mid-tool-call; measuring *agent*
+  // silence (the open call suspends the timer) lets the healthy stage run to completion.
+  const makeToolCallRunner = (runtime: Runner["runtime"]): Runner => ({
+    runtime,
+    async runBatch(_ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
+      const ts = new Date().toISOString();
+      onTrace({ seq: 0, ts, type: "action", runtime, tool: "Bash", toolUseId: "call-1", input: { cmd: "pnpm test | tail" } });
+      await new Promise((r) => setTimeout(r, 200)); // the tool runs, streaming nothing
+      onTrace({ seq: 1, ts: new Date().toISOString(), type: "observation", runtime, toolUseId: "call-1", output: { ok: true } });
+      return { status: "ok" };
+    },
+    async runInteractive() {
+      return { status: "ok" };
+    },
+    async summarise() {
+      return "done";
+    },
+    async cancel() {},
+  });
+
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+    makeRunner: makeToolCallRunner,
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+  });
+
+  const job: JobRequest = {
+    tenantId: "t_default",
+    runId: "run-sr-toolcall",
+    stageId: "build",
+    jobId: "job-sr-toolcall-1",
+    awakeableId: "awk-toolcall",
+    executorType: "worktree",
+    agentConfig: { runtime: "claude-code", interaction: "batch", tools: ["shell"] },
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+  };
+
+  const prev = process.env.DAHRK_BATCH_STALL_MS;
+  process.env.DAHRK_BATCH_STALL_MS = "50"; // 50ms window, far shorter than the 200ms tool call
+  try {
+    const result = await runner.runJob(job);
+    assert.equal(result.status, "ok", "a stage blocked on one long tool call is never cancelled by the watchdog");
+  } finally {
+    if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
+    else process.env.DAHRK_BATCH_STALL_MS = prev;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)", async () => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-rtenv-"));
   const repo = join(root, "repo");
