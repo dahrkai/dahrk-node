@@ -10,8 +10,16 @@
  *     container at `/dahrk/scratch`. No customer worktree is mounted for meta-loop runs.
  *   - Inference env: `ctx.runtimeEnv` is injected as `-e KEY=VAL` pairs (never baked into the
  *     image), so provider keys and model overrides arrive at Pi without persisting credentials.
+ *   - Model (DHK-982): the stage's configured model is resolved provider-aware on the host
+ *     (`resolveStageModelId`, reusing the embedded path's `selectStageModel`) and passed as
+ *     `--model <id>` on the container command, so a bare alias never lands on a provider the broker
+ *     minted no key for. An unresolvable model fails loudly before the container starts.
  *   - Teardown: `dispose()` -> `docker kill <containerName>`. `--rm` removes the container
  *     automatically on exit.
+ *
+ * Still unsupported here (DHK-982): brokered MCP. The embedded bridge assumes an in-process session to
+ * register tools onto; threading the gateway over RPC is a larger piece of work, so a stage's brokered
+ * MCP servers do not reach the containerised agent - a deliberate, documented gap.
  *
  * Image: `DAHRK_PI_IMAGE` env var (default: `dahrk/pi:latest`). Override per-environment or
  * in tests via the `image` option.
@@ -22,7 +30,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { Runner, RunnerContext } from "@dahrk/contracts";
 import { PiRpcSession } from "./pi-rpc-client.js";
-import { createPiRunner } from "./pi-adapter.js";
+import { createPiRunner, resolveStageModelId } from "./pi-adapter.js";
 import type { PiSessionFactory, PiSessionLike } from "./pi-adapter.js";
 
 const DEFAULT_IMAGE = process.env.DAHRK_PI_IMAGE ?? process.env.SKAKEL_PI_IMAGE ?? "dahrk/pi:latest";
@@ -49,6 +57,13 @@ export interface ContainerPiSessionOpts {
    * makes that impossible - surfacing the message is the bonus.
    */
   onStderr?: (line: string) => void;
+  /**
+   * Resolve the stage's configured model to a concrete id conveyed into the container as `--model <id>`
+   * (DHK-982), provider-aware via the embedded path's `selectStageModel` so a bare alias never lands on
+   * a provider the broker minted no key for. Default: `resolveStageModelId` (loads the pinned SDK on the
+   * host). Injected for tests, which have no SDK, to drive the spawn wiring and the loud-fail path.
+   */
+  resolveModelId?: (ctx: RunnerContext) => Promise<string | undefined>;
 }
 
 /**
@@ -60,10 +75,17 @@ export function createContainerPiSession(opts: ContainerPiSessionOpts = {}): PiS
     image = DEFAULT_IMAGE,
     scratchDir: optsScratchDir,
     spawn: spawnFn = nodeSpawn,
+    resolveModelId = resolveStageModelId,
     onStderr = (line: string): void => void process.stderr.write(`pi-container: ${line}\n`),
   } = opts;
 
   return async (ctx: RunnerContext): Promise<PiSessionLike> => {
+    // Resolve the stage model BEFORE spawning, provider-aware, so a bare alias never ships onto the wrong
+    // provider (DHK-982). A loud resolution failure rejects here - no container is started on a substituted
+    // model. Undefined means no model opinion, so the container command is left unchanged and Pi picks.
+    const modelId = await resolveModelId(ctx);
+    const modelArgs: string[] = modelId ? ["--model", modelId] : [];
+
     const containerName = `dahrk-pi-${Date.now()}-${++_seq}`;
     const resolvedScratchDir = optsScratchDir ?? ctx.workspace.scratchPath;
 
@@ -76,7 +98,7 @@ export function createContainerPiSession(opts: ContainerPiSessionOpts = {}): PiS
 
     const child = spawnFn(
       "docker",
-      ["run", "-i", "--rm", "--name", containerName, ...mountArgs, ...envArgs, image, "pi", "--mode", "rpc"],
+      ["run", "-i", "--rm", "--name", containerName, ...mountArgs, ...envArgs, image, "pi", "--mode", "rpc", ...modelArgs],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
 

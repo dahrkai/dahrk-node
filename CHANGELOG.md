@@ -8,6 +8,18 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A container-isolated Pi stage now reports its cost and honours the configured model.** When Pi runs
+  inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), two capabilities the
+  embedded path has were previously lost silently. Cost: the RPC session now queries Pi's aggregate
+  session cost once each run finishes and surfaces it as the stage's `costUsd`, so the hub's
+  `cost_budget` policy acts on a real dollar figure instead of nothing (a session that cannot price a
+  run reports no cost rather than a misleading zero). Model: the stage's configured model is now
+  resolved provider-aware on the host, using the same family matching the embedded path uses, and
+  passed into the container, so a bare alias such as `opus` no longer lands on a provider the broker
+  minted no key for and the containerised agent no longer picks its own model. As with the embedded
+  path, an unresolvable model fails the stage loudly rather than substituting one silently. Brokered
+  MCP remains unsupported on the container path.
+
 - **A container-isolated Pi stage now enforces the tool gate and can ask a structured question.**
   When Pi runs inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), the
   pre-execution tool gate and structured elicitation previously did nothing: the RPC session did not

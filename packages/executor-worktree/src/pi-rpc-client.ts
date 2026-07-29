@@ -35,6 +35,20 @@
  *     shared no-reply soft note when no handler is registered / the handler throws). These requests use
  *     the subprocess's own id space and never touch `#pendingResponses` (those are host-initiated).
  *
+ * Cost (DHK-982): `getSessionStats()` surfaces the aggregate dollar figure Pi priced the session at,
+ * queried over RPC (`get_session_stats`) once each `prompt()` run finishes and cached in `#lastCost`,
+ * so the adapter's `cost()` reads a current value synchronously at the loop's terminus and the hub's
+ * `cost_budget` acts on a real figure. A missing figure stays `undefined`, never a fabricated `0`
+ * (DHK-434). Model selection is not this class's concern: the container factory resolves the stage's
+ * model provider-aware (`resolveStageModelId`) and passes it as `--model <id>` on the container command,
+ * failing loudly before this session is ever constructed rather than substituting silently.
+ *
+ * Still unsupported on the container path (DHK-982): brokered MCP. The embedded path's extension bridge
+ * (`createBrokeredMcpExtension`) assumes an in-process Pi session it can register tools onto; there is no
+ * in-process session here, and threading the gateway over RPC is a larger piece of work. A stage that
+ * declares brokered MCP servers gets none of them inside the container - a deliberate, documented gap,
+ * not a silent one.
+ *
  * Degradation (Open Question 1): the RPC session has no `agent` handle, so `summarise`'s
  * tool-denial (which mutates `s.agent.state.tools`) is a no-op here. Accepted for the first cut
  * (meta-loop stages are telemetry-only); `agent` is intentionally omitted from this class.
@@ -157,6 +171,13 @@ export class PiRpcSession implements PiSessionLike {
   #pendingAgentEnd: Deferred<void> | undefined;
   #reqCounter = 0;
   #disposed = false;
+  /**
+   * The last session cost queried over RPC, or `undefined` when the session has priced nothing (or a
+   * stats query failed). Refreshed after each `prompt()` finishes and read synchronously by
+   * `getSessionStats()` at the loop's terminus (DHK-982). Never coerced to `0`: a missing figure stays
+   * `undefined` so the hub's `cost_budget` policy reads "not reported", not a fabricated `$0` (DHK-434).
+   */
+  #lastCost: number | undefined;
   readonly #child: PiRpcChild;
   #kill: (() => void | Promise<void>) | undefined;
   /** The adapter's pre-execution tool gate (DHK-504); consulted for each `tool_call_request`. */
@@ -212,6 +233,27 @@ export class PiRpcSession implements PiSessionLike {
       throw new Error(ack.error ?? "prompt rejected");
     }
     await agentEnd.promise;
+    // The run has finished, so its cost is now final: query it over RPC and cache it (DHK-982). This
+    // completes BEFORE `prompt()` resolves, so the value is current when the loop reads `getSessionStats()`
+    // synchronously at the terminus. A failed query leaves the last-known value untouched - never a 0.
+    await this.#refreshCost();
+  }
+
+  /**
+   * Refresh `#lastCost` from Pi's aggregate session stats over RPC (DHK-982), the container analogue of
+   * the embedded `getSessionStats().cost`. Only a finite numeric `data.cost` updates the cache; anything
+   * else (a session that cannot price the run, a disposed session, a failed query) leaves the previous
+   * value in place, so a missing figure is reported as `undefined`, never a fabricated `0` (DHK-434).
+   */
+  async #refreshCost(): Promise<void> {
+    if (this.#disposed) return;
+    try {
+      const res = await this.#send("get_session_stats", {});
+      const cost = res.data?.cost;
+      if (typeof cost === "number" && Number.isFinite(cost)) this.#lastCost = cost;
+    } catch {
+      /* best effort: a failed stats query leaves the last-known cost (or undefined) untouched */
+    }
   }
 
   async abort(): Promise<void> {
@@ -229,6 +271,16 @@ export class PiRpcSession implements PiSessionLike {
     } catch {
       /* best effort: the resume token is optional */
     }
+  }
+
+  /**
+   * The aggregate session cost, read synchronously by the adapter's `cost()` at the loop's terminus
+   * (DHK-982). Returns `{ cost }` only when a finite figure was queried after a prompt; otherwise
+   * `undefined`, so an unpriced container run reports no cost rather than a fabricated `0` (DHK-434) -
+   * matching the embedded path's `getSessionStats()`.
+   */
+  getSessionStats(): { cost?: number } | undefined {
+    return typeof this.#lastCost === "number" ? { cost: this.#lastCost } : undefined;
   }
 
   dispose(): void {

@@ -745,6 +745,58 @@ async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: s
   return piSession;
 }
 
+/**
+ * Resolve the stage's configured model to a concrete model id for the CONTAINER path (DHK-982), reusing
+ * the embedded path's provider-aware family matching (`selectStageModel`) rather than shipping a bare
+ * alias into the container - which would resolve onto a different provider than the broker minted a key
+ * for (the Bedrock-alias trap `selectStageModel`/`pickAuthedModel` exist to avoid). The host builds a
+ * throwaway hermetic `ModelRuntime` purely to resolve, tears it down, and returns the resolved model
+ * id, which the container factory conveys as `--model <id>`.
+ *
+ * FAILS LOUDLY, exactly as the embedded factory does: `selectStageModel` throws when a requested model
+ * cannot be landed, and that rejection propagates out (the container factory lets it reject rather than
+ * spawning), so no container is ever left running silently on a substituted model. When the stage names
+ * no model and the profile carries no default, returns `undefined` WITHOUT loading the SDK - the correct
+ * no-opinion path, identical to embedded, where the container's own Pi picks.
+ */
+export async function resolveStageModelId(ctx: RunnerContext): Promise<string | undefined> {
+  const hint = readAuthHint(ctx);
+  // No model opinion at all: skip the SDK load and the throwaway runtime entirely, so the container's
+  // Pi picks its own default (matching embedded's `selectStageModel` early return on no request).
+  if (!ctx.config.model && !hint?.defaultModel) return undefined;
+
+  const spec = "@earendil-works/pi-coding-agent";
+  const mod = (await import(spec)) as unknown as PiSdkModule;
+  const { VERSION, ModelRuntime, resolveCliModel } = mod;
+  const ver = (VERSION as string | undefined) ?? "unknown";
+  assertSdkSymbol("ModelRuntime", ModelRuntime, ver);
+  assertSdkSymbol("resolveCliModel", resolveCliModel, ver);
+
+  // A fresh per-resolution config dir keeps the host-side runtime hermetic (never machine-global ~/.pi),
+  // exactly as the embedded factory does. It is torn down unconditionally in `finally`: the host runtime
+  // is throwaway (the container re-authenticates from `runtimeEnv` itself), so nothing outlives this call
+  // - on success and on the loud-fail throw alike (the embedded factory's cleanup-and-rethrow).
+  const configDir = createStageConfigDir();
+  writeStageAuthFile(configDir, hint);
+  writeStageCustomProviders(configDir, hint);
+  try {
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(configDir, "auth.json"),
+      modelsPath: join(configDir, "models.json"),
+    });
+    await applyApiKeyAuth(hint, ctx.runtimeEnv, modelRuntime);
+    const model = selectStageModel({
+      stageModel: ctx.config.model,
+      profileDefaultModel: hint?.defaultModel,
+      resolve: (id: string) => resolveCliModel({ cliModel: id, modelRuntime }),
+      available: () => modelRuntime.getAvailableSnapshot(),
+    });
+    return model?.id;
+  } finally {
+    cleanupStageConfigDir(configDir);
+  }
+}
+
 /** The minimum of a Pi model we depend on. The SDK's own type is not resolved at build time (the
  *  package is imported by variable specifier), so we describe only what we read. */
 export interface PiModelLike {
