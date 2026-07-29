@@ -74,6 +74,33 @@ test("prompt() resolves only after agent_end; subscribers receive events in orde
   await once(child, "exit");
 });
 
+// DHK-982 seam 1: cost across the RPC boundary. After a priced prompt the session surfaces the real
+// dollar figure Pi computed (queried over RPC once the run finishes), so `makePiRuntimeSession.cost()`
+// -> `JobResult.costUsd` flows on the container path exactly as embedded and `cost_budget` has a real
+// figure to act on. A session that reports no cost surfaces `undefined`, never a fabricated `0`.
+
+test("getSessionStats() returns the real session cost after a priced prompt (queried over RPC)", async () => {
+  const child = spawn(process.execPath, [FAKE_PI], { stdio: ["pipe", "pipe", "pipe"] });
+  const session = new PiRpcSession(child, {});
+  assert.equal(session.getSessionStats(), undefined, "no cost before a prompt has priced anything");
+  await session.prompt("hi");
+  assert.deepEqual(session.getSessionStats(), { cost: 0.0731 }, "the figure the fixture priced the session at");
+  session.dispose();
+  await once(child, "exit");
+});
+
+test("getSessionStats(): a session that cannot price the run reports undefined, never a fabricated 0", async () => {
+  const child = spawn(process.execPath, [FAKE_PI], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, FAKE_PI_NOCOST: "1" },
+  });
+  const session = new PiRpcSession(child, {});
+  await session.prompt("hi");
+  assert.equal(session.getSessionStats(), undefined, "no cost reported rather than a misleading 0");
+  session.dispose();
+  await once(child, "exit");
+});
+
 test("subscribed events preserve a U+2028 inside a text delta over the subprocess stdio", async () => {
   const child = spawn(process.execPath, [FAKE_PI], { stdio: ["pipe", "pipe", "pipe"] });
   const session = new PiRpcSession(child, {});
@@ -133,6 +160,9 @@ test("PiRpcSession satisfies the PiSessionLike contract the adapter drives", () 
   // capability members are present (no longer a silent optional-chaining no-op).
   assert.equal(typeof session.setToolCallGate, "function", "setToolCallGate is implemented (gate capability present)");
   assert.equal(typeof session.setAskUserQuestionHandler, "function", "setAskUserQuestionHandler is implemented (elicit capability present)");
+  // DHK-982: the container path now surfaces session cost over RPC, so the stats accessor is a real
+  // member rather than a silent optional-chaining no-op (`cost_budget` acts on a real figure).
+  assert.equal(typeof session.getSessionStats, "function", "getSessionStats is implemented (cost capability present)");
   session.dispose();
 });
 

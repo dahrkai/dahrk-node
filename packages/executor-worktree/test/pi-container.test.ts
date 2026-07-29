@@ -253,6 +253,91 @@ test("createContainerPiSession + createPiRunner: runBatch drives the fake-pi-rpc
 });
 
 // ---------------------------------------------------------------------------
+// DHK-982 seam 3: the stage model reaches the containerised agent, resolved provider-aware. The
+// injected `resolveModelId` stands in for the SDK-backed host-side resolution (unit-tested separately
+// via `selectStageModel` in pi-model-provider.test.ts); these assert the FACTORY carries the resolved
+// id into the container and fails loudly rather than spawning-and-continuing on an unresolvable model.
+// ---------------------------------------------------------------------------
+
+test("DHK-982: a resolved stage model is carried into the container as --model after pi --mode rpc", async () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const factory = createContainerPiSession({
+    image: "dahrk/pi:test",
+    spawn: makeFakeSpawn(calls),
+    resolveModelId: async () => "claude-opus-4-8",
+  });
+
+  const session = await factory(ctx({ config: { runtime: "pi", interaction: "batch", model: "opus" } as RunnerContext["config"] }));
+  session.dispose();
+
+  const runCall = calls.find((c) => c.cmd === "docker" && c.args[0] === "run")!;
+  const mIdx = runCall.args.indexOf("--model");
+  assert.ok(mIdx !== -1, "--model flag present on the container command");
+  assert.equal(runCall.args[mIdx + 1], "claude-opus-4-8", "the provider-aware resolved id, not the bare alias");
+  // pi --mode rpc still leads the container command; --model follows it.
+  const rpcIdx = runCall.args.indexOf("rpc");
+  assert.ok(rpcIdx !== -1 && mIdx > rpcIdx, "--model follows the pi --mode rpc command");
+});
+
+test("DHK-982: no configured model leaves the container command unchanged (Pi picks - the no-opinion path)", async () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  let resolverCalled = false;
+  const factory = createContainerPiSession({
+    image: "dahrk/pi:test",
+    spawn: makeFakeSpawn(calls),
+    resolveModelId: async () => {
+      resolverCalled = true;
+      return undefined;
+    },
+  });
+
+  const session = await factory(ctx());
+  session.dispose();
+
+  assert.ok(resolverCalled, "the resolver was consulted");
+  const runCall = calls.find((c) => c.cmd === "docker" && c.args[0] === "run")!;
+  assert.ok(!runCall.args.includes("--model"), "no --model flag when nothing was resolved");
+  assert.deepEqual(runCall.args.slice(-3), ["pi", "--mode", "rpc"], "container command is unchanged");
+});
+
+test("DHK-982: an unresolvable model rejects the factory rather than spawning a container on the wrong model", async () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const factory = createContainerPiSession({
+    image: "dahrk/pi:test",
+    spawn: makeFakeSpawn(calls),
+    resolveModelId: async () => {
+      throw new Error("Pi cannot resolve the model 'claude-opus-99': unknown model.");
+    },
+  });
+
+  await assert.rejects(
+    () => factory(ctx({ config: { runtime: "pi", interaction: "batch", model: "claude-opus-99" } as RunnerContext["config"] })),
+    /cannot resolve the model 'claude-opus-99'/,
+    "the loud model-resolution failure propagates out of the factory",
+  );
+  assert.ok(
+    !calls.some((c) => c.cmd === "docker" && c.args[0] === "run"),
+    "no docker run was spawned - the container never starts on a substituted model",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// DHK-982 seam 2: cost across the whole container path. A container-isolated batch stage reports the
+// real dollar figure Pi priced the session at (queried over RPC), so `JobResult.costUsd` carries a
+// real number and the hub's `cost_budget` policy has something to act on - never a silent $0.
+// ---------------------------------------------------------------------------
+
+test("DHK-982 runBatch over the container factory: costUsd carries the RPC-surfaced session cost", async () => {
+  const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawn([]) });
+  const runner = createPiRunner({ createSession: factory });
+
+  const result = await runner.runBatch(ctx(), () => {});
+  assert.equal(result.status, "ok");
+  assert.equal(result.costUsd, 0.0731, "Pi's aggregate session cost flows out as costUsd over RPC, not a silent 0");
+  await runner.cancel();
+});
+
+// ---------------------------------------------------------------------------
 // Task 3: createIsolatedPiRunner convenience factory
 // ---------------------------------------------------------------------------
 

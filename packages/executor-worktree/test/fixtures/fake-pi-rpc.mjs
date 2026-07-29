@@ -19,6 +19,12 @@ const write = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 //                         embedded into the turn as an observable text delta.
 const GATE = process.env.FAKE_PI_GATE === "1";
 const ELICIT = process.env.FAKE_PI_ELICIT === "1";
+// DHK-982: the host queries the aggregate session cost over RPC once a run finishes (mirroring the
+// embedded `getSessionStats().cost`). This fixture prices every session at a fixed dollar figure, so
+// the container cost path is exercised without live inference. FAKE_PI_NOCOST=1 models a session that
+// cannot price the run (no `cost` in the stats response), proving the host reports nothing, never a 0.
+const NOCOST = process.env.FAKE_PI_NOCOST === "1";
+const SESSION_COST = 0.0731;
 
 // Outstanding subprocess-initiated requests awaiting the host's `*_response`, keyed by the id we
 // assign. The stdin reader resolves them as the matching response frame arrives.
@@ -103,6 +109,15 @@ function onLine(line) {
       return;
     case "abort":
       write({ type: "response", command: "abort", ...(id ? { id } : {}), success: true });
+      return;
+    case "get_session_stats":
+      write({
+        type: "response",
+        command: "get_session_stats",
+        ...(id ? { id } : {}),
+        success: true,
+        data: NOCOST ? {} : { cost: SESSION_COST },
+      });
       return;
     case "prompt":
       void runPrompt(id);
