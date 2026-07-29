@@ -1,7 +1,7 @@
 /**
  * Pi runtime adapter tests. The acceptance check: a Pi-runtime stage runs
  * batch + interactive + summarise to completion and the emitted trace matches the SAME
- * normalised envelope the Claude/Codex adapters produce (the fixture).
+ * normalised envelope the Claude adapter produces (the fixture).
  *
  * The real `@earendil-works/pi-coding-agent` SDK makes live inference calls and is not
  * installed here, so we drive the adapter through its injected session factory with a
@@ -169,7 +169,7 @@ test("makeRunner('pi') returns a Pi runner without importing the live SDK", () =
   assert.equal(runner.runtime, "pi");
 });
 
-test("ACCEPTANCE runBatch: the emitted trace matches the Claude/Codex envelope ( fixture)", async () => {
+test("ACCEPTANCE runBatch: the emitted trace matches the Claude envelope (fixture)", async () => {
   const events: TraceEvent[] = [];
   const raw: unknown[] = [];
   const fake = new FakePiSession([STAGE_SCRIPT]);
