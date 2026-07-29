@@ -3,7 +3,7 @@
  * and reach the hub before they commit to `dahrk start`. It checks four things:
  *
  *   1. Node version   - the runtime this client needs (Node 22+, per the README).
- *   2. Agent runtimes - which of claude / codex / pi are installed (a node with none serves no Jobs).
+ *   2. Agent runtimes - which runtimes this node can both execute and credential (none = serves no Jobs).
  *   3. Hub            - is the hub URL configured and does the WebSocket actually connect?
  *   4. Token          - is an enrolment token present, and does the hub accept it (valid vs
  *                       expired/invalid/pool-unknown)? Both are learned from one handshake probe.
@@ -13,7 +13,8 @@
  * inputs, prints the report, and returns the process exit code (non-zero iff any check FAILED - a WARN
  * alone still passes).
  */
-import type { HubProbeResult, RuntimeStatus } from "@dahrk/edge";
+import type { CredentialMode } from "@dahrk/contracts";
+import type { DetectOptions, HubProbeResult, RuntimeStatus } from "@dahrk/edge";
 import { probeHub as realProbeHub, probeRuntimeStatuses } from "@dahrk/edge";
 import { dim, out as uiOut, symbol, verdict, type Level } from "./ui.js";
 
@@ -47,19 +48,26 @@ export function checkNode(nodeVersion: string): CheckResult {
       };
 }
 
-/** Check which agent runtimes are installed. None is a warning (the node boots but serves nothing). */
+/**
+ * Check which agent runtimes this node can actually serve. None is a warning (the node boots but
+ * serves nothing).
+ *
+ * Every runtime is listed, available or not, each with the reason from the probe. Reporting only the
+ * good ones is what made the old output unactionable: an operator saw "none detected" and went
+ * looking for software to install, when the answer is now usually credentials.
+ */
 export function checkRuntimes(statuses: RuntimeStatus[]): CheckResult {
-  const installed = statuses.filter((s) => s.installed);
-  if (installed.length === 0) {
+  const available = statuses.filter((s) => s.available);
+  const describe = (s: RuntimeStatus) =>
+    `${s.runtime} ${s.available ? "" : "unavailable "}(${s.detail})`.replace("  ", " ");
+  if (available.length === 0) {
     return {
       status: "warn",
       label: "Agent runtimes",
-      detail:
-        "none detected (claude/codex/pi not on PATH); the node will serve no Jobs. Install one or set DAHRK_RUNTIMES.",
+      detail: `none available, so the node will serve no Jobs. ${statuses.map(describe).join("; ")}`,
     };
   }
-  const detail = installed.map((s) => `${s.runtime}${s.version ? ` (${s.version})` : ""}`).join(", ");
-  return { status: "pass", label: "Agent runtimes", detail };
+  return { status: "pass", label: "Agent runtimes", detail: statuses.map(describe).join(", ") };
 }
 
 /** Hub reachability. An enrolment rejection still counts as REACHED (the token, not the hub, is the
@@ -164,7 +172,7 @@ export function formatReport(checks: CheckResult[]): string {
 /** Injectable IO/probes so `runDoctor` can be exercised without a network or a real host. */
 export interface DoctorDeps {
   nodeVersion: string;
-  probeRuntimes: (timeoutMs?: number) => Promise<RuntimeStatus[]>;
+  probeRuntimes: (opts?: DetectOptions) => Promise<RuntimeStatus[]>;
   probeHub: typeof realProbeHub;
   out: (line: string) => void;
 }
@@ -180,6 +188,8 @@ export interface DoctorInputs {
   hubUrl?: string;
   token?: string;
   clientVersion?: string;
+  /** The operator's pinned credential mode, if any. When pinned, the hub's answer does not override it. */
+  credentialMode?: CredentialMode;
 }
 
 /**
@@ -188,17 +198,26 @@ export interface DoctorInputs {
  */
 export async function runDoctor(inputs: DoctorInputs, deps: Partial<DoctorDeps> = {}): Promise<number> {
   const d = { ...defaultDeps(), ...deps };
-  const statuses = await d.probeRuntimes();
-  const installed = statuses.filter((s) => s.installed).map((s) => s.runtime);
+  // Probe on the mode we know locally first, because the runtime set is an input to the hub probe.
+  const assumed: CredentialMode = inputs.credentialMode ?? "ambient";
+  let statuses = await d.probeRuntimes({ credentialMode: assumed });
 
   const probe = inputs.hubUrl
     ? await d.probeHub({
         hubUrl: inputs.hubUrl,
         ...(inputs.token ? { enrolToken: inputs.token } : {}),
-        runtimes: installed,
+        runtimes: statuses.filter((s) => s.available).map((s) => s.runtime),
         ...(inputs.clientVersion ? { clientVersion: inputs.clientVersion } : {}),
       })
     : undefined;
+
+  // The hub is the authority on credential mode, and doctor has just asked it. Re-probe when it
+  // disagrees, so a brokered node is not told its runtimes are unavailable for want of a local login
+  // it was never meant to have. An operator's explicit pin still wins - that is what it is for.
+  if (probe?.ok && !inputs.credentialMode && probe.credentialMode !== assumed) {
+    const corrected = probe.credentialMode === "brokered" ? "brokered" : "ambient";
+    statuses = await d.probeRuntimes({ credentialMode: corrected });
+  }
 
   const checks: CheckResult[] = [
     checkNode(d.nodeVersion),

@@ -19,6 +19,33 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   the parts the prompt had to truncate. An issue with no comments and no relations produces exactly
   the prompt it did before.
 
+### Changed
+
+- **A `codex` stage now fails instead of quietly running on Claude.** The Codex adapter was removed
+  when the runtime was retired, but runner selection still fell through to the Claude runner for
+  anything that was not `pi`. A stage pinned to `runtime: codex` therefore ran on Claude and reported
+  success: the run went green on a runtime nobody chose, and nothing in the trace said so. Unknown and
+  retired runtimes now raise a clear error naming the migration (`runtime: pi` with a GPT model).
+  `codex` is also dropped from `DAHRK_RUNTIMES` and from a `node.json` written by an older client, so
+  a node cannot advertise a runtime it has no adapter for.
+
+- **A node now advertises the runtimes it can actually serve, instead of the CLIs on its PATH.**
+  Detection used to run `claude --version` / `pi --version` and advertise whatever answered. That
+  measured the wrong thing in both directions, because the host CLI is not what runs a stage: the
+  Claude adapter executes the binary vendored inside its SDK, and the Pi adapter runs in-process.
+  A container holding brokered credentials advertised nothing and sat idle, though it could have
+  served every Job; a machine with a logged-in `pi` advertised `pi` and then failed each Pi Job it was
+  sent, because a Pi stage runs in a hermetic config directory that never reads `~/.pi`.
+
+  Advertising is now the conjunction of two separate questions: can this node **execute** the runtime
+  (its SDK ships with the client, so normally yes), and can it **credential** a stage - from the hub
+  on a brokered node, or from a host login or a provider key in the environment on an ambient one.
+  `dahrk doctor` lists every runtime with the reason for its verdict, so "serving no Jobs" points at
+  the missing half instead of sending you looking for software to install. `DAHRK_RUNTIMES` still
+  overrides everything. A node that is brokered but has not been told so yet boots on the narrower
+  ambient answer and widens within a minute of the hub's `welcome`, rather than advertising runtimes
+  it cannot yet credential.
+
 ### Fixed
 
 - **Every `runtime: pi` stage now constructs a session and runs again.** The 0.82.1 Pi runtime bump
@@ -27,6 +54,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   inference and at no cost. The adapter now builds the session on the replacement `ModelRuntime` API,
   with no change to model selection, auth-profile semantics, or the hermetic per-stage config dir
   (still never the machine-global `~/.pi`, still torn down on dispose).
+
+- **An installed `dahrk-node` can now run Pi stages at all.** The published package declared only the
+  Claude SDK, while the bundler inlines the Pi adapter's source but resolves its imports from that
+  same manifest. So `@earendil-works/pi-coding-agent` and `@modelcontextprotocol/sdk` were never
+  installed for anyone who installed the client from npm, and a `runtime: pi` stage died with
+  `ERR_MODULE_NOT_FOUND` at session construction. Because the Pi SDK is loaded lazily, nothing
+  surfaced at install or on `dahrk doctor` - only a Pi stage, when it finally ran, and only on a real
+  install (a source checkout resolved both from the workspace and stayed green). Both are now
+  declared dependencies.
 
 ## [0.1.27] - 2026-07-26
 

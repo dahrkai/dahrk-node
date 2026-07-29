@@ -24,7 +24,13 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
-const PIN_PATH = "packages/executor-worktree/package.json";
+// Two manifests must pin Pi, for two different reasons. `executor-worktree` is where the adapter
+// imports the SDK from, so its pin is what the source compiles against. `apps/edge-node` is the
+// PUBLISHED package, and tsup inlines executor-worktree's source while leaving its dependencies
+// external - so the published manifest is what actually resolves the bare specifier on a user's
+// machine. A pin present in only the first is the DHK-343 shape: builds and tests green, then
+// `ERR_MODULE_NOT_FOUND` on a clean `npx dahrk-node`.
+const PIN_PATHS = ["packages/executor-worktree/package.json", "apps/edge-node/package.json"];
 const require = createRequire(import.meta.url);
 
 /** Compare dotted numeric versions. Returns <0, 0, >0. Prerelease tags are not expected on these pins. */
@@ -38,18 +44,35 @@ function compareVersions(a, b) {
   return 0;
 }
 
-const pkg = JSON.parse(readFileSync(PIN_PATH, "utf8"));
-const nodePin = pkg.dependencies?.["@earendil-works/pi-coding-agent"];
-if (!nodePin) {
-  console.error(`FAIL - ${PIN_PATH} does not depend on @earendil-works/pi-coding-agent`);
+/** Read one manifest's exact Pi pin, failing loudly if it is missing or is a range. */
+function readPin(path) {
+  const pkg = JSON.parse(readFileSync(path, "utf8"));
+  const pin = pkg.dependencies?.["@earendil-works/pi-coding-agent"];
+  if (!pin) {
+    console.error(`FAIL - ${path} does not depend on @earendil-works/pi-coding-agent`);
+    process.exit(1);
+  }
+  // The pin is deliberately exact (no ^ or ~): the adapter imports the SDK by bare specifier and the
+  // edge image installs the same concrete version, so a range would let the two disagree.
+  if (!/^\d+\.\d+\.\d+$/.test(pin)) {
+    console.error(`FAIL - @earendil-works/pi-coding-agent must be pinned exactly in ${path}, found "${pin}"`);
+    process.exit(1);
+  }
+  return pin;
+}
+
+const pins = PIN_PATHS.map((path) => ({ path, pin: readPin(path) }));
+const distinct = [...new Set(pins.map((p) => p.pin))];
+if (distinct.length > 1) {
+  console.error(
+    "FAIL - the two @earendil-works/pi-coding-agent pins disagree:\n" +
+      pins.map((p) => `       ${p.pin}  ${p.path}`).join("\n") +
+      "\n       The published manifest resolves the specifier the inlined adapter imports, so a\n" +
+      "       mismatch means the node runs a different Pi than it was built against.",
+  );
   process.exit(1);
 }
-// The pin is deliberately exact (no ^ or ~): the adapter imports the SDK by bare specifier and the
-// edge image installs the same concrete version, so a range would let the two disagree.
-if (!/^\d+\.\d+\.\d+$/.test(nodePin)) {
-  console.error(`FAIL - @earendil-works/pi-coding-agent must be pinned exactly, found "${nodePin}"`);
-  process.exit(1);
-}
+const nodePin = distinct[0];
 
 let catalogVersion;
 try {
@@ -69,7 +92,8 @@ if (compareVersions(nodePin, catalogVersion) < 0) {
   console.error(
     `FAIL - this node pins pi-coding-agent ${nodePin}, but @dahrk/contracts offers models from pi-ai ` +
       `${catalogVersion}. The portal would offer ids this node cannot resolve.\n` +
-      `       Bump "@earendil-works/pi-coding-agent" in ${PIN_PATH} to >= ${catalogVersion}.`,
+      `       Bump "@earendil-works/pi-coding-agent" to >= ${catalogVersion} in:\n` +
+      PIN_PATHS.map((p) => `         ${p}`).join("\n"),
   );
   process.exit(1);
 }

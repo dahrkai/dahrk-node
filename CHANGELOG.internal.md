@@ -19,7 +19,50 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- **A packaging guard for the inlined-workspace seam.** `apps/edge-node/test/packaged-deps.test.ts`
+  scans every bare import reachable from the three source trees tsup inlines into `dist/main.js` and
+  asserts each one is a Node builtin or a declared dependency of the published manifest. This is the
+  gap that shipped the Pi and MCP SDKs missing: `noExternal` inlines the workspace packages' code but
+  leaves their dependencies to resolve from `apps/edge-node/package.json`, and nothing checked that
+  the two agreed. A source checkout resolves either way, so the monorepo could not see the break.
+  `scripts/check-pi-pin.mjs` now also reads both manifests and fails if their `pi-coding-agent` pins
+  disagree, since the published one is what actually resolves the specifier the adapter imports.
+
 ### Changed
+
+- **DHK-510: node-side codex retirement finished.** `makeRunner` no longer falls through to the Claude
+  runner; `codex` is out of the local `RUNTIMES` accept-lists in `main.ts` and `state.ts` (so it is
+  filtered from `DAHRK_RUNTIMES` and from a legacy `node.json`, which is the whole migration - unknown
+  values were already dropped there). The wire-level `Runtime` union in `@dahrk/contracts` still
+  carries `codex`: removing it is a harness-side change that must be published first, since
+  `@dahrk/contracts` is hand-published and a bump without a release strands this repo. Nothing here
+  depends on that landing.
+
+- **Runtime detection split into capability + credentials.** `detect-runtimes.ts` no longer treats a
+  `--version` response as the routing signal. `RuntimeStatus` is now
+  `{runtime, capable, credential, available, detail, cliVersion?}`; `detectRuntimes`/
+  `probeRuntimeStatuses` take an options object (`credentialMode`, `env`, `homeDir`, injectable
+  `canResolve` / `piAmbientCredential`) instead of positional timeouts. Two traps worth recording:
+
+  1. Capability must be resolved from `executor-worktree`, not `edge` - `import.meta.resolve` is
+     relative to the importing package, and `edge` depends on neither SDK. Getting this wrong is
+     invisible in the published bundle (one file, one resolution root) and breaks only source
+     checkouts. Hence the new `runtime-sdks.ts` owning `RUNTIME_SDK` + `canResolveSdk`.
+  2. The first draft asserted a Pi stage can never authenticate ambiently, reasoning from the hermetic
+     per-stage config dir. Wrong: Pi reads provider keys straight off `process.env`, verified against
+     the real SDK. `piAmbientCredentialAvailable` now asks Pi (`ModelRuntime.getAvailable()` over a
+     throwaway config dir) rather than guessing from a hardcoded env-var list that would drift as Pi
+     adds providers. Covered live in `test/runtime-sdks.test.ts`. Cold ~740ms (the SDK import), ~2ms
+     warm, and skipped entirely under `brokered`.
+
+  The CLI probe survives only as the ambient-login hint for Claude, where it is the best signal there
+  is (macOS keeps the OAuth token in the Keychain, so there is no file to stat). It now takes its env
+  from `opts.env` rather than inheriting the process's, so both halves answer about the same host.
+  `main.ts` threads a mutable `credentialMode`, corrected from `welcome` via an `onEnrolled` hook that
+  is now unconditional (an ephemeral node persists nothing but is the shape most likely to be
+  brokered); `doctor` re-probes when the hub disagrees with its ambient assumption.
 
 - **DHK-926: type the Pi SDK import and assert its exports at boot.** Replaced the untyped
   `const mod: any = await import(spec)` with a cast to a local `PiSdkModule` interface that

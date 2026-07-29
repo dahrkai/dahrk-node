@@ -175,13 +175,13 @@ export function renderStatus(f: StatusFacts): string[] {
   lines.push(kv("Hub", `${f.hubUrl}${conn}`));
 
   // Runtimes: a node with none connects but serves no Jobs, which looks like a hub problem and is not.
-  const installed = f.runtimes.filter((r) => r.installed);
+  const available = f.runtimes.filter((r) => r.available);
   lines.push(
     kv(
       "Runtimes",
-      installed.length > 0
-        ? installed.map((r) => (r.version ? `${r.runtime} ${dim(r.version)}` : r.runtime)).join(", ")
-        : `${dim("none detected - this node will serve no Jobs (install claude / codex / pi)")}`,
+      available.length > 0
+        ? available.map((r) => (r.cliVersion ? `${r.runtime} ${dim(r.cliVersion)}` : r.runtime)).join(", ")
+        : dim("none available - this node will serve no Jobs (`dahrk doctor` says why)"),
     ),
   );
 

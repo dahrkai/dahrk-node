@@ -81,6 +81,8 @@ export type { CheckOutcome } from "./check-runner.js";
 
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
 export { createClaudeRunner } from "./claude-adapter.js";
+/** Which SDK each runtime executes through, resolved from the package that actually imports them. */
+export { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "./runtime-sdks.js";
 /** The Pi runtime adapter: the model-agnostic runtime for the managed node. */
 export { createPiRunner, PI_STAGE_COMPLETE_TOOL, buildBrokeredPiMcpServers, createBrokeredMcpExtension } from "./pi-adapter.js";
 export type { PiSessionLike, PiSessionFactory, PiRunnerDeps, BrokeredPiMcpServer } from "./pi-adapter.js";
@@ -106,7 +108,15 @@ export type { PiAuthHint, ProviderHint, ApiKeyProviderHint, OAuthProviderHint } 
 export function makeRunner(runtime: Runner["runtime"]): Runner {
   if ((process.env.DAHRK_RUNNER ?? process.env.SKAKEL_RUNNER ?? "real") === "mock") return createMockRunner(runtime);
   if (runtime === "pi") return piContainerIsolationRequired() ? createIsolatedPiRunner() : createPiRunner();
-  return createClaudeRunner();
+  if (runtime === "claude-code") return createClaudeRunner();
+  // Anything else - `codex`, still in the wire enum pending its harness-side removal (DHK-510), or a
+  // runtime a newer hub knows and this client does not - fails loudly. This used to fall through to
+  // the Claude runner, so a `codex` stage silently ran on Claude and reported success: the run went
+  // green on a runtime nobody chose, which is strictly worse than not running.
+  throw new Error(
+    `unsupported runtime "${runtime}": this node runs claude-code and pi. ` +
+      "Migrate a codex stage to `runtime: pi` with a GPT model (DHK-503), or upgrade the node.",
+  );
 }
 
 /** Whether Pi stages must run container-isolated; a managed node sets `DAHRK_PI_ISOLATION=container`. */

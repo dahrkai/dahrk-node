@@ -6,7 +6,14 @@ import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildEdgeOptions, resolveNodeId, resolveRuntimes, DEFAULT_HUB_URL } from "../src/main.ts";
+import {
+  buildEdgeOptions,
+  isCredentialModeExplicit,
+  resolveCredentialMode,
+  resolveNodeId,
+  resolveRuntimes,
+  DEFAULT_HUB_URL,
+} from "../src/main.ts";
 
 const base: NodeJS.ProcessEnv = { DAHRK_HUB_URL: "ws://127.0.0.1:7071" };
 
@@ -39,9 +46,9 @@ test("the pi runtime is honoured, not silently dropped", () => {
   assert.deepEqual(opts.runtimes, ["pi"]);
 });
 
-test("mixed runtimes keep claude-code, codex and pi", () => {
+test("mixed runtimes keep claude-code and pi, and drop the retired codex", () => {
   const opts = buildEdgeOptions({ ...base, DAHRK_RUNTIMES: "claude-code, codex, pi" });
-  assert.deepEqual(opts.runtimes, ["claude-code", "codex", "pi"]);
+  assert.deepEqual(opts.runtimes, ["claude-code", "pi"], "codex has no adapter; pinning it would advertise a lie");
 });
 
 test("a missing hub url defaults to the hosted hub", () => {
@@ -53,9 +60,9 @@ test("a missing hub url defaults to the hosted hub", () => {
 test("resolved boot: detected runtimes, node id and client version are threaded through", () => {
   const opts = buildEdgeOptions(
     { ...base, DAHRK_ENROL_TOKEN: "sket_abc" },
-    { nodeId: "uuid-1", runtimes: ["codex"], clientVersion: "1.2.3" },
+    { nodeId: "uuid-1", runtimes: ["pi"], clientVersion: "1.2.3" },
   );
-  assert.deepEqual(opts.runtimes, ["codex"]);
+  assert.deepEqual(opts.runtimes, ["pi"]);
   assert.equal(opts.nodeId, "uuid-1");
   assert.equal(opts.clientVersion, "1.2.3");
   assert.equal(opts.enrolToken, "sket_abc");
@@ -108,8 +115,40 @@ test("resolveNodeId: mints once and persists a stable UUID across calls", () => 
 });
 
 test("resolveRuntimes: env override wins; mock runner skips probing", async () => {
-  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "codex, pi" }), ["codex", "pi"]);
+  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "claude-code, pi" }), ["claude-code", "pi"]);
   assert.deepEqual(await resolveRuntimes({ DAHRK_RUNNER: "mock" }), ["claude-code"]);
+});
+
+test("resolveRuntimes: the override wins in BOTH credential modes, without probing either", async () => {
+  // The override is the operator's escape hatch from everything this module decides - including the
+  // credential half. If detection is wrong about their host, pinning must still work.
+  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }, "ambient"), ["pi"]);
+  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }, "brokered"), ["pi"]);
+});
+
+test("resolveRuntimes: a brokered node serves Pi where an ambient one cannot", async () => {
+  // The clean-container case that used to advertise nothing whatever the mode. Asserted as an
+  // invariant rather than as fixed sets, because this call deliberately reads the REAL host (that is
+  // its job) and the developer running the tests may well have a Claude login: the brokered set is
+  // host-independent, the ambient one is not.
+  const env = { PATH: "/nonexistent" };
+  const brokered = await resolveRuntimes(env, "brokered");
+  const ambient = await resolveRuntimes(env, "ambient");
+  assert.deepEqual(brokered, ["claude-code", "pi"], "brokered needs nothing from the host");
+  assert.equal(ambient.includes("pi"), false, "this env carries no provider key, and a `pi` login is not one");
+  assert.equal(
+    ambient.every((r) => brokered.includes(r)),
+    true,
+    "ambient is a subset of brokered: credentials can only ever remove runtimes, never add them",
+  );
+});
+
+test("resolveCredentialMode: brokered only when explicitly asked; anything else is ambient", () => {
+  assert.equal(resolveCredentialMode({ DAHRK_CREDENTIAL_MODE: "brokered" }), "brokered");
+  assert.equal(resolveCredentialMode({ DAHRK_CREDENTIAL_MODE: "ambient" }), "ambient");
+  assert.equal(resolveCredentialMode({}), "ambient", "unset assumes the mode that advertises less");
+  assert.equal(isCredentialModeExplicit({}), false);
+  assert.equal(isCredentialModeExplicit({ DAHRK_CREDENTIAL_MODE: "ambient" }), true);
 });
 
 test("resolveNodeId: --ephemeral mints a throwaway id and never touches disk", () => {

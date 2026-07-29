@@ -28,7 +28,7 @@ export type {
 export { evaluatePolicies, denyToolRule } from "./policy.js";
 export type { PolicyEvent, PolicyRule } from "./policy.js";
 export { detectRuntimes, probeRuntimeStatuses } from "./detect-runtimes.js";
-export type { RuntimeStatus } from "./detect-runtimes.js";
+export type { CredentialSource, DetectOptions, RuntimeStatus } from "./detect-runtimes.js";
 export { probeHub } from "./hub-probe.js";
 export type { HubProbeOptions, HubProbeResult } from "./hub-probe.js";
 export { createNodeLogger, createNodeLoggerFromEnv, levelFromEnv, fileLevelFromEnv } from "./logger.js";
