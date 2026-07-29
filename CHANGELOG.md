@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-07-29
+
 ### Added
 
 - **A stage now sees the issue's comment thread and the issues around it.** Previously an agent got
@@ -17,7 +19,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   parent, children, blockers and related issues with their state. The full thread and manifest are
   also written to `.dahrk/scratch/comments.md` and `.dahrk/scratch/related.md`, so an agent can read
   the parts the prompt had to truncate. An issue with no comments and no relations produces exactly
-  the prompt it did before.
+  the prompt it did before. (#125)
 
 ### Changed
 
@@ -27,7 +29,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   success: the run went green on a runtime nobody chose, and nothing in the trace said so. Unknown and
   retired runtimes now raise a clear error naming the migration (`runtime: pi` with a GPT model).
   `codex` is also dropped from `DAHRK_RUNTIMES` and from a `node.json` written by an older client, so
-  a node cannot advertise a runtime it has no adapter for.
+  a node cannot advertise a runtime it has no adapter for. (#127)
 
 - **A node now advertises the runtimes it can actually serve, instead of the CLIs on its PATH.**
   Detection used to run `claude --version` / `pi --version` and advertise whatever answered. That
@@ -44,7 +46,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   the missing half instead of sending you looking for software to install. `DAHRK_RUNTIMES` still
   overrides everything. A node that is brokered but has not been told so yet boots on the narrower
   ambient answer and widens within a minute of the hub's `welcome`, rather than advertising runtimes
-  it cannot yet credential.
+  it cannot yet credential. (#127)
 
 ### Fixed
 
@@ -56,14 +58,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   cancelled a healthy stage, landing `status: timeout` with a `stalled (no output for Ns)` summary.
   The watchdog now measures agent silence rather than any silence: while a tool call is open it stays
   disarmed, re-arming when the call returns. A genuinely hung runtime with no call in flight is still
-  cancelled on the window, and check and interactive stages are unaffected.
+  cancelled on the window, and check and interactive stages are unaffected. (#128)
 
 - **Every `runtime: pi` stage now constructs a session and runs again.** The 0.82.1 Pi runtime bump
   dropped the `AuthStorage` export and the `ModelRegistry.create` static, so each Pi stage died at
   session construction with `Cannot read properties of undefined (reading 'create')`, before any
   inference and at no cost. The adapter now builds the session on the replacement `ModelRuntime` API,
   with no change to model selection, auth-profile semantics, or the hermetic per-stage config dir
-  (still never the machine-global `~/.pi`, still torn down on dispose).
+  (still never the machine-global `~/.pi`, still torn down on dispose). (#124)
 
 - **An installed `dahrk-node` can now run Pi stages at all.** The published package declared only the
   Claude SDK, while the bundler inlines the Pi adapter's source but resolves its imports from that
@@ -72,7 +74,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   `ERR_MODULE_NOT_FOUND` at session construction. Because the Pi SDK is loaded lazily, nothing
   surfaced at install or on `dahrk doctor` - only a Pi stage, when it finally ran, and only on a real
   install (a source checkout resolved both from the workspace and stayed green). Both are now
-  declared dependencies.
+  declared dependencies. (#127)
 
 ## [0.1.27] - 2026-07-26
 
@@ -988,7 +990,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.27...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...HEAD
+[0.1.28]: https://github.com/dahrkai/dahrk-node/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/dahrkai/dahrk-node/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/dahrkai/dahrk-node/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/dahrkai/dahrk-node/compare/v0.1.24...v0.1.25

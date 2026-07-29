@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-07-29
+
 ### Added
 
 - **A packaging guard for the inlined-workspace seam.** `apps/edge-node/test/packaged-deps.test.ts`
