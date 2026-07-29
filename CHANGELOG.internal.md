@@ -19,6 +19,14 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **DHK-975: Correct stale Codex and tool-policy comments in the runtime adapters.**
+  Removed Codex references from `overlay.ts` (file-header and inline branch comment) and
+  `pi-adapter.test.ts` (file-header and test title). Replaced the superseded "policy enforcement is
+  M6 future work" note in `claude-adapter.ts` `baseOptions` with a description of the wired
+  `canUseTool` gate. No behaviour change.
+
 ### Added
 
 - **DHK-972: Claude brokered-MCP gateway integration test and auth-profile coverage.**

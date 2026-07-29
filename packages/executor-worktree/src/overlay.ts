@@ -9,7 +9,7 @@
  *  - Claude (`claude-code`): write the files under `.claude/`, with REPO-LOCAL PRECEDENCE - if the
  *    repo already ships a file at the same path, keep the repo's and skip the central one (never
  *    clobber a repo file). Idempotent: re-overlaying identical bytes is a no-op.
- *  - Every other runtime (Codex, Pi, ...): no `.claude/` skills/commands/agents surface, so write
+ *  - Every other runtime (Pi, ...): no `.claude/` skills/commands/agents surface, so write
  *    nothing and record a warning per component (inline into the prompt or use Claude). The
  *    manifest bakes Claude-convention `.claude/` paths (see {@link PackCache}), so there is nothing
  *    to reshape for these runtimes; the only correct action is warn-and-skip. The contract is
@@ -52,7 +52,7 @@ export async function overlayComponents(opts: OverlayOptions): Promise<OverlayRe
 
   for (const ref of components) {
     // Only Claude has a `.claude/` component surface the runner reads. Every other runtime
-    // (Codex, Pi, ...) would get files it never looks at, so warn-and-skip and name the component
+    // (Pi, ...) would get files it never looks at, so warn-and-skip and name the component
     // rather than write it silently.
     if (runtime !== "claude-code") {
       result.warnings.push(
