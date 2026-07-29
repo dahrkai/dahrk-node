@@ -39,6 +39,7 @@ import {
 } from "./runtime-session.js";
 import { elicitOutcomeReply } from "./elicit-router.js";
 import { runInteractiveLoop, runBatchLoop, maxTurnCeiling } from "./turn-loop.js";
+import { resolveStagePrompt, hasSystemPrompt } from "./prompt-assembly.js";
 import { askQuestionsSequentially } from "./ask-user-question-tool.js";
 
 /**
@@ -222,12 +223,34 @@ export function createBrokeredMcpExtension(servers: Record<string, BrokeredPiMcp
   };
 }
 
-/** Builds a fresh Pi session bound to the stage's worktree and brokered inference creds. */
-export type PiSessionFactory = (ctx: RunnerContext) => Promise<PiSessionLike>;
+/**
+ * Builds a fresh Pi session bound to the stage's worktree and brokered inference creds.
+ * `appendSystemPrompt` (DHK-977) is the resolved stage instruction to fold into the session's system
+ * prompt, the Pi analogue of Claude's `{ preset, append }`. The interactive path passes it (so the
+ * instruction frames the conversation rather than competing as a synthetic user turn); the batch path
+ * omits it (the shared batch loop already delivers the prompt as its single user turn, matching Claude).
+ */
+export type PiSessionFactory = (ctx: RunnerContext, appendSystemPrompt?: string) => Promise<PiSessionLike>;
 
 export interface PiRunnerDeps {
   /** Override the session factory (tests inject a scripted fake). Defaults to the live SDK. */
   createSession?: PiSessionFactory;
+}
+
+/**
+ * Build the resource loader's `appendSystemPromptOverride` (DHK-977): fold the stage instruction in
+ * AFTER Pi's own default append sections, the append analogue of the Claude adapter's `{ preset, append }`.
+ * Spreading `base` keeps every section Pi loaded - its tools block, guidelines, skills block and the
+ * context files it reads natively (`CLAUDE.md`) - so the stage prompt is added, never substituted for
+ * them (unlike `systemPromptOverride`, which replaces the lot). Returns undefined when the stage carries
+ * no instruction worth a system prompt, so Pi's default is left untouched. Pure, so the base-preserving
+ * behaviour is unit-tested without the live SDK.
+ */
+export function buildAppendSystemPromptOverride(
+  appendSystemPrompt: string | undefined,
+): ((base: string[]) => string[]) | undefined {
+  if (!appendSystemPrompt) return undefined;
+  return (base) => [...base, appendSystemPrompt];
 }
 
 /** The initial `hooks.ask` before an interactive loop installs the router-backed one. Never invoked on
@@ -352,9 +375,10 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
   let cancelled = false;
   let session: PiSessionLike | undefined;
 
-  /** Open the session once and keep it warm so `summarise()` reuses the batch session. */
-  const openSession = async (ctx: RunnerContext): Promise<PiSessionLike> => {
-    if (!session) session = await createSession(ctx);
+  /** Open the session once and keep it warm so `summarise()` reuses the batch session. The interactive
+   *  path passes the stage instruction as `appendSystemPrompt` (DHK-977); batch omits it. */
+  const openSession = async (ctx: RunnerContext, appendSystemPrompt?: string): Promise<PiSessionLike> => {
+    if (!session) session = await createSession(ctx, appendSystemPrompt);
     return session;
   };
 
@@ -395,7 +419,12 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
 
     async runInteractive(ctx, turns, onTrace) {
       const emit = makeEmit("pi", onTrace);
-      const s = await openSession(ctx);
+      // DHK-977: deliver the stage instruction as an appended system prompt (matching Claude's interactive
+      // path), so the opening turn is a short kickoff rather than the whole resolved prompt seeded as a
+      // synthetic user turn. Gated on `hasSystemPrompt(ctx)` exactly as Claude is: a bare-skill stage
+      // carries no system prompt, so it still seeds the resolved instruction as the opening turn.
+      const inSystemPrompt = hasSystemPrompt(ctx);
+      const s = await openSession(ctx, inSystemPrompt ? resolveStagePrompt(ctx) : undefined);
       registerToolCallGate(s, ctx);
       // DHK-505: route the live session's injected `ask_user_question` tool through the shared elicit
       // router. The loop assembles the router-backed hooks and calls this factory with them, so the
@@ -409,7 +438,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner {
         signal,
         cancelled: () => cancelled,
         cancel: () => this.cancel(),
-        instructionInSystemPrompt: false,
+        instructionInSystemPrompt: inSystemPrompt,
       });
       // An interactive stage produces its own summary inline (no follow-up summarise turn), so this is
       // its terminus: dispose the session and tear down its hermetic config dir.
@@ -504,7 +533,7 @@ function assertSdkSymbol(name: string, value: unknown, sdkVersion: string): void
  *     config dir (never the machine-global `~/.pi`). `ModelRuntime` is pointed at that dir, and
  *     `dispose()` is decorated to tear the whole dir down on teardown.
  */
-async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike> {
+async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: string): Promise<PiSessionLike> {
   const spec = "@earendil-works/pi-coding-agent";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mod = (await import(spec)) as unknown as PiSdkModule;
@@ -653,7 +682,8 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
     },
   };
   // Supplying our own ResourceLoader replaces the one `createAgentSession` would build, so replicate the
-  // SDK's own default construction (dist/core/sdk.js) field-for-field and only ADD `extensionFactories`,
+  // SDK's own default construction (dist/core/sdk.js) field-for-field and only ADD `extensionFactories`
+  // (and, on the interactive path, `appendSystemPromptOverride` for the stage instruction - DHK-977),
   // then reload ourselves (the SDK reloads only a loader it built): skill/prompt-template/context-file
   // loading is unchanged, and the inline gate extension is registered. `getAgentDir()` is the SDK's own
   // default agent dir (`~/.pi/agent`); `SettingsManager.create(cwd, agentDir)` matches the SDK default.
@@ -668,11 +698,17 @@ async function defaultCreatePiSession(ctx: RunnerContext): Promise<PiSessionLike
   const extensionFactories = brokeredMcp
     ? [toolGateExtension, createBrokeredMcpExtension(brokeredMcp)]
     : [toolGateExtension];
+  // DHK-977: append the resolved stage instruction AFTER Pi's own default sections. The override spreads
+  // the base array (`appendSystemPromptOverride`, not `systemPromptOverride`), so Pi's tools/guidelines/
+  // skills/context-file sections survive - only interactive stages pass it, and only when the stage has an
+  // instruction (`buildAppendSystemPromptOverride` returns undefined otherwise, leaving the default intact).
+  const appendSystemPromptOverride = buildAppendSystemPromptOverride(appendSystemPrompt);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
     extensionFactories,
+    ...(appendSystemPromptOverride ? { appendSystemPromptOverride } : {}),
   });
   await resourceLoader.reload();
 
