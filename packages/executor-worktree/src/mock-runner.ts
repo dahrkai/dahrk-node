@@ -22,7 +22,7 @@ export function createMockRunner(runtime: Runner["runtime"]): Runner {
     runtime,
 
     async runBatch(ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
-      const tool = ctx.config.tools?.[0] ?? "shell";
+      const tool = "shell";
       const toolUseId = "mock-tool-1";
       const events: TraceEvent[] = [
         { seq: 0, runtime, type: "thought", ts: nowIso(), text: "mock: planning the stage" },
