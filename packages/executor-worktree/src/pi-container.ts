@@ -19,7 +19,9 @@
  *
  * Still unsupported here (DHK-982): brokered MCP. The embedded bridge assumes an in-process session to
  * register tools onto; threading the gateway over RPC is a larger piece of work, so a stage's brokered
- * MCP servers do not reach the containerised agent - a deliberate, documented gap.
+ * MCP servers do not reach the containerised agent. No longer a silent gap (DHK-968): `PiRpcSession`
+ * declares `capabilities.brokeredMcp = false`, so a stage that needs it gets a loud `capability-degraded`
+ * trace event from the runner rather than losing the servers unremarked.
  *
  * Image: `DAHRK_PI_IMAGE` env var (default: `dahrk/pi:latest`). Override per-environment or
  * in tests via the `image` option.
@@ -136,7 +138,9 @@ export function createContainerPiSession(opts: ContainerPiSessionOpts = {}): PiS
  * the embedded non-isolated path, use `createPiRunner()` directly.
  */
 export function createIsolatedPiRunner(opts: ContainerPiSessionOpts = {}): Runner & PreExecutionCapability {
-  // The container RPC session omits `setToolCallGate`, so this runner reports `enforcesPreExecution`
-  // false (DHK-983): a confinement breach on this path is a genuine escape the edge must hard-fail.
+  // The container RPC session now implements and DECLARES the pre-execution gate (DHK-981/DHK-968:
+  // `capabilities.preExecutionGate = true`), so this runner reports `enforcesPreExecution` true once a
+  // stage opens its session - the edge treats an fs_confine deny on this path as a clean blocked deny,
+  // exactly as embedded Pi. A back-end that could not gate would refuse a policy-gated stage outright.
   return createPiRunner({ createSession: createContainerPiSession(opts) });
 }

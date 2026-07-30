@@ -88,8 +88,8 @@ export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js
 /** Which SDK each runtime executes through, resolved from the package that actually imports them. */
 export { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "./runtime-sdks.js";
 /** The Pi runtime adapter: the model-agnostic runtime for the managed node. */
-export { createPiRunner, PI_STAGE_COMPLETE_TOOL, buildBrokeredPiMcpServers, createBrokeredMcpExtension } from "./pi-adapter.js";
-export type { PiSessionLike, PiSessionFactory, PiRunnerDeps, BrokeredPiMcpServer } from "./pi-adapter.js";
+export { createPiRunner, PI_STAGE_COMPLETE_TOOL, buildBrokeredPiMcpServers, createBrokeredMcpExtension, assertSessionCapabilities, EMBEDDED_PI_CAPABILITIES } from "./pi-adapter.js";
+export type { PiSessionLike, PiSessionCapabilities, PiSessionFactory, PiRunnerDeps, BrokeredPiMcpServer } from "./pi-adapter.js";
 /** Container Pi session factory + isolated runner: Docker isolation seam. */
 export { createContainerPiSession, createIsolatedPiRunner } from "./pi-container.js";
 export type { ContainerPiSessionOpts } from "./pi-container.js";

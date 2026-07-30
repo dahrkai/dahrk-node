@@ -35,6 +35,7 @@ import {
   HANDED_BACK_ARTIFACT_PATH,
   makeEmit,
   SUMMARISE_PROMPT,
+  type EmittableEvent,
   type PolicyAwareRunnerContext,
   type PreExecutionCapability,
   type RuntimeSession,
@@ -72,6 +73,48 @@ export type AskUserQuestions = {
 }[];
 
 /**
+ * A Pi back-end's explicit, inspectable capability surface (DHK-968). The adapter drives two
+ * back-ends behind `PiSessionLike` - the embedded in-process session and the container RPC session -
+ * and they support materially different subsets of the session interface. Before this surface existed
+ * the difference was invisible: an absent capability was reached through an optional method called with
+ * `?.`, so it silently no-opped and a capability REGRESSION was indistinguishable from a capability that
+ * was never there. Each back-end now DECLARES what it supports, so the runner can refuse or warn on a
+ * needed-but-absent capability (`assertSessionCapabilities`) instead of degrading in silence.
+ *
+ * A field is `true` only when the back-end genuinely honours the capability, never inferred from the
+ * presence of a method (which a no-op stub would satisfy wrongly). The embedded session supports all of
+ * them; the container RPC session supports the gate, elicitation and cost over RPC (DHK-981/982) but not
+ * brokered MCP (host-in-process only) nor the summarise turn's tool denial (it has no `agent` handle).
+ */
+export interface PiSessionCapabilities {
+  /** Pre-execution tool gate (DHK-504): the session vetoes a policy-violating tool call BEFORE it runs,
+   *  the analogue of Claude's `canUseTool`. Security-critical: a policy-gated stage refuses without it. */
+  readonly preExecutionGate: boolean;
+  /** Structured elicitation (DHK-505): a mid-stage `ask_user_question` reaches the human via a Linear
+   *  elicitation. Security-critical: an interactive stage that may ask a question refuses without it. */
+  readonly elicitation: boolean;
+  /** Cost reporting (DHK-434): the session prices the run so the hub's `cost_budget` policy reads a real
+   *  figure rather than a fabricated `$0`. A gap degrades (cost is reported `undefined`), never refuses. */
+  readonly cost: boolean;
+  /** Brokered MCP (DHK-507): the stage's declared brokered MCP servers reach the agent. A gap degrades
+   *  with a loud trace event (the stage runs without them), never refuses. */
+  readonly brokeredMcp: boolean;
+  /** The summarise turn can strip tools so the model recaps rather than starting fresh work (needs a live
+   *  `agent` handle). A gap is telemetry-only, so it is declared here but neither refuses nor warns. */
+  readonly summariseToolDenial: boolean;
+}
+
+/** The embedded in-process Pi session supports every capability (DHK-968). Exported so a scripted fake
+ *  that stands in for the embedded session declares the same full surface. */
+export const EMBEDDED_PI_CAPABILITIES: PiSessionCapabilities = {
+  preExecutionGate: true,
+  elicitation: true,
+  cost: true,
+  brokeredMcp: true,
+  summariseToolDenial: true,
+};
+
+/**
  * The subset of Pi's `AgentSession` the adapter drives. Kept local (not imported from the SDK)
  * so the adapter's orchestration is testable against a scripted fake and the build stays green
  * without a live Pi install. Authored to the vendored sdk.md.
@@ -79,6 +122,13 @@ export type AskUserQuestions = {
 export interface PiSessionLike {
   /** Stable id for the session, used as the cross-attempt resume token (`sessionId`). */
   readonly sessionId?: string;
+  /**
+   * What this back-end supports (DHK-968). The AUTHORITATIVE capability signal: the runner reads this to
+   * decide whether to refuse or warn rather than probing for a method that may be a silent no-op. The
+   * four members below are still declared optional so a session need only wire what it implements, but
+   * this surface - not `typeof s.setToolCallGate` - is what the runner keys its decisions off.
+   */
+  readonly capabilities: PiSessionCapabilities;
   /** Subscribe to streamed events; returns an unsubscribe function. */
   subscribe(listener: (event: PiEvent) => void): () => void;
   /** Send a prompt and resolve when the resulting agent run finishes. */
@@ -145,15 +195,75 @@ export function piToolCallDecision(
  * `onTrace` exactly as for Claude - no new recording mechanism. `ctx` is cast to the policy-aware shape
  * the stage runner supplies (as the elicit path already casts for `emitElicit`).
  *
- * Returns whether the gate was actually wired (DHK-983): the embedded session exposes `setToolCallGate`
- * and so pre-blocks, while the container RPC session omits it (the call is a silent `?.` no-op), so it
- * does not. The runner surfaces this as `enforcesPreExecution` for the edge's escape decision.
+ * Returns whether the gate is actually enforced (DHK-983/DHK-968): read from the session's DECLARED
+ * `capabilities.preExecutionGate`, not probed from `typeof s.setToolCallGate` (which a no-op stub would
+ * satisfy wrongly). The runner surfaces this as `enforcesPreExecution` for the edge's escape decision.
+ * `assertSessionCapabilities` has already refused a policy-gated stage whose session cannot enforce the
+ * gate, so by here the flag is true whenever a policy is in force.
  */
 function registerToolCallGate(s: PiSessionLike, ctx: RunnerContext): boolean {
   const policyCtx = ctx as PolicyAwareRunnerContext;
-  const enforces = typeof s.setToolCallGate === "function";
+  const enforces = s.capabilities.preExecutionGate;
   s.setToolCallGate?.((toolName, input) => piToolCallDecision(policyCtx, toolName, input));
   return enforces;
+}
+
+/**
+ * The refuse-or-warn line for a needed-but-absent capability (DHK-968), applied at the point the session
+ * is opened. It compares the STAGE'S needs against the session's declared surface so a capability the
+ * back-end lacks fails LOUDLY instead of no-opping in silence - the whole point of the ticket. Where the
+ * line sits is recorded here in code, as the ticket asks:
+ *
+ *   - SECURITY-CRITICAL capabilities (the pre-execution gate, structured elicitation) REFUSE outright by
+ *     throwing, following `makeRunner`'s unsupported-runtime precedent (index.ts): a policy-gated stage
+ *     must not run ungated, and an interactive stage that could raise a question must not swallow it. The
+ *     throw fails the stage before its first turn rather than after a green run that silently skipped the
+ *     control.
+ *   - COST / MODEL / BROKERED-MCP gaps WARN and continue, emitting a `capability-degraded` trace event so
+ *     an operator reading the run SEES the loss rather than inferring it from a missing figure. (Model
+ *     selection already fails loudly in its own resolution - DHK-982 - and an unpriced run reports cost
+ *     `undefined`, itself the honest signal; brokered MCP is the one still-silent drop this makes loud.)
+ *
+ * `emit` is the adapter's trace sink so the degradation lands in the trace, not only in a log. Pure over
+ * its inputs (given `emit`), so the refuse/warn decision is unit-tested without a live session.
+ */
+export function assertSessionCapabilities(
+  caps: PiSessionCapabilities,
+  ctx: RunnerContext,
+  interactive: boolean,
+  emit: (event: EmittableEvent, rawRef?: string) => void,
+): void {
+  const policyCtx = ctx as PolicyAwareRunnerContext;
+  // Security-critical: a stage under an edge policy needs the pre-execution gate to enforce it. Refuse
+  // rather than run with only post-hoc trace annotation (the GA-blocking posture the strategy memo named).
+  if (policyCtx.authorizeToolUse && !caps.preExecutionGate) {
+    throw new Error(
+      "this Pi session cannot enforce the pre-execution tool gate a policy-gated stage requires " +
+        "(DHK-504); refusing to run it ungated rather than degrading in silence. The session declares " +
+        "capabilities.preExecutionGate=false.",
+    );
+  }
+  // Security-critical: an interactive stage wired to surface questions needs elicitation. Refuse rather
+  // than let a mid-stage question silently no-op (it would never reach the human).
+  if (interactive && policyCtx.emitElicit && !caps.elicitation) {
+    throw new Error(
+      "this Pi session cannot surface structured elicitation an interactive stage may require " +
+        "(DHK-505); refusing rather than swallowing a mid-stage question. The session declares " +
+        "capabilities.elicitation=false.",
+    );
+  }
+  // Warn-and-continue: the stage declared brokered MCP servers and the node started its gateway, but this
+  // back-end cannot register them (container RPC). Emit the degradation into the trace so the loss is
+  // visible; the stage still runs, just without those servers.
+  if (ctx.config.mcpServers?.length && ctx.mcpProxyBaseUrl && !caps.brokeredMcp) {
+    emit({
+      type: "error",
+      kind: "capability-degraded",
+      message:
+        `this Pi session does not support brokered MCP (DHK-507): the stage's ${ctx.config.mcpServers.length} ` +
+        "declared MCP server(s) are unavailable to the agent. The stage runs without them.",
+    });
+  }
 }
 
 /** One brokered MCP server as the Pi extension consumes it: transport + the node-local proxy url the
@@ -448,6 +558,23 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner & PreExecutionCa
     }
   };
 
+  /** Refuse or warn on a needed-but-absent capability (DHK-968), then dispose the just-opened session if
+   *  the refusal throws so a container/session opened only to be rejected is not leaked. The throw then
+   *  propagates out of `runBatch`/`runInteractive` as the stage's loud failure. */
+  const guardCapabilities = (
+    s: PiSessionLike,
+    ctx: RunnerContext,
+    interactive: boolean,
+    emit: (event: EmittableEvent, rawRef?: string) => void,
+  ): void => {
+    try {
+      assertSessionCapabilities(s.capabilities, ctx, interactive, emit);
+    } catch (e) {
+      disposeSession();
+      throw e;
+    }
+  };
+
   return {
     runtime: "pi",
 
@@ -461,6 +588,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner & PreExecutionCa
     async runBatch(ctx, onTrace) {
       const hooks: RuntimeSessionHooks = { emit: makeEmit("pi", onTrace), ask: defaultAsk };
       const s = await openSession(ctx);
+      guardCapabilities(s, ctx, false, hooks.emit);
       enforcesPreExecution = registerToolCallGate(s, ctx);
       const rt = makePiRuntimeSession(s, ctx, hooks, false);
       const result = await runBatchLoop(rt, ctx, hooks, { cancelled: () => cancelled });
@@ -479,6 +607,7 @@ export function createPiRunner(deps: PiRunnerDeps = {}): Runner & PreExecutionCa
       // carries no system prompt, so it still seeds the resolved instruction as the opening turn.
       const inSystemPrompt = hasSystemPrompt(ctx);
       const s = await openSession(ctx, inSystemPrompt ? resolveStagePrompt(ctx) : undefined);
+      guardCapabilities(s, ctx, true, emit);
       enforcesPreExecution = registerToolCallGate(s, ctx);
       // DHK-505: route the live session's injected `ask_user_question` tool through the shared elicit
       // router. The loop assembles the router-backed hooks and calls this factory with them, so the
@@ -792,6 +921,10 @@ async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: s
     ...(model ? { model } : {}),
   });
   const piSession = session as PiSessionLike;
+  // Declare the embedded session's capability surface (DHK-968): the in-process path supports every
+  // capability. Attached here alongside the dispose/gate decorations below; a localized cast because
+  // `capabilities` is a readonly member the SDK's own session object does not itself carry.
+  (piSession as { capabilities: PiSessionCapabilities }).capabilities = EMBEDDED_PI_CAPABILITIES;
   // Decorate dispose() to tear down the hermetic config dir (the OAuth auth.json / custom models.json)
   // when the runner releases the session. The runner disposes on EVERY terminus - failed batch, the
   // summarise turn that ends an ok batch, an interactive settle, and cancel - so the per-stage

@@ -41,6 +41,21 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Changed
 
+- **A container-isolated Pi stage now fails loudly on a capability it cannot honour, instead of
+  degrading in silence.** When Pi runs inside a container over the RPC transport
+  (`DAHRK_PI_ISOLATION=container`), the session supports a different subset of the runtime interface
+  than the embedded in-process session, and that difference used to be invisible: a missing capability
+  was reached through an optional method that quietly did nothing, so a capability regression looked
+  identical to a capability that was never there. Each Pi back-end now declares an explicit capability
+  surface (pre-execution tool gate, structured elicitation, cost reporting, brokered MCP, summarise-turn
+  tool denial), and the runner checks a stage's needs against it before the first turn. A stage that
+  requires a security-critical capability the session lacks (the pre-execution gate for a policy-gated
+  stage, or elicitation for an interactive stage that could ask a question) now refuses outright rather
+  than running without it; a gap in a non-critical capability (the container path still cannot register
+  brokered MCP servers) emits a `capability-degraded` event into the run's trace and continues, so an
+  operator reading the run sees the loss rather than inferring it from a missing figure. No capability
+  is added here; this only stops the existing gaps failing silently.
+
 - **A Pi interactive stage now receives its instruction as a system prompt, matching the Claude
   runtime.** Previously the Pi runtime delivered the whole resolved stage prompt (ticket context,
   guidance, gate feedback, attached documents, comments and check failures) as a synthetic opening
