@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-07-30
+
 ### Changed
 
 - **DHK-971: remove the mock runner's read of the dead `StageConfig.tools` field.**
@@ -54,6 +56,25 @@ this file is left verbatim.
   `canUseTool` gate. No behaviour change.
 
 ### Added
+
+- **Shared runtime conformance suite driving both adapters (#144).** New
+  `packages/executor-worktree/test/runtime-conformance.test.ts` drives `createClaudeRunner` and
+  `createPiRunner` through one identical assertion set via their existing injected session-factory
+  seams, so a behaviour either adapter is meant to share is now asserted in one place rather than
+  duplicated per-adapter. Covers trace-envelope parity, the buffered-response rule, the pre-execution
+  gate on both batch and interactive (closing the Claude-side gap), elicitation, cost, cancel /
+  timeout / burst, and error classification: 43 assertions across both rows, no skips. No production
+  change. A deliberate-regression check was run to confirm a break reddens only the offending
+  adapter's row. Known nits carried forward: the session fakes are duplicated across three test files,
+  and the elicitation drive touches an SDK-private field.
+
+- **DHK-982: container-isolated Pi reports cost and honours the stage model (#139).** `PiRpcSession`
+  gains `getSessionStats()` with a `#refreshCost` that queries `get_session_stats` over RPC after
+  `agent_end`, cached and never fabricating a `0`. A new `resolveStageModelId` in `pi-adapter.ts`
+  reuses the tested `selectStageModel` / `pickAuthedModel` path and `pi-container.ts` passes the
+  resolved id as `--model <id>`, failing loudly when it cannot resolve. Brokered MCP stayed out of
+  scope. Watch item from review: `prompt()` awaits `get_session_stats` through the timeout-less
+  `#send`, so a container Pi that does not implement that command would hang the stage.
 
 - **DHK-973: Stage-runner integration suite now runs for both runtimes (claude-code and pi).**
   `packages/edge/test/stage-runner.test.ts` is parameterised over both runtimes via `forBothRuntimes`:
