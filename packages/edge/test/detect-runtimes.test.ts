@@ -12,6 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectRuntimes, probeRuntimeStatuses, type DetectOptions } from "../src/detect-runtimes.js";
+import { createCredentialLatch } from "../src/credential-latch.js";
 
 const CLAUDE_SDK = "@anthropic-ai/claude-agent-sdk";
 const PI_SDK = "@earendil-works/pi-coding-agent";
@@ -276,5 +277,66 @@ test("probeRuntimeStatuses reports the host CLI version as a diagnostic, in stab
 test("the default credential mode is ambient - the mode that advertises less", async () => {
   await withFakeBins([], async () => {
     assert.deepEqual(await detectRuntimes(baseOpts()), []);
+  });
+});
+
+// --- refused-credential latch (DHK-998) --------------------------------------------------------
+
+test("ambient: a refused credential outranks every local hint and de-advertises the runtime", async () => {
+  // The DHK-998 shape: a credentials file AND a responding CLI, both satisfied by a login the
+  // provider revoked hours ago. Before the latch this node advertised claude-code and then failed
+  // every Job it was sent on the first turn, at $0.00, each one billed to the agent.
+  const home = mkdtempSync(join(tmpdir(), "dahrk-home-"));
+  mkdirSync(join(home, ".claude"));
+  writeFileSync(join(home, ".claude", ".credentials.json"), "{}");
+  const latch = createCredentialLatch();
+  try {
+    await withFakeBins(["claude"], async () => {
+      const opts = baseOpts({ credentialMode: "ambient", homeDir: home, latch });
+
+      const before = await probeRuntimeStatuses(opts);
+      assert.equal(before.find((s) => s.runtime === "claude-code")?.available, true, "healthy to begin with");
+
+      latch.markRefused("claude-code");
+      const after = await probeRuntimeStatuses(opts);
+      const claude = after.find((s) => s.runtime === "claude-code");
+      assert.equal(claude?.credential, "none");
+      assert.equal(claude?.available, false, "a runtime whose credential was refused is not advertised");
+      assert.match(claude?.detail ?? "", /refused/i, "the reason says the provider refused the login");
+      assert.match(claude?.detail ?? "", /auth login/, "and names the remedy");
+      assert.deepEqual(await detectRuntimes(opts), [], "the routing view drops it too");
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a refused credential is per-runtime, and clears when a stage authenticates again", async () => {
+  const latch = createCredentialLatch();
+  latch.markRefused("claude-code");
+  await withFakeBins([], async () => {
+    // Pi is credentialled from the environment and knows nothing about a dead Anthropic login.
+    const opts = baseOpts({ credentialMode: "ambient", piAmbientCredential: async () => true, latch });
+    assert.deepEqual(await detectRuntimes(opts), ["pi"], "only the refused runtime is withheld");
+
+    // A later stage authenticates: the node recovers on the next re-probe, with no restart.
+    latch.markAccepted("claude-code");
+    const env = { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: "sk-test" };
+    assert.deepEqual(
+      await detectRuntimes(baseOpts({ credentialMode: "ambient", piAmbientCredential: async () => true, latch, env })),
+      ["claude-code", "pi"],
+      "clearing the latch restores the runtime",
+    );
+  });
+});
+
+test("brokered: the latch does not withhold a runtime the hub credentials", async () => {
+  // The latch records a refusal of THIS HOST's ambient login. A brokered node is credentialled per
+  // Job by the hub, so a stale ambient refusal must not take it off the air.
+  const latch = createCredentialLatch();
+  latch.markRefused("claude-code");
+  await withFakeBins([], async () => {
+    const statuses = await probeRuntimeStatuses(baseOpts({ credentialMode: "brokered", latch }));
+    assert.equal(statuses.find((s) => s.runtime === "claude-code")?.available, true);
   });
 });

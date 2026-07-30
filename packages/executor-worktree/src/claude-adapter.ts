@@ -164,8 +164,50 @@ export function sandboxOptions(ctx: RunnerContext): Partial<Options> {
  * process.env (the operator's ambient login), unchanged.
  */
 export function runtimeEnvOptions(ctx: RunnerContext): Partial<Options> {
-  if (!ctx.runtimeEnv) return {};
-  return { env: { ...process.env, ...ctx.runtimeEnv } };
+  const auth = runtimeAuthEnv(ctx);
+  if (!ctx.runtimeEnv && Object.keys(auth).length === 0) return {};
+  return { env: { ...process.env, ...ctx.runtimeEnv, ...auth } };
+}
+
+/** The env var the Claude runtime reads a subscription (Claude Pro/Max) OAuth token from. Distinct
+ *  from `ANTHROPIC_API_KEY`, which is the api-key path and arrives through `runtimeEnv`. */
+const CLAUDE_OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/**
+ * Brokered inference from an OAUTH-SUBSCRIPTION auth profile (DHK-998).
+ *
+ * The api-key path above needs nothing from us: the broker mints the secret into `runtimeEnv` under
+ * the provider's env var and the passthrough carries it. A subscription has no env var to mint into -
+ * its token rides on `runtimeAuth` as a live triplet - so without a reader here, binding a pool to
+ * "Anthropic (Claude Pro/Max)" credentialled precisely nothing and the stage fell through to whatever
+ * ambient login the host happened to have. Pi has had this reader since DHK-511 (`pi-auth.ts`); this
+ * is Claude's, deliberately much smaller: Claude speaks to exactly one provider, so there is no
+ * `models.json`, no custom-provider entry and no persisted `auth.json` to clean up - just the token on
+ * the child process's env, where the agent's own tool calls never see it.
+ *
+ * The hub refreshes before minting, so `access` is live on arrival; the node must never refresh it
+ * itself (the provider rotates the refresh token on every use, and a per-stage rotation the hub does
+ * not persist would strand the credential).
+ *
+ * Throws when the profile carries an OAuth subscription for some OTHER provider and nothing Anthropic:
+ * `claude-code` cannot use a Copilot or Codex login, and running on silently unauthenticated would
+ * fail on the first turn with a message blaming the agent instead of the binding.
+ */
+export function runtimeAuthEnv(ctx: RunnerContext): Record<string, string> {
+  const providers = ctx.runtimeAuth?.providers;
+  if (!providers || providers.length === 0) return {};
+  const oauth = providers.filter((p) => p.kind === "oauth");
+  if (oauth.length === 0) return {};
+  const anthropic = oauth.find((p) => p.provider === "anthropic");
+  if (anthropic) return { [CLAUDE_OAUTH_ENV]: anthropic.access };
+  // An api-key hint alongside a foreign subscription still credentials the stage through
+  // `runtimeEnv`, so only complain when the subscription is the ONLY thing on offer.
+  if (providers.some((p) => p.kind === "api_key")) return {};
+  const names = oauth.map((p) => p.provider).join(", ");
+  throw new Error(
+    `no Anthropic credential in the brokered auth profile: claude-code cannot authenticate with a ${names} subscription. ` +
+      `Bind this pool to an Anthropic profile (api key or Claude Pro/Max), or run the stage on a runtime that supports ${names}.`,
+  );
 }
 
 /**

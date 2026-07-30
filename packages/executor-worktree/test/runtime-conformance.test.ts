@@ -1048,3 +1048,16 @@ test(
     assert.match(result.summary ?? "", /stream idle timeout/i, "the summary names the transient rather than a bare fail");
   }),
 );
+
+test(
+  "conformance: a refused credential carries failureClass config on both runtimes",
+  forEachCase("config-classification", async (_t, c) => {
+    // Both runtimes lost a whole day to this on 2026-07-30 - claude-code to a revoked ambient OAuth
+    // login, Pi to a console spend cap - and both were billed to the agent. Neither is the agent's
+    // doing and no code change fixes either, so both must arrive as `config`.
+    const { result } = await c.batchThrows("Failed to authenticate. API Error: 401 OAuth access token has been revoked.");
+    assert.equal(result.status, "fail");
+    assert.equal(result.failureClass, "config", "a refused credential is the operator's to fix, not the agent's");
+    assert.match(result.summary ?? "", /refused the credential/i, "the summary says the credential was refused");
+  }),
+);

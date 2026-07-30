@@ -357,3 +357,43 @@ test("classifyRuntimeError recognises the upstream-transient vocabulary and noth
     assert.equal(classifyRuntimeError(agentSide), undefined, `\`${agentSide}\` should stay unclassified`);
   }
 });
+
+test("batch: a refused credential settles fail with failureClass config and names the credential", async () => {
+  // Verbatim from run-057ae9a4 (DHK-998): the Agent SDK throws this when the ambient OAuth login has
+  // been revoked. The stage never ran a turn and cost $0, yet it was billed to the agent.
+  const events: EmittableEvent[] = [];
+  const session = new ThrowingRuntimeSession(
+    "Claude Code returned an error result: Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+  );
+  const result = await runBatchLoop(session, ctx(), makeHooks(events), { cancelled: () => false });
+
+  assert.equal(result.status, "fail");
+  assert.equal(result.failureClass, "config", "a refused credential is the operator's to fix, never the agent's");
+  assert.match(result.summary ?? "", /refused the credential/i, "the summary says the credential was refused");
+  assert.match(result.summary ?? "", /revoked/i, "and carries the provider's own words");
+  const err = events.find((e) => e.type === "error");
+  assert.ok(err && err.type === "error" && err.kind === "runtime_error", "the runtime_error is still emitted");
+});
+
+test("classifyRuntimeError separates a refused credential from a transient", () => {
+  for (const refused of [
+    // Both verbatim from 2026-07-30: the claude-code ambient login, and the Pi platform tenant's
+    // console spend cap. Neither is a Dahrk defect and neither is the agent's doing.
+    "Claude Code returned an error result: Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC."}}',
+    "authentication_failed",
+    "401 Unauthorized",
+    "403 Forbidden",
+    "invalid api key",
+    "Your credit balance is too low to access the API",
+  ]) {
+    assert.equal(classifyRuntimeError(refused), "config", `\`${refused}\` should class config`);
+  }
+  // A 429 is the provider THROTTLING a working credential, not refusing it: it must stay a
+  // retryable transient, so the transient family has to be tested first.
+  assert.equal(
+    classifyRuntimeError("429 Too Many Requests: rate limit exceeded"),
+    "external",
+    "throttling a valid credential stays external",
+  );
+});

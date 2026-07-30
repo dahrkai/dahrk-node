@@ -240,14 +240,27 @@ export async function runInteractiveLoop(
 }
 
 /**
- * Classify a runtime error message as an upstream API transient (DHK-569). The Claude/Pi SDKs surface
- * these as a thrown `sendTurn` (the batch loop's terminal-failure boundary) whose message names the
- * fault: a stream idle timeout, an overloaded/529, a 5xx, a 429/rate limit, a gateway timeout, or a
- * connection/socket reset. None of these is the agent's fault, so we attribute them `external`; the
- * engine's `deriveFailureClass` trusts an explicit `failureClass` over its summary heuristic, which
- * otherwise sniffs a bare `"<stage>: fail"` and mis-bills the stall to `agent`. A message we do NOT
- * recognise returns undefined, so a genuine agent-task failure (bad output, failing tests) stays
- * unclassified and the engine still classes it `agent` - exactly as before.
+ * Classify a runtime error message into a failure class the agent is not answerable for. The
+ * Claude/Pi SDKs surface these as a thrown `sendTurn` (the batch loop's terminal-failure boundary)
+ * whose message names the fault, so one function serves both runtimes.
+ *
+ * Two families, tested in this order:
+ *
+ * 1. **`external`** (DHK-569) - an upstream API transient: a stream idle timeout, an overloaded/529,
+ *    a 5xx, a 429/rate limit, a gateway timeout, or a connection/socket reset. The dependency is
+ *    unhealthy; retrying later is the whole remedy.
+ * 2. **`config`** - the provider REFUSED our credential: a revoked or expired OAuth login, a 401/403,
+ *    an invalid API key, or an operator-set spend cap. Nobody can code around these; only the
+ *    operator can re-authenticate or lift the cap, which is exactly what `config` means (DHK-930).
+ *
+ * Transients are tested first because the families overlap at the edges: a `429 rate limit` is the
+ * provider throttling a WORKING credential, not refusing it, and must stay `external`.
+ *
+ * Neither family is the agent failing its task. The engine's `deriveFailureClass` trusts an explicit
+ * `failureClass` over its summary heuristic, which otherwise sniffs a bare `"<stage>: fail"` and
+ * mis-bills the failure to `agent` - a stage that never ran a turn, billed for the run. A message we
+ * do NOT recognise returns undefined, so a genuine agent-task failure (bad output, failing tests)
+ * stays unclassified and the engine still classes it `agent` - exactly as before.
  */
 export function classifyRuntimeError(message: string): FailureClass | undefined {
   const m = message.toLowerCase();
@@ -269,16 +282,60 @@ export function classifyRuntimeError(message: string): FailureClass | undefined 
     m.includes("connection reset") ||
     m.includes("socket hang up") ||
     m.includes("connection error");
-  return transient ? "external" : undefined;
+  if (transient) return "external";
+  const refused =
+    // Rejected credential. `has been revoked` rather than a bare `revoked` so an agent-authored
+    // message that merely mentions revocation cannot latch the node's credential (see `edge`'s
+    // refused-credential latch, which consumes this class).
+    m.includes("has been revoked") ||
+    m.includes("authentication_failed") ||
+    m.includes("authentication failed") ||
+    m.includes("failed to authenticate") ||
+    m.includes("authentication_error") ||
+    m.includes("invalid api key") ||
+    m.includes("invalid_api_key") ||
+    m.includes("invalid bearer token") ||
+    m.includes("unauthorized") ||
+    m.includes("unauthorised") ||
+    m.includes("forbidden") ||
+    /\b40[13]\b/.test(m) ||
+    // Spend/quota exhaustion. An operator set this ceiling (an Anthropic console usage limit, an
+    // empty credit balance); the provider is healthy and the credential is valid, so it is neither
+    // `external` nor the agent's doing.
+    m.includes("usage limit") ||
+    m.includes("credit balance") ||
+    // A brokered profile that credentials nothing this runtime can use (see the Claude adapter's
+    // `runtimeAuthEnv`): the operator bound the wrong profile, which is a config gap, not a refusal
+    // by the provider - but it is the same family and the same remedy.
+    m.includes("no anthropic credential") ||
+    m.includes("quota exceeded") ||
+    m.includes("insufficient_quota") ||
+    m.includes("billing");
+  return refused ? "config" : undefined;
 }
+
+/** The summary prefix a refused-credential failure carries. Exported because it is a seam, not just
+ *  prose: the edge's refused-credential latch keys on it to decide that THIS node's ambient login is
+ *  dead (and so must stop advertising the runtime), which a bare `failureClass: "config"` cannot tell
+ *  it - `config` also covers gaps that have nothing to do with the inference credential. */
+export const REFUSED_CREDENTIAL_SUMMARY = "provider refused the credential";
+
+/** The summary prefix for each class `classifyRuntimeError` attributes, so a stage result says WHAT
+ *  went wrong rather than leaving the bare `"<stage>: fail"` the engine would have to string-sniff.
+ *  Keyed by class so a new family cannot be added without deciding how it reads to an operator. */
+const RUNTIME_ERROR_SUMMARY: Partial<Record<FailureClass, string>> = {
+  external: "upstream API transient",
+  config: REFUSED_CREDENTIAL_SUMMARY,
+};
 
 /**
  * The shared batch loop: one `sendTurn(resolveStagePrompt)`, settle the status, read `cost()`/
  * `sessionId`. A thrown `sendTurn` is the terminal-failure boundary - emit `runtime_error` (guarded by
  * the runner's `cancelled` predicate, so a cancel-driven throw is not mis-reported) and settle `fail`.
- * When the throw is an upstream API transient (see `classifyRuntimeError`), attach an explicit
- * `failureClass: "external"` and a truthful summary naming it, so the engine does not string-sniff a
- * bare `"<stage>: fail"` down to `agent` (DHK-569).
+ * When the throw is one the agent is not answerable for (see `classifyRuntimeError`: an upstream API
+ * transient, or a credential the provider refused), attach the explicit `failureClass` and a truthful
+ * summary naming it, so the engine does not string-sniff a bare `"<stage>: fail"` down to `agent`
+ * (DHK-569).
  */
 export async function runBatchLoop(
   session: RuntimeSession,
@@ -297,7 +354,8 @@ export async function runBatchLoop(
     if (!opts.cancelled()) {
       hooks.emit({ type: "error", kind: "runtime_error", message });
       failureClass = classifyRuntimeError(message);
-      if (failureClass) summary = `upstream API transient: ${message}`;
+      const prefix = failureClass ? RUNTIME_ERROR_SUMMARY[failureClass] : undefined;
+      if (prefix) summary = `${prefix}: ${message}`;
     }
     status = "fail";
   }
