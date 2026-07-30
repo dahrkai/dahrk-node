@@ -8,6 +8,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- **A Pi stage now receives pinned components, not just Claude.** The dispatch-time overlay previously
+  materialised centrally-provisioned skills, commands and agents only for the Claude runtime and warned
+  that no other runtime had a components surface, which was wrong for Pi. Pinned skills are now injected
+  into a Pi stage by path, pointing Pi's resource loader straight at the verified pack cache with no copy
+  into the worktree; pinned commands are reshaped into Pi prompt templates under `.pi/prompts/`, keeping
+  their argument substitution and honouring repo-local precedence and idempotence exactly as Claude does;
+  and a pinned subagent warns and is skipped, because Pi intentionally ships no subagents. Claude's
+  behaviour is unchanged, and the provision note now distinguishes injected-by-path components from files
+  written to disk.
+
 - **A Pi stage now writes a durable, run-scoped session instead of an in-memory one that vanished.**
   The Pi runtime built its session with the in-memory manager, which persisted nothing, so a stage's
   transcript was gone the moment the stage ended and the session id it reported was not resumable. The
