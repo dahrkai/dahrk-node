@@ -25,6 +25,24 @@ this file is left verbatim.
   rather than only the first, and asserts they converged before installing. Bumping one left
   `scripts/check-pi-pin.mjs` failing in the Verify step, so the 0.83.0 refresh never opened a PR.
 
+### Changed
+
+- **Pin `@dahrk/contracts` once, via a pnpm catalog, and adopt 0.11.0.** Three packages depended on
+  it with their own caret ranges, all stuck on `^0.10.0`. A caret on a `0.x` version does not cross
+  the minor, so the workspace could not resolve the newly published 0.11.0 at all and was silently
+  frozen a minor behind the wire protocol. `pnpm-workspace.yaml` now carries a `catalog:` entry and
+  `apps/edge-node`, `packages/edge` and `packages/executor-worktree` all say `"catalog:"`; bump the
+  one entry from now on, not the three manifests. This is the drift that already bit once, when
+  `apps/edge-node` sat on `^0.8.2` while the other two had moved to `^0.10.0`.
+
+  Adopting 0.11.0 is safe despite it being a breaking contracts release: the break is the removal of
+  the `codex` runtime, and the node side of that retirement already landed (DHK-510, below).
+  Typecheck, build and all 277 tests pass against 0.11.0.
+
+  Note that 0.11.0 is also the first `@dahrk/contracts` release actually published by CI. Every prior
+  release was hand-published, because `publish-contracts.yml` had no matching npm trusted-publisher
+  entry and its OIDC token exchange 404'd on every run since it landed.
+
 ## [0.1.29] - 2026-07-30
 
 ### Changed
