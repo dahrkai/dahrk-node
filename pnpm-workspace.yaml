@@ -2,6 +2,13 @@ packages:
   - "packages/*"
   - "apps/*"
 
+# Pin @dahrk/contracts ONCE. Three packages depend on it and, pinned separately, they drifted:
+# apps/edge-node sat on ^0.8.2 while packages/edge and packages/executor-worktree had moved to
+# ^0.10.0. A caret on a 0.x version does not cross the minor, so a split like that silently freezes
+# part of the workspace on an older wire protocol. Bump this entry, not the manifests.
+catalog:
+  "@dahrk/contracts": "^0.11.0"
+
 onlyBuiltDependencies:
   - esbuild
 
