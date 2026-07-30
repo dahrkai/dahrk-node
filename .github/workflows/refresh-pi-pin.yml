@@ -78,12 +78,30 @@ jobs:
           TARGET: ${{ steps.resolve.outputs.target }}
         run: |
           set -euo pipefail
+          # BOTH manifests, because check-pi-pin.mjs requires them to agree: executor-worktree is what
+          # the adapter compiles against, apps/edge-node is the published manifest that resolves the
+          # bare specifier on a user's machine. Bumping only the first fails Verify before the PR is
+          # ever opened.
+          #
           # package.json ONLY. The adapter's doc comment deliberately no longer repeats the version, so
           # this touches nothing under `src/` and the PR does not trip the changelog gate for what is,
           # by itself, pure dependency plumbing. Add a changelog line by hand when the new Pi brings
           # models or provider logins a self-hoster would notice.
-          sed -i "s|\"@earendil-works/pi-coding-agent\": \"${CURRENT}\"|\"@earendil-works/pi-coding-agent\": \"${TARGET}\"|" \
-            packages/executor-worktree/package.json
+          for pkg in packages/executor-worktree/package.json apps/edge-node/package.json; do
+            sed -i "s|\"@earendil-works/pi-coding-agent\": \"${CURRENT}\"|\"@earendil-works/pi-coding-agent\": \"${TARGET}\"|" \
+              "$pkg"
+          done
+          # Belt and braces: if a manifest sat on a different version, the sed above is a silent no-op
+          # and Verify fails later with no clue why. Fail here, where the cause is obvious. (This runs
+          # before `pnpm install`, so it greps rather than calling check-pi-pin.mjs, which needs an
+          # installed @dahrk/contracts.)
+          for pkg in packages/executor-worktree/package.json apps/edge-node/package.json; do
+            grep -q "\"@earendil-works/pi-coding-agent\": \"${TARGET}\"" "$pkg" || {
+              echo "FAIL - $pkg did not land on ${TARGET}:" >&2
+              grep -n '"@earendil-works/pi-coding-agent"' "$pkg" >&2
+              exit 1
+            }
+          done
           git diff --stat
 
       - name: Install
