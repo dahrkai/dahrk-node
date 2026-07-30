@@ -6,12 +6,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
-### Changed
-
-- **The Pi runtime moves to 0.83.0, which changes the model ids a stage can resolve.** Claude Opus 5
-  becomes available, and the Fireworks GLM 5.1 entries (`accounts/fireworks/models/glm-5p1` and
-  `accounts/fireworks/routers/glm-5p1-fast`) are gone, replaced by Kimi K3 at the equivalent ids. A
-  stage pinned to a withdrawn id will no longer resolve it, so check any workflow that names one.
+## [0.1.30] - 2026-07-30
 
 ### Added
 
@@ -23,14 +18,22 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   The adapter now applies the subscription's live access token to the runtime subprocess, where the
   agent's own tool calls never see it, and a profile that offers only a subscription for some other
   provider now fails immediately with a message naming the misbinding rather than running
-  unauthenticated.
+  unauthenticated. (#148)
 
 - **A node stops advertising a runtime once the provider has refused its login.** Detection could only
   ask whether a login existed on the host, which a revoked token satisfies perfectly well, so a node
   with a dead credential kept accepting work and failing every job on its first turn at no cost. The
   node now remembers a refusal reported by an actual stage and withholds that runtime until a stage
   authenticates again, so re-authenticating brings it back with no restart. `dahrk doctor` names both
-  the cause and the remedy.
+  the cause and the remedy. (#148)
+
+### Changed
+
+- **The Pi runtime moves to 0.83.0, which changes the model ids a stage can resolve.** Claude Opus 5
+  becomes available, and the Fireworks GLM 5.1 entries (`accounts/fireworks/models/glm-5p1` and
+  `accounts/fireworks/routers/glm-5p1-fast`) are gone, replaced by Kimi K3 at the equivalent ids. A
+  stage pinned to a withdrawn id will no longer resolve it, so check any workflow that names one.
+  (#150)
 
 ### Fixed
 
@@ -40,7 +43,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   to a prompt or a workflow can fix either. Both are now attributed to configuration, and the stage
   summary carries the provider's own words, so the run says plainly that the credential needs
   attention. Throttling (a 429) is unchanged: that is a working credential being rate-limited, and it
-  is still reported as a transient upstream fault.
+  is still reported as a transient upstream fault. (#148)
 
 ## [0.1.29] - 2026-07-30
 
@@ -1140,7 +1143,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.30...HEAD
+[0.1.30]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...v0.1.29
 [0.1.28]: https://github.com/dahrkai/dahrk-node/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/dahrkai/dahrk-node/compare/v0.1.26...v0.1.27

@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-07-30
+
 ### Added
 
 - `refresh-contracts` workflow, proposing the `@dahrk/contracts` bump that a caret range structurally
@@ -29,21 +31,6 @@ this file is left verbatim.
   still moves within its minor and comparing the floor would open a no-op PR on every upstream patch.
   Verify runs `check-pi-pin.mjs` first, because a new contracts is where a provider catalogue that has
   outrun our Pi pin arrives from.
-
-### Changed
-
-- `@dahrk/contracts` catalog entry `^0.11.0` -> `^0.11.1` and `@earendil-works/pi-coding-agent`
-  `0.82.1` -> `0.83.0`, together because they are one ordering constraint: contracts 0.11.1 carries
-  `PI_CATALOG_VERSION` 0.83.0, so bumping it alone fails `check-pi-pin.mjs`.
-- The Pi packages are excluded from the `minimumReleaseAge` gate by name rather than by pinned
-  version. `pnpm up` writes a version-pinned entry, which would both block the bump `refresh-pi-pin`
-  exists to propose and grow four lines per Pi release.
-
-### Fixed
-
-- `refresh-pi-pin` now bumps **both** Pi manifests (`packages/executor-worktree` and `apps/edge-node`)
-  rather than only the first, and asserts they converged before installing. Bumping one left
-  `scripts/check-pi-pin.mjs` failing in the Verify step, so the 0.83.0 refresh never opened a PR.
 
 ### Changed
 
@@ -62,6 +49,31 @@ this file is left verbatim.
   Note that 0.11.0 is also the first `@dahrk/contracts` release actually published by CI. Every prior
   release was hand-published, because `publish-contracts.yml` had no matching npm trusted-publisher
   entry and its OIDC token exchange 404'd on every run since it landed.
+
+- `@dahrk/contracts` catalog entry `^0.11.0` -> `^0.11.1` and `@earendil-works/pi-coding-agent`
+  `0.82.1` -> `0.83.0`, together because they are one ordering constraint: contracts 0.11.1 carries
+  `PI_CATALOG_VERSION` 0.83.0, so bumping it alone fails `check-pi-pin.mjs`.
+- The Pi packages are excluded from the `minimumReleaseAge` gate by name rather than by pinned
+  version. `pnpm up` writes a version-pinned entry, which would both block the bump `refresh-pi-pin`
+  exists to propose and grow four lines per Pi release.
+
+### Fixed
+
+- `refresh-pi-pin` now bumps **both** Pi manifests (`packages/executor-worktree` and `apps/edge-node`)
+  rather than only the first, and asserts they converged before installing. Bumping one left
+  `scripts/check-pi-pin.mjs` failing in the Verify step, so the 0.83.0 refresh never opened a PR.
+
+- The release workflow's `Notify dahrk-web` step is now fatal instead of `continue-on-error` with a
+  bare `::warning::`. `WEB_DISPATCH_PAT` had lost its `Contents: write` scope on `dahrkai/dahrk-web`,
+  so every `repository_dispatch` 403'd while the release runs stayed green: dahrk.ai/changelog sat on
+  v0.1.27 through both v0.1.28 and v0.1.29, and it was found by reading the site rather than from any
+  CI signal. Two edits were needed, since the `if gh api ...; then ... else ... fi` construct swallows
+  the non-zero exit on its own; the else branch now emits `::error::` and exits 1, naming the
+  permission to check and the recovery command. The step deliberately stays **last**, after
+  `npm publish` and the GitHub release, so a failure here loses only the site refresh. The Homebrew
+  tap bump and the `Notify dahrk-harness` dispatch stay non-fatal, and an unset secret still skips.
+  The PAT has been reissued and the site backfilled by hand; the real end-to-end test is this
+  release's run. See also dahrkai/dahrk-web#57 for the nightly rebuild there.
 
 ## [0.1.29] - 2026-07-30
 
