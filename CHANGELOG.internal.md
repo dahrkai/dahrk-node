@@ -19,6 +19,12 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- `refresh-pi-pin` now bumps **both** Pi manifests (`packages/executor-worktree` and `apps/edge-node`)
+  rather than only the first, and asserts they converged before installing. Bumping one left
+  `scripts/check-pi-pin.mjs` failing in the Verify step, so the 0.83.0 refresh never opened a PR.
+
 ## [0.1.29] - 2026-07-30
 
 ### Changed
