@@ -1,0 +1,150 @@
+# Keep this node's wire protocol current with the published `@dahrk/contracts`.
+#
+# WHY. The specifier is a caret range, and `@dahrk/contracts` is PRE-1.0 - so `^0.10.0` means
+# `>=0.10.0 <0.11.0`. A caret does not cross a minor before 1.0, which means the one mechanism you
+# would expect to pick up a new contracts release is exactly the mechanism that cannot: 0.11.0 sat on
+# npm while every install here resolved 0.10.0, silently, with a green lockfile. `pnpm install` was
+# never going to surface it and no check compared the two. Nothing is wrong with the range - it is
+# doing what semver says - so the fix is not a different range, it is a job that proposes the bump.
+#
+# The catalogue in pnpm-workspace.yaml (see its comment) already fixed the OTHER half of this: three
+# manifests can no longer drift apart from each other. It does nothing about all three being frozen a
+# minor behind together, which is what this job is for.
+#
+# Deliberately this repo's OWN job rather than something the harness pushes, matching refresh-pi-pin:
+# neither side needs a cross-repo token, and both converge because both chase the same npm version.
+#
+# Like refresh-pi-pin, this pushes to a SINGLE rolling branch so a chatty upstream produces one
+# always-current PR rather than one per release, and it only ever opens a PR. Contracts is the wire
+# protocol this node speaks to the hub, and a pre-1.0 minor is exactly where a breaking change is
+# allowed to live, so the bump deserves a human glance even when the suite is green.
+name: refresh-contracts
+
+on:
+  schedule:
+    # Daily, an hour after refresh-pi-pin, so when a harness release moves both the contracts PR lands
+    # against a tree whose Pi pin has already been proposed.
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "@dahrk/contracts version to move to (blank = whatever npm calls latest)."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-contracts
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: resolve
+        name: Resolve the target contracts version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # The RESOLVED version, read from the lockfile, not the catalogue's specifier floor. A caret
+          # still moves freely WITHIN its minor, so `^0.11.0` already installs 0.11.1 and comparing the
+          # floor would rewrite the specifier to something that changes nothing about what installs -
+          # a no-op PR per upstream patch. The lockfile is what the install actually uses, so it is
+          # the only honest answer to "are we behind?".
+          current="$(grep -o "'@dahrk/contracts@[^']*'" pnpm-lock.yaml | head -1 | sed "s/.*@//; s/'//")"
+          target="${INPUT_VERSION:-$(npm view @dahrk/contracts version)}"
+          test -n "$current" && test -n "$target"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "target=$target"   >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$target" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "@dahrk/contracts already resolves to **$current**. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "@dahrk/contracts **$current** -> **$target**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.resolve.outputs.changed == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.resolve.outputs.changed == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # ONE line to edit, because the catalogue is the single pin: the three manifests say `catalog:`
+      # and cannot disagree by construction. `pnpm install` then rewrites the lockfile to match.
+      - name: Bump the catalogue entry
+        if: steps.resolve.outputs.changed == 'true'
+        env:
+          TARGET: ${{ steps.resolve.outputs.target }}
+        run: |
+          set -euo pipefail
+          sed -i "s|\"@dahrk/contracts\": \"\^[0-9][^\"]*\"|\"@dahrk/contracts\": \"^${TARGET}\"|" \
+            pnpm-workspace.yaml
+          # Belt and braces: a sed that matches nothing exits 0, so without this a reformatted or
+          # renamed entry would sail through to a Verify failure with no clue why.
+          grep -q "\"@dahrk/contracts\": \"\^${TARGET}\"" pnpm-workspace.yaml || {
+            echo "FAIL - the catalogue entry did not land on ^${TARGET}:" >&2
+            grep -n '@dahrk/contracts' pnpm-workspace.yaml >&2
+            exit 1
+          }
+          pnpm install --no-frozen-lockfile
+          # And confirm the lockfile followed. The catalogue entry is a RANGE; this is the version the
+          # workspace will actually install, which is the thing the PR is claiming to change.
+          resolved="$(grep -o "'@dahrk/contracts@[^']*'" pnpm-lock.yaml | head -1 | sed "s/.*@//; s/'//")"
+          test "$resolved" = "${TARGET}" || {
+            echo "FAIL - catalogue says ^${TARGET} but the lockfile resolved ${resolved}." >&2
+            exit 1
+          }
+          git diff --stat
+
+      # Prove the tree is coherent before proposing it, rather than opening a PR that reddens on arrival.
+      # check-pi-pin.mjs matters MOST here: it reads PI_CATALOG_VERSION from the freshly installed
+      # contracts, so this is the step that catches a new contracts whose catalogue has outrun our Pi
+      # pin - the drift that job exists to prevent, arriving from the other direction. It is not
+      # hypothetical: contracts 0.11.1 shipped a 0.83.0 catalogue against a 0.82.1 pin here.
+      - name: Verify
+        if: steps.resolve.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          node scripts/check-pi-pin.mjs
+          pnpm build
+          pnpm typecheck
+          pnpm test
+
+      - name: Open or update the refresh PR
+        if: steps.resolve.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/contracts-refresh
+          base: main
+          title: "chore(deps): @dahrk/contracts ${{ steps.resolve.outputs.target }}"
+          body: |
+            Bumps the wire protocol this node speaks to the hub.
+
+            `@dahrk/contracts` `${{ steps.resolve.outputs.current }}` -> `${{ steps.resolve.outputs.target }}`
+
+            Opened because the caret range cannot do this on its own: `@dahrk/contracts` is pre-1.0, so
+            `^0.x.y` is pinned to the `0.x` minor and a new minor is invisible to `pnpm install`.
+
+            **Read the contracts changelog before merging.** A pre-1.0 minor is allowed to break the
+            protocol, and a green suite here only proves this node still compiles and passes its own
+            tests - not that it still agrees with the hub.
+
+            If `check-pi-pin.mjs` failed instead of this PR appearing, the new contracts carries a
+            provider catalogue newer than our Pi pin: merge the refresh-pi-pin PR first.
+
+            This bump touches only the catalogue entry and the lockfile, so no changelog entry is
+            forced. Add one by hand if the new contracts changes something a self-hoster would notice.
+          commit-message: |
+            chore(deps): bump @dahrk/contracts to ${{ steps.resolve.outputs.target }}
+          labels: dependencies
+          delete-branch: false

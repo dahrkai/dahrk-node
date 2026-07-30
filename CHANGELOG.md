@@ -6,6 +6,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Changed
+
+- **The Pi runtime moves to 0.83.0, which changes the model ids a stage can resolve.** Claude Opus 5
+  becomes available, and the Fireworks GLM 5.1 entries (`accounts/fireworks/models/glm-5p1` and
+  `accounts/fireworks/routers/glm-5p1-fast`) are gone, replaced by Kimi K3 at the equivalent ids. A
+  stage pinned to a withdrawn id will no longer resolve it, so check any workflow that names one.
+
 ### Added
 
 - **A Claude stage can now use an Anthropic subscription (Claude Pro/Max), not just an API key.** A

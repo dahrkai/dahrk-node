@@ -19,6 +19,26 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- `refresh-contracts` workflow, proposing the `@dahrk/contracts` bump that a caret range structurally
+  cannot make. The catalog pin stopped the three manifests drifting apart from each other; it does
+  nothing about all three being frozen a minor behind together, because `^0.x.y` cannot cross a
+  pre-1.0 minor. Mirrors `refresh-pi-pin`: rolling branch, PR only, no cross-repo token. Compares the
+  lockfile's resolved version against npm rather than the catalogue's specifier floor, since a caret
+  still moves within its minor and comparing the floor would open a no-op PR on every upstream patch.
+  Verify runs `check-pi-pin.mjs` first, because a new contracts is where a provider catalogue that has
+  outrun our Pi pin arrives from.
+
+### Changed
+
+- `@dahrk/contracts` catalog entry `^0.11.0` -> `^0.11.1` and `@earendil-works/pi-coding-agent`
+  `0.82.1` -> `0.83.0`, together because they are one ordering constraint: contracts 0.11.1 carries
+  `PI_CATALOG_VERSION` 0.83.0, so bumping it alone fails `check-pi-pin.mjs`.
+- The Pi packages are excluded from the `minimumReleaseAge` gate by name rather than by pinned
+  version. `pnpm up` writes a version-pinned entry, which would both block the bump `refresh-pi-pin`
+  exists to propose and grow four lines per Pi release.
+
 ### Fixed
 
 - `refresh-pi-pin` now bumps **both** Pi manifests (`packages/executor-worktree` and `apps/edge-node`)
