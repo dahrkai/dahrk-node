@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-07-30
+
 ### Added
 
 - **A Pi stage now receives pinned components, not just Claude.** The dispatch-time overlay previously
@@ -16,9 +18,9 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   their argument substitution and honouring repo-local precedence and idempotence exactly as Claude does;
   and a pinned subagent warns and is skipped, because Pi intentionally ships no subagents. Claude's
   behaviour is unchanged, and the provision note now distinguishes injected-by-path components from files
-  written to disk.
+  written to disk. (#142)
 
-- **A Pi stage now writes a durable, run-scoped session instead of an in-memory one that vanished.**
+- **A Pi stage now writes a durable, session instead of an in-memory one that vanished.**
   The Pi runtime built its session with the in-memory manager, which persisted nothing, so a stage's
   transcript was gone the moment the stage ended and the session id it reported was not resumable. The
   adapter now points Pi at a durable session directory under the run's own scratch tree
@@ -28,7 +30,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   failure included. Handing the adapter a session id now resumes that session, so a retry within a
   stage continues rather than starting cold, matching how the Claude runtime consumes its resume token.
   Cross-stage conversation continuity is deliberately unchanged: the engine summary remains the
-  cross-stage carrier, because stages swap runtimes.
+  cross-stage carrier, because stages swap runtimes. (#140)
 
 - **A container-isolated Pi stage now enforces the tool gate and can ask a structured question.**
   When Pi runs inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), the
@@ -40,14 +42,25 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   execution, with the denial reason handed back to the agent) and to surface a multiple-choice
   question (routed to a Linear elicitation, the human's pick returned into the turn). Both flow
   through the same edge policy and elicit machinery as embedded Pi, so a denial produces the same
-  recorded deny and the same agent-visible reason.
+  recorded deny and the same agent-visible reason. (#137)
 
 - **A Pi stage can now hand back a document from its stage-complete tool.** The injected
   `dahrk_stage_complete` tool on the Pi runtime takes an optional `document` argument alongside the
   summary, matching the Claude runtime. A stage that ends by calling the tool with a document now
   emits that document as its artifact at `.dahrk/scratch/output/document.md` (or the stage's
   `emitArtifact` path), so a Pi stage feeding a document to the next stage no longer depends on the
-  agent having written a file to a conventional location.
+  agent having written a file to a conventional location. (#130)
+
+- **A container-isolated Pi stage now reports its real dollar cost and honours the stage's model.**
+  When Pi ran inside a container over the RPC transport (`DAHRK_PI_ISOLATION=container`), the session
+  reported no cost at all, so a `cost_budget` policy on a containerised stage never accumulated spend
+  and sat inert, and the container was spawned on Pi's own default model regardless of what the stage
+  asked for, so a workflow pinning a model got something else without saying so. The RPC session now
+  queries the containerised agent's session statistics and returns the aggregate as the stage's
+  `costUsd`, leaving it unset rather than fabricating a `0` when the figure genuinely cannot be read.
+  The stage's model is resolved through the same selection and auth-profile path the embedded runtime
+  uses and passed to the container on spawn; a model that cannot be resolved now fails the stage
+  outright instead of silently falling back. (#139)
 
 ### Changed
 
@@ -64,7 +77,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   than running without it; a gap in a non-critical capability (the container path still cannot register
   brokered MCP servers) emits a `capability-degraded` event into the run's trace and continues, so an
   operator reading the run sees the loss rather than inferring it from a missing figure. No capability
-  is added here; this only stops the existing gaps failing silently.
+  is added here; this only stops the existing gaps failing silently. (#143)
 
 - **A Pi interactive stage now receives its instruction as a system prompt, matching the Claude
   runtime.** Previously the Pi runtime delivered the whole resolved stage prompt (ticket context,
@@ -76,7 +89,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   prompt is preserved in full (its tools, guidelines, skills block and the context files it reads
   natively), because the instruction is appended to those sections rather than replacing them. A
   bare-skill stage, which carries no system prompt, is unchanged. Batch stages are unchanged: they
-  still deliver the prompt as their single user turn, as they always have.
+  still deliver the prompt as their single user turn, as they always have. (#132)
 
 ### Fixed
 
@@ -88,7 +101,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   stage whose gate did block the call was still hard-failed as though nothing could stop it. The node
   now keys the decision off whether the session in use actually enforces pre-execution, so an embedded
   Pi stage records a normal blocked deny while a session that genuinely cannot pre-block (container Pi)
-  still hard-fails, preserving the security property.
+  still hard-fails, preserving the security property. (#138)
 
 - **A Pi tool observation now carries the tool's output in the trace.** The Pi event mapper read the
   tool result off a `content` field, but Pi's `tool_execution_end` event names it `result`, so every
@@ -96,7 +109,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   Pi stage's trace sees the tool output, matching the Claude runtime. The mapper's event shapes are now
   reconciled against the installed SDK's type declarations and pinned by a compile-time check, so a
   future Pi bump that renames a field or adds an event kind the mapper drops fails the build instead of
-  quietly degrading the trace.
+  quietly degrading the trace. (#136)
 
 - **A Pi stage now stops at the same turn ceiling Claude enforces.** Claude caps a stage at
   `DAHRK_MAX_TURNS` (default 64) agent turns, the backstop against an agent stuck in a tool loop. Pi
@@ -105,7 +118,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   emitting output and simply burned budget until the wall clock fired. The Pi adapter now counts Pi's
   per-turn events and aborts the run at the same ceiling, reading the same `DAHRK_MAX_TURNS` env var
   and default so the two runtimes are configured identically. Hitting the ceiling produces the same
-  terminal state and failure classification as Claude hitting its limit, not a new one.
+  terminal state and failure classification as Claude hitting its limit, not a new one. (#131)
 
 ## [0.1.28] - 2026-07-29
 
@@ -1091,7 +1104,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...HEAD
+[0.1.29]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...v0.1.29
 [0.1.28]: https://github.com/dahrkai/dahrk-node/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/dahrkai/dahrk-node/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/dahrkai/dahrk-node/compare/v0.1.25...v0.1.26
