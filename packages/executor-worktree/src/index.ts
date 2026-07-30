@@ -83,6 +83,10 @@ export type { CheckOutcome } from "./check-runner.js";
  *  confinement escape by capability rather than runtime name (DHK-983). */
 export type { PreExecutionCapability } from "./runtime-session.js";
 
+/** The summary prefix a refused-credential stage failure carries, so the edge's latch can recognise
+ *  one without re-deriving the classification. */
+export { REFUSED_CREDENTIAL_SUMMARY } from "./turn-loop.js";
+
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
 export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js";
 /** Which SDK each runtime executes through, resolved from the package that actually imports them. */

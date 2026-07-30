@@ -89,3 +89,63 @@ test("ambient node with runtimeAuth but no runtimeEnv: no env option (the hint a
   const opts = runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext);
   assert.deepEqual(opts, {}, "no runtimeEnv -> no env option, even when runtimeAuth carries a hint");
 });
+
+// --- OAuth subscription profiles (DHK-998) ------------------------------------------------------
+
+test("brokered node: an Anthropic subscription credentials the stage via CLAUDE_CODE_OAUTH_TOKEN", () => {
+  // "Anthropic (Claude Pro/Max)" in the auth portal mints an oauth hint with no env var to carry the
+  // secret. Before this reader existed, binding a pool to that profile credentialled nothing at all
+  // and the stage silently fell through to whatever ambient login the host had.
+  const hint = {
+    providers: [
+      { kind: "oauth" as const, provider: "anthropic", access: "sk-ant-oat-live", refresh: "sk-ant-ort", expires: 1 },
+    ],
+  };
+  const opts = runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext);
+  assert.ok(opts.env, "an oauth subscription alone is enough to populate env");
+  assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-live", "the live access token reaches the subprocess");
+  assert.equal(opts.env?.PATH, process.env.PATH, "PATH is still carried through");
+});
+
+test("an Anthropic subscription rides alongside, and does not clobber, a minted api key", () => {
+  const hint = {
+    providers: [
+      { kind: "api_key" as const, provider: "anthropic", envVar: "ANTHROPIC_API_KEY" },
+      { kind: "oauth" as const, provider: "anthropic", access: "sk-ant-oat-live", refresh: "r", expires: 1 },
+    ],
+  };
+  const opts = runtimeEnvOptions(
+    { ...ctx({ runtimeEnv: { ANTHROPIC_API_KEY: "sk-brokered" } }), runtimeAuth: hint } as RunnerContext,
+  );
+  assert.equal(opts.env?.ANTHROPIC_API_KEY, "sk-brokered");
+  assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-live");
+});
+
+test("a foreign subscription with no Anthropic credential fails loudly rather than running unauthenticated", () => {
+  // claude-code cannot use a Copilot or Codex login. Proceeding would fail on the first turn with a
+  // message that reads like the agent's fault; the binding is what is wrong.
+  const hint = {
+    providers: [
+      { kind: "oauth" as const, provider: "github-copilot", access: "gho_x", refresh: "r", expires: 1 },
+    ],
+  };
+  assert.throws(
+    () => runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext),
+    /no Anthropic credential .* github-copilot subscription/s,
+    "the error names the misbinding and the runtime that cannot use it",
+  );
+});
+
+test("a foreign subscription is tolerated when an api key also credentials the stage", () => {
+  const hint = {
+    providers: [
+      { kind: "api_key" as const, provider: "anthropic", envVar: "ANTHROPIC_API_KEY" },
+      { kind: "oauth" as const, provider: "github-copilot", access: "gho_x", refresh: "r", expires: 1 },
+    ],
+  };
+  const opts = runtimeEnvOptions(
+    { ...ctx({ runtimeEnv: { ANTHROPIC_API_KEY: "sk-brokered" } }), runtimeAuth: hint } as RunnerContext,
+  );
+  assert.equal(opts.env?.ANTHROPIC_API_KEY, "sk-brokered");
+  assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "no foreign token is smuggled onto the env");
+});

@@ -44,12 +44,14 @@ import {
   overlayComponents,
   resolveMirrorsDir,
   runRepoSetup,
+  REFUSED_CREDENTIAL_SUMMARY,
   type GitService,
   type PackCache,
   type CheckOutcome,
   type PreExecutionCapability,
   type ReapReport,
 } from "@dahrk/executor-worktree";
+import { credentialLatch } from "./credential-latch.js";
 import { buildRules } from "./builtins.js";
 import { computeFsRoots } from "./fs-roots.js";
 import { createNodeLogger, type NodeLogger } from "./logger.js";
@@ -767,6 +769,21 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         ): Promise<JobResult> => {
           active.delete(jobId);
           turnQueues.delete(jobId);
+          // Feed this node's refused-credential latch (DHK-998), so a dead ambient login stops the
+          // node advertising a runtime it cannot run instead of burning one run per attempt at $0.
+          // Keyed on the summary the runtime-error classifier writes, not on `failureClass` alone:
+          // `config` also covers gaps that say nothing about the INFERENCE credential (an unbound git
+          // credential, a repo no node serves), and latching on those would take a healthy runtime
+          // off the air. A check job has no runtime and cannot speak to any credential.
+          if (!isCheck && agentConfig) {
+            if (status === "fail" && summary.startsWith(REFUSED_CREDENTIAL_SUMMARY)) {
+              credentialLatch.markRefused(agentConfig.runtime);
+            } else if (status === "ok") {
+              // Authenticating at all clears the latch: this is what lets a plain `claude auth login`
+              // bring the node back with no restart, on the next stage that succeeds.
+              credentialLatch.markAccepted(agentConfig.runtime);
+            }
+          }
           // discard brokered MCP creds with the stage. A gateway that will not stop is holding a port
           // and, worse, live brokered credentials - never let that pass unremarked.
           await gateway?.stop().catch((e: unknown) => log.warn({ err: e, jobId }, "mcp gateway: stop failed"));
@@ -1061,10 +1078,11 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           ...(job.comments !== undefined ? { comments: job.comments } : {}),
           ...(job.relatedIssues !== undefined ? { relatedIssues: job.relatedIssues } : {}),
           ...(gateway ? { mcpProxyBaseUrl: gateway.baseUrl } : {}),
-          // brokered inference env for a managed node (no operator login). The runtime adapter
-          // (Pi) / container executor apply it as the inference process env, so the raw key is
-          // never surfaced to the agent's own tool calls. Absent on ambient nodes; inert for the Claude/
-          // Codex adapters, which use ambient inference.
+          // brokered inference env for a managed node (no operator login). Every runtime adapter and
+          // the container executor apply it as the inference process env, so the raw key is never
+          // surfaced to the agent's own tool calls. Absent on ambient nodes. (This once said "inert
+          // for the Claude adapter, which uses ambient inference" - untrue since DHK-89 and worth
+          // correcting: that adapter reads BOTH this and the `runtimeAuth` hint below.)
           ...(job.runtimeEnv ? { runtimeEnv: job.runtimeEnv } : {}),
           // The brokered auth-profile hint (DHK-509/511): WHICH provider each piece of the inference
           // auth above belongs to, plus the model fallback. The adapter applies nothing for a provider

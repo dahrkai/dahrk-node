@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CredentialMode, Runtime } from "@dahrk/contracts";
 import { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "@dahrk/executor-worktree";
+import { credentialLatch, type CredentialLatch } from "./credential-latch.js";
 
 /** Where a stage's credentials would come from, or `none` if nothing can authenticate it here. */
 export type CredentialSource = "brokered" | "ambient" | "none";
@@ -106,6 +107,9 @@ export interface DetectOptions {
   /** Injectable "can Pi authenticate from this environment", so the credential half is testable
    *  without constructing a real Pi `ModelRuntime`. */
   piAmbientCredential?: (env: NodeJS.ProcessEnv) => Promise<boolean>;
+  /** This node's refused-credential memory. Defaults to the process-wide latch the stage runner
+   *  writes to; injected in tests so a probe never depends on process state. */
+  latch?: CredentialLatch;
 }
 
 /** One `<cmd> --version` invocation. Resolves the trimmed first non-empty output line on exit 0;
@@ -182,6 +186,7 @@ export async function probeRuntimeStatuses(opts: DetectOptions = {}): Promise<Ru
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const attempts = opts.attempts ?? DEFAULT_ATTEMPTS;
   const canResolve = opts.canResolve ?? canResolveSdk;
+  const latch = opts.latch ?? credentialLatch;
 
   const ambient = credentialMode === "ambient";
   const [versions, piAmbient] = await Promise.all([
@@ -222,6 +227,18 @@ export async function probeRuntimeStatuses(opts: DetectOptions = {}): Promise<Ru
         available: false,
         detail:
           "no provider key in the environment (a Pi stage never reads a `pi` login); set one or enrol into a brokered pool",
+      };
+    }
+    // A login the provider has REFUSED outranks every local hint (DHK-998). The hints below only ever
+    // establish that a login exists on this host; a revoked token satisfies all of them and still
+    // fails every stage on its first turn, at $0.00, billed to the agent. The latch is the one signal
+    // that came from the runtime actually trying to authenticate, so it wins.
+    if (latch.isRefused(spec.runtime)) {
+      return {
+        ...base,
+        credential: "none" as const,
+        available: false,
+        detail: `the provider refused this host's ${spec.cmd} login: re-authenticate as the user this node runs as (\`${spec.cmd} auth login\`), or set ${CLAUDE_CREDENTIAL_ENV[1]} in the node service definition`,
       };
     }
     if (hasAmbientClaudeLogin(env, home, cliVersion !== undefined)) {

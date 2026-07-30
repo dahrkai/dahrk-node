@@ -6,6 +6,35 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **A Claude stage can now use an Anthropic subscription (Claude Pro/Max), not just an API key.** A
+  brokered auth profile carries an API key in the job's runtime environment, but a subscription has no
+  environment variable to carry a secret: its token arrives as an OAuth hint instead. The Claude
+  adapter never read that hint, so binding a node pool to a Claude Pro/Max profile credentialled
+  nothing at all, and the stage silently fell through to whatever login happened to exist on the host.
+  The adapter now applies the subscription's live access token to the runtime subprocess, where the
+  agent's own tool calls never see it, and a profile that offers only a subscription for some other
+  provider now fails immediately with a message naming the misbinding rather than running
+  unauthenticated.
+
+- **A node stops advertising a runtime once the provider has refused its login.** Detection could only
+  ask whether a login existed on the host, which a revoked token satisfies perfectly well, so a node
+  with a dead credential kept accepting work and failing every job on its first turn at no cost. The
+  node now remembers a refusal reported by an actual stage and withholds that runtime until a stage
+  authenticates again, so re-authenticating brings it back with no restart. `dahrk doctor` names both
+  the cause and the remedy.
+
+### Fixed
+
+- **A credential the provider refused is no longer reported as the agent failing its task.** An
+  expired or revoked login, and an account that has hit its configured spend cap, both surfaced as a
+  bare stage failure that read as though the agent had done something wrong. Neither is, and no change
+  to a prompt or a workflow can fix either. Both are now attributed to configuration, and the stage
+  summary carries the provider's own words, so the run says plainly that the credential needs
+  attention. Throttling (a 429) is unchanged: that is a working credential being rate-limited, and it
+  is still reported as a transient upstream fault.
+
 ## [0.1.29] - 2026-07-30
 
 ### Added

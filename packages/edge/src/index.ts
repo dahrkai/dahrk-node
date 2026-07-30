@@ -29,6 +29,10 @@ export { evaluatePolicies, denyToolRule } from "./policy.js";
 export type { PolicyEvent, PolicyRule } from "./policy.js";
 export { detectRuntimes, probeRuntimeStatuses } from "./detect-runtimes.js";
 export type { CredentialSource, DetectOptions, RuntimeStatus } from "./detect-runtimes.js";
+/** This node's memory of a credential the provider refused, so detection stops advertising a runtime
+ *  whose ambient login is dead (DHK-998). */
+export { credentialLatch, createCredentialLatch } from "./credential-latch.js";
+export type { CredentialLatch } from "./credential-latch.js";
 export { probeHub } from "./hub-probe.js";
 export type { HubProbeOptions, HubProbeResult } from "./hub-probe.js";
 export { createNodeLogger, createNodeLoggerFromEnv, levelFromEnv, fileLevelFromEnv } from "./logger.js";
