@@ -68,7 +68,7 @@ function setup(root: string) {
   return { repo, skill, runner, progress };
 }
 
-function jobOf(repo: string, runtime: "claude-code" | "codex", provision?: ComponentRef[]): JobRequest {
+function jobOf(repo: string, runtime: "claude-code" | "codex" | "pi", provision?: ComponentRef[]): JobRequest {
   return {
     tenantId: "t_default",
     runId: `run-${runtime}`,
@@ -104,6 +104,21 @@ test("a job with no provision runs unchanged (no provision note)", async () => {
     const result = await runner.runJob(jobOf(repo, "claude-code"));
     assert.equal(result.status, "ok");
     assert.equal(progress.some((p) => p.text?.includes("provision:")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Pi job injects a pinned skill by path (0 written, 1 injected)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-ovl-"));
+  try {
+    const { repo, skill, runner, progress } = setup(root);
+    const result = await runner.runJob(jobOf(repo, "pi", [skill.ref]));
+    assert.equal(result.status, "ok");
+    const note = progress.find((p) => p.text?.includes("provision:"));
+    assert.ok(note, "a provision note is surfaced for a Pi job");
+    assert.match(note!.text!, /0 written/);
+    assert.match(note!.text!, /1 injected/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

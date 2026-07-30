@@ -888,11 +888,18 @@ async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: s
   // skills/context-file sections survive - only interactive stages pass it, and only when the stage has an
   // instruction (`buildAppendSystemPromptOverride` returns undefined otherwise, leaving the default intact).
   const appendSystemPromptOverride = buildAppendSystemPromptOverride(appendSystemPrompt);
+  // DHK-979: pinned skills are injected BY PATH, not copied into the worktree. The overlay materialises
+  // each into the verified pack cache and threads the CAS dirs onto the ctx; `additionalSkillPaths` takes
+  // them as arbitrary directories (Pi recurses each to find `SKILL.md`), so a pinned skill is loaded
+  // straight from the cache. Read defensively off the ctx (not yet in `@dahrk/contracts`), the same idiom
+  // as `setup`/`stallMs`; absent/empty -> the field is omitted and the no-components session is unchanged.
+  const injectedSkillPaths = (ctx as RunnerContext & { injectedSkillPaths?: string[] }).injectedSkillPaths;
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
     extensionFactories,
+    ...(injectedSkillPaths && injectedSkillPaths.length > 0 ? { additionalSkillPaths: injectedSkillPaths } : {}),
     ...(appendSystemPromptOverride ? { appendSystemPromptOverride } : {}),
   });
   await resourceLoader.reload();
