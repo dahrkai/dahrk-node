@@ -41,8 +41,10 @@ import {
 } from "../src/claude-adapter.js";
 import {
   createPiRunner,
+  EMBEDDED_PI_CAPABILITIES,
   PI_STAGE_COMPLETE_TOOL,
   type AskUserQuestions,
+  type PiSessionCapabilities,
   type PiSessionLike,
 } from "../src/pi-adapter.js";
 import type { PiEvent } from "../src/pi-mappers.js";
@@ -273,6 +275,8 @@ type PiScriptStep = PiEvent[] | (() => PiEvent[] | Promise<PiEvent[]>);
  *  capture and turn-ceiling abort modelling). */
 class FakePiSession implements PiSessionLike {
   sessionId = "pi-sess-1";
+  /** Stands in for the embedded session, so it declares the same full capability surface (DHK-968). */
+  readonly capabilities: PiSessionCapabilities = EMBEDDED_PI_CAPABILITIES;
   agent = { state: { tools: ["read", "bash", "edit", "write"] as unknown[] } };
   prompts: string[] = [];
   aborted = false;
@@ -761,6 +765,7 @@ const piCase: RuntimeCase = {
     const events: TraceEvent[] = [];
     const throwing: PiSessionLike = {
       sessionId: "pi-throw",
+      capabilities: EMBEDDED_PI_CAPABILITIES,
       subscribe: (l) => {
         l(pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial" } }));
         return () => {};

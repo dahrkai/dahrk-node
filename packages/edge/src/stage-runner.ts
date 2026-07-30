@@ -1182,7 +1182,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
 
         // DHK-983: does the session that just ran pre-block tool calls? The adapters surface this as
         // `enforcesPreExecution` (Claude always true; embedded Pi true once its gate wired; container Pi
-        // false). Read defensively - it is additive over the published `Runner`, the same forward-compat
+        // true too since DHK-981 landed the gate over RPC and DHK-968 made the session declare it). Read
+        // defensively - it is additive over the published `Runner`, the same forward-compat
         // idiom as the Job fields above - and only after the run, so a lazily-opened Pi session has
         // registered its gate. A runner that predates the capability falls back to the old runtime-name
         // proxy, so its behaviour is unchanged.

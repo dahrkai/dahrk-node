@@ -46,17 +46,19 @@
  * Still unsupported on the container path (DHK-982): brokered MCP. The embedded path's extension bridge
  * (`createBrokeredMcpExtension`) assumes an in-process Pi session it can register tools onto; there is no
  * in-process session here, and threading the gateway over RPC is a larger piece of work. A stage that
- * declares brokered MCP servers gets none of them inside the container - a deliberate, documented gap,
- * not a silent one.
+ * declares brokered MCP servers gets none of them inside the container - a deliberate gap, no longer a
+ * silent one: the class declares `capabilities.brokeredMcp = false` (DHK-968), so the runner emits a
+ * `capability-degraded` trace event when a stage needs it rather than dropping the servers unremarked.
  *
  * Degradation (Open Question 1): the RPC session has no `agent` handle, so `summarise`'s
  * tool-denial (which mutates `s.agent.state.tools`) is a no-op here. Accepted for the first cut
- * (meta-loop stages are telemetry-only); `agent` is intentionally omitted from this class.
+ * (meta-loop stages are telemetry-only); `agent` is intentionally omitted from this class, and the gap is
+ * declared as `capabilities.summariseToolDenial = false` rather than left to be discovered at runtime.
  */
 import { StringDecoder } from "node:string_decoder";
 import { parsePiEvent, type PiEvent } from "./pi-mappers.js";
 import { elicitOutcomeReply } from "./elicit-router.js";
-import type { AskUserQuestions, PiSessionLike } from "./pi-adapter.js";
+import type { AskUserQuestions, PiSessionCapabilities, PiSessionLike } from "./pi-adapter.js";
 
 /**
  * A strict LF-only JSONL splitter. `push` accepts a chunk (Buffer or string) and returns the
@@ -163,6 +165,20 @@ const isElicitRequest = (msg: unknown): msg is PiElicitRequest =>
   typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === "elicit_request";
 
 export class PiRpcSession implements PiSessionLike {
+  /**
+   * The container RPC back-end's declared capability surface (DHK-968). The gate, elicitation and cost
+   * all land over RPC (DHK-981/982), so they are `true`; brokered MCP and the summarise turn's tool
+   * denial do not (no in-process session to register tools onto, no `agent` handle), so they are `false`.
+   * DECLARED rather than inferred from method presence, so the runner refuses (gate/elicit) or warns
+   * (MCP) on a gap instead of the old silent `?.` no-op.
+   */
+  readonly capabilities: PiSessionCapabilities = {
+    preExecutionGate: true,
+    elicitation: true,
+    cost: true,
+    brokeredMcp: false,
+    summariseToolDenial: false,
+  };
   #sessionId: string | undefined;
   #listeners: Array<(ev: PiEvent) => void> = [];
   /** Command responses awaited by id (correlated via the optional `id` field). */

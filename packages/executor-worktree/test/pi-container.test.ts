@@ -473,6 +473,49 @@ test("DHK-981 runInteractive elicit over RPC: a structured question reaches emit
   await runner.cancel();
 });
 
+// ---------------------------------------------------------------------------
+// DHK-968: the container path cannot register brokered MCP servers (`PiRpcSession` declares
+// `capabilities.brokeredMcp = false`). A stage that declares them no longer loses them in silence:
+// the runner emits a loud `capability-degraded` trace event and the stage still runs (warn-and-continue).
+// The gate/elicit/cost capabilities DID land over RPC (DHK-981/982), so they are declared supported and
+// a policy-gated container stage does NOT refuse.
+// ---------------------------------------------------------------------------
+
+test("DHK-968: a container stage declaring brokered MCP servers emits a capability-degraded trace event, and still runs", async () => {
+  const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawn([]) });
+  const runner = createPiRunner({ createSession: factory });
+
+  const mcpConfig = {
+    runtime: "pi",
+    interaction: "batch",
+    mcpServers: [{ id: "linear", type: "http", url: "https://mcp.linear.app/mcp" }],
+  } as RunnerContext["config"];
+  const events: TraceEvent[] = [];
+  const result = await runner.runBatch(
+    { ...ctx({ config: mcpConfig }), mcpProxyBaseUrl: "http://127.0.0.1:8931" } as RunnerContext,
+    (e) => events.push(e),
+  );
+
+  const degraded = events.find(
+    (e) => e.type === "error" && (e as Extract<TraceEvent, { type: "error" }>).kind === "capability-degraded",
+  ) as Extract<TraceEvent, { type: "error" }> | undefined;
+  assert.ok(degraded, "the brokered-MCP loss surfaced as a capability-degraded trace event (not only a log)");
+  assert.match(degraded.message, /brokered MCP/, "the event names the dropped capability");
+  assert.equal(result.status, "ok", "warn-and-continue: the stage still runs, just without the MCP servers");
+  await runner.cancel();
+});
+
+test("DHK-968: PiRpcSession declares gate/elicit/cost supported and brokered-MCP/summarise-denial unsupported", async () => {
+  const factory = createContainerPiSession({ image: "dahrk/pi:test", spawn: makeFakeSpawn([]) });
+  const session = await factory(ctx());
+  assert.deepEqual(
+    session.capabilities,
+    { preExecutionGate: true, elicitation: true, cost: true, brokeredMcp: false, summariseToolDenial: false },
+    "the container capability surface is declared, not inferred from method presence",
+  );
+  session.dispose();
+});
+
 test("createIsolatedPiRunner: cancel() triggers docker kill on the active container", async () => {
   const calls: Array<{ cmd: string; args: string[] }> = [];
   let killResolve!: () => void;

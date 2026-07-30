@@ -25,14 +25,17 @@ import {
   piToolCallDecision,
   buildAppendSystemPromptOverride,
   selectPiSessionManager,
+  assertSessionCapabilities,
+  EMBEDDED_PI_CAPABILITIES,
   type AskUserQuestions,
+  type PiSessionCapabilities,
   type PiSessionManagerStatics,
   type PiSessionLike,
   PI_STAGE_COMPLETE_TOOL,
 } from "../src/pi-adapter.js";
 import { makeRunner } from "../src/index.js";
 import { ManagedMailbox } from "../src/mailbox.js";
-import type { PolicyAwareRunnerContext } from "../src/runtime-session.js";
+import type { EmittableEvent, PolicyAwareRunnerContext } from "../src/runtime-session.js";
 
 const traceSchema = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@dahrk/contracts"))), "..", "schemas", "trace.schema.json"), "utf8"));
 const ajv = new Ajv2020({ allErrors: true, strict: false });
@@ -55,6 +58,8 @@ type ScriptStep = PiEvent[] | (() => PiEvent[] | Promise<PiEvent[]>);
  */
 class FakePiSession implements PiSessionLike {
   sessionId = "pi-sess-1";
+  // Stands in for the embedded session, so it declares the full capability surface (DHK-968).
+  readonly capabilities: PiSessionCapabilities = EMBEDDED_PI_CAPABILITIES;
   agent = { state: { tools: ["read", "bash", "edit", "write"] as unknown[] } };
   prompts: string[] = [];
   aborted = false;
@@ -556,6 +561,7 @@ test("runBatch: a prompt() exception (not a Pi SDK error event) emits runtime_er
   const events: TraceEvent[] = [];
   const throwingSession: PiSessionLike = {
     sessionId: "pi-throw",
+    capabilities: EMBEDDED_PI_CAPABILITIES,
     subscribe: (l) => {
       // Fire a partial event before the throw so we confirm it was received.
       l(pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial" } }));
@@ -866,30 +872,91 @@ test("DHK-504 piToolCallDecision: a ctx without authorizeToolUse passes through 
   assert.equal(decision, undefined);
 });
 
-test("DHK-504 runBatch gate: a session without setToolCallGate runs without error (optional seam backward compat)", async () => {
-  // A minimal session that lacks setToolCallGate (an older or batch-only session). The adapter must
-  // silently skip gate wiring, not throw, even when a policy would deny.
-  const listeners: Array<(e: PiEvent) => void> = [];
-  const minimalSession: PiSessionLike = {
-    sessionId: "min-1",
-    subscribe(l) { listeners.push(l); return () => {}; },
-    async prompt() {
-      for (const l of listeners) {
-        l(pe({ type: "agent_start" }));
-        l(pe({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "done" } }));
-        l(pe({ type: "agent_end", messages: [{ stopReason: "stop" }] }));
-      }
-    },
+test("DHK-968 runBatch gate: a policy-gated session that cannot pre-block REFUSES loudly, never runs ungated", async () => {
+  // A session declaring `preExecutionGate: false` (the container's pre-DHK-981 shape, or a future stub
+  // that under-declares). Under a policy that would deny, the adapter must REFUSE - not silently skip
+  // the gate and run, the old behaviour DHK-968 reverses. It also never opens the stage's first turn,
+  // and it disposes the session it opened so nothing is leaked.
+  let disposed = false;
+  let prompted = false;
+  const ungatedSession: PiSessionLike = {
+    sessionId: "ungated-1",
+    capabilities: { ...EMBEDDED_PI_CAPABILITIES, preExecutionGate: false },
+    subscribe() { return () => {}; },
+    async prompt() { prompted = true; },
     async abort() {},
-    dispose() {},
-    // setToolCallGate intentionally absent — models an older session shape
+    dispose() { disposed = true; },
+    // setToolCallGate intentionally absent — models a session that genuinely cannot gate
   };
   const authorizeToolUse = (): PolicyOutcome => ({ verdict: "deny", policy: "fs_confine", reason: "escape" });
-  const result = await createPiRunner({ createSession: async () => minimalSession }).runBatch(
-    { ...ctx(), authorizeToolUse } as RunnerContext,
-    () => {},
+  await assert.rejects(
+    () => createPiRunner({ createSession: async () => ungatedSession }).runBatch(
+      { ...ctx(), authorizeToolUse } as RunnerContext,
+      () => {},
+    ),
+    /pre-execution tool gate.*preExecutionGate=false/s,
+    "a policy-gated stage refuses on a session that cannot pre-block, rather than running ungated",
   );
-  assert.equal(result.status, "ok", "missing setToolCallGate does not crash the adapter");
+  assert.equal(prompted, false, "the stage never reached its first turn");
+  assert.equal(disposed, true, "the refused session was disposed, not leaked");
+});
+
+// ---------------------------------------------------------------------------
+// DHK-968: the pure refuse-or-warn decision. Where the line sits - gate/elicitation refuse,
+// cost/model/brokered-MCP warn - is asserted directly against `assertSessionCapabilities`.
+// ---------------------------------------------------------------------------
+
+const mcpCtx = (caps: { over?: Partial<RunnerContext> } = {}): RunnerContext =>
+  ({
+    ...ctx({
+      config: {
+        runtime: "pi",
+        interaction: "batch",
+        mcpServers: [{ id: "linear", type: "http", url: "https://mcp.linear.app/mcp" }],
+      } as RunnerContext["config"],
+    }),
+    mcpProxyBaseUrl: "http://127.0.0.1:8931",
+    ...caps.over,
+  }) as RunnerContext;
+
+test("DHK-968 assertSessionCapabilities: an interactive elicitation gap refuses (security-critical)", () => {
+  const caps: PiSessionCapabilities = { ...EMBEDDED_PI_CAPABILITIES, elicitation: false };
+  const interactive = { ...ctx(), emitElicit: () => {} } as RunnerContext;
+  assert.throws(
+    () => assertSessionCapabilities(caps, interactive, true, () => {}),
+    /structured elicitation.*elicitation=false/s,
+    "an interactive stage that could ask a question refuses on a session that cannot elicit",
+  );
+});
+
+test("DHK-968 assertSessionCapabilities: an elicitation gap does NOT refuse a batch stage (batch cannot elicit)", () => {
+  const caps: PiSessionCapabilities = { ...EMBEDDED_PI_CAPABILITIES, elicitation: false };
+  assert.doesNotThrow(() => assertSessionCapabilities(caps, ctx(), false, () => {}));
+});
+
+test("DHK-968 assertSessionCapabilities: a brokered-MCP gap WARNS with a capability-degraded trace event, never a throw", () => {
+  const caps: PiSessionCapabilities = { ...EMBEDDED_PI_CAPABILITIES, brokeredMcp: false };
+  const events: EmittableEvent[] = [];
+  assert.doesNotThrow(() => assertSessionCapabilities(caps, mcpCtx(), false, (e) => events.push(e)));
+  const degraded = events.find((e) => e.type === "error") as Extract<EmittableEvent, { type: "error" }> | undefined;
+  assert.ok(degraded, "a degradation trace event was emitted, not just a log");
+  assert.equal(degraded.kind, "capability-degraded");
+  assert.match(degraded.message, /brokered MCP/);
+  assert.match(degraded.message, /1 declared MCP server/);
+});
+
+test("DHK-968 assertSessionCapabilities: brokered-MCP gap is silent when the stage declares no MCP servers", () => {
+  const caps: PiSessionCapabilities = { ...EMBEDDED_PI_CAPABILITIES, brokeredMcp: false };
+  const events: EmittableEvent[] = [];
+  assert.doesNotThrow(() => assertSessionCapabilities(caps, ctx(), false, (e) => events.push(e)));
+  assert.equal(events.length, 0, "no degradation when the capability is not needed");
+});
+
+test("DHK-968 assertSessionCapabilities: a full-surface session neither refuses nor warns", () => {
+  const events: EmittableEvent[] = [];
+  const full = { ...mcpCtx(), authorizeToolUse: () => ({ verdict: "allow", policy: "none" }), emitElicit: () => {} } as RunnerContext;
+  assert.doesNotThrow(() => assertSessionCapabilities(EMBEDDED_PI_CAPABILITIES, full, true, (e) => events.push(e)));
+  assert.equal(events.length, 0, "no degradation events when every capability is present");
 });
 
 test("DHK-504 runInteractive gate: a policy-violating tool call in a human turn is blocked before execution", async () => {
