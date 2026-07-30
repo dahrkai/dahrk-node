@@ -828,11 +828,14 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           };
         };
 
-        // Component provisioning: overlay the run's pinned skills/commands/agents into the
-        // worktree `.claude/` before the runner starts, normalised per runtime (Claude writes files
-        // with repo-local precedence; Codex warns and skips). Idempotent, so re-dispatch on the sticky
-        // worktree is safe. Fail closed: a missing pinned component is a correctness problem, not
-        // cosmetic, so a materialise/overlay error fails the stage rather than running without it.
+        // Component provisioning: project the run's pinned skills/commands/agents into the worktree
+        // before the runner starts, normalised per runtime (Claude writes `.claude/` files with
+        // repo-local precedence; Pi injects skills by path, reshapes commands into `.pi/prompts/`, and
+        // warns on subagents; Codex warns and skips). Idempotent, so re-dispatch on the sticky worktree
+        // is safe. Fail closed: a missing pinned component is a correctness problem, not cosmetic, so a
+        // materialise/overlay error fails the stage rather than running without it. Hoisted so the
+        // injected-by-path skill dirs reach the runner ctx below (the Pi adapter's only channel to them).
+        let overlayResult: Awaited<ReturnType<typeof overlayComponents>> | undefined;
         if (deps.packCache && job.provision && job.provision.length > 0) {
           try {
             const overlay = await overlayComponents({
@@ -841,11 +844,12 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
               components: job.provision,
               cache: deps.packCache,
             });
-            const detail = `provision: ${overlay.written.length} written, ${overlay.skippedRepoLocal.length} repo-local, ${overlay.warnings.length} warning(s)`;
+            overlayResult = overlay;
+            const detail = `provision: ${overlay.written.length} written, ${overlay.injected.length} injected, ${overlay.skippedRepoLocal.length} repo-local, ${overlay.warnings.length} warning(s)`;
             streamEvent(
               writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "provision", detail }),
             );
-            // Surface the summary (and any Codex warnings) to the hub so the overlay is observable.
+            // Surface the summary (and any warnings) to the hub so the overlay is observable.
             const noteText = overlay.warnings.length > 0 ? `${detail}; ${overlay.warnings.join("; ")}` : detail;
             deps.sendProgress({ jobId, kind: "observation", ts: nowIso(), text: noteText });
           } catch (e) {
@@ -1069,6 +1073,12 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // runtime defaults to. A plain typed read since `@dahrk/contracts` declares `runtimeAuth` on
           // both `JobRequest` and `RunnerContext`.
           ...(job.runtimeAuth ? { runtimeAuth: job.runtimeAuth } : {}),
+          // DHK-979: pinned skills the overlay injected BY PATH (verified pack-cache dirs, never copied
+          // into the worktree). The Pi adapter reads this off the ctx and hands it to its resource loader
+          // as `additionalSkillPaths`. Carried on a local extended shape since `@dahrk/contracts` does not
+          // declare it yet (the same defensive idiom as `setup` above); omitted when nothing was injected,
+          // so a Claude stage or a Pi stage with no pinned skills is unchanged.
+          ...(overlayResult?.injected.length ? { injectedSkillPaths: overlayResult.injected } : {}),
           // The adapter persists each runtime-native record under the attempt's raw/ sidecar
           // and stamps the rawRef onto the emitted event.
           writeRaw: writer.writeRaw,
