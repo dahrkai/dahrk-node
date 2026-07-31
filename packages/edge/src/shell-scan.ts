@@ -172,7 +172,11 @@ function tokenise(cmd: string): { tokens: Token[]; subshells: string[] } | null 
       i = resume - 1;
       continue;
     }
-    if (/\s/.test(c)) {
+    // `\n` is whitespace too, but it must NOT be swallowed here: it has to fall through to the
+    // control-operator branch below, which turns it into a segment-splitting token so each line is
+    // path-checked on its own. Swallowing it here scans a multi-line command as one segment, fixing
+    // argv0 to the first line and letting a benign leading `echo` wave the rest past (DHK-998).
+    if (/\s/.test(c) && c !== "\n") {
       push();
       continue;
     }
@@ -227,6 +231,10 @@ function tokenise(cmd: string): { tokens: Token[]; subshells: string[] } | null 
       i += 1;
       continue;
     }
+    // `\n` is load-bearing here: it is emitted as an operator token so `scanCommand` splits the
+    // command into per-line segments (its segment-split list lists `"\n"` for exactly this). The
+    // whitespace branch above deliberately lets `\n` through so it reaches this point - do not fold
+    // `\n` back into that branch or multi-line commands stop being segmented (DHK-998).
     if (c === ";" || c === "|" || c === "&" || c === ">" || c === "<" || c === "\n") {
       push();
       tokens.push({ value: c, quoted: false, operator: c });
