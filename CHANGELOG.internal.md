@@ -19,6 +19,10 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-07-31
+
+### Fixed
+
 - [DHK-1004](https://linear.app/skakel/issue/DHK-1004) Ambient host-credential resolution
   (`packages/executor-worktree/src/ambient-claude-auth.ts`). The node reads every credential store it
   knows about (macOS Keychain and `~/.claude/.credentials.json`), picks the freshest unexpired
