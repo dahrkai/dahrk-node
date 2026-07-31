@@ -17,7 +17,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   itself, picking the freshest one that has not expired and passing it to the runtime explicitly, so
   the answer no longer depends on how the node was started. Detection asks the same question, so an
   expired login grounds the runtime instead of advertising one that cannot work, and a node whose
-  stores disagree says so while still running.
+  stores disagree says so while still running. (#152)
 
 ## [0.1.30] - 2026-07-30
 
