@@ -172,6 +172,19 @@ function tokenise(cmd: string): { tokens: Token[]; subshells: string[] } | null 
       i = resume - 1;
       continue;
     }
+    // A `#` at the start of a word opens a comment: skip to the next newline, emit no tokens. Comment
+    // text is DATA, not shell code, exactly like a heredoc body (DHK-394) - an apostrophe, a path, a
+    // backtick or a `$(...)` inside it must not be lexed as live shell (DHK-999). `!started` is the
+    // "start of a word" test, so `ls foo#bar`, a URL fragment and `--pretty=%h#x` keep their `#`.
+    // Quotes and heredoc bodies are consumed by earlier branches, so a `#` inside them never reaches
+    // here. The comment stops AT the newline, not through it, so the `\n` still falls through to the
+    // control-operator branch as the segment-splitting operator it is (DHK-998).
+    if (c === "#" && !started) {
+      let k = i;
+      while (k < cmd.length && cmd[k] !== "\n") k++;
+      i = k - 1;
+      continue;
+    }
     // `\n` is whitespace too, but it must NOT be swallowed here: it has to fall through to the
     // control-operator branch below, which turns it into a segment-splitting token so each line is
     // path-checked on its own. Swallowing it here scans a multi-line command as one segment, fixing

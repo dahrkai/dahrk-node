@@ -162,6 +162,46 @@ test("a heredoc body is data, not shell tokens - it is not path-scanned (DHK-394
   assert.equal(sh("cat ../../etc/passwd <<< hello").verdict, "deny");
 });
 
+test("a `#` comment is data, not shell tokens - it is not lexed as code (DHK-999)", () => {
+  // The bug: `tokenise()` had no notion of a `#` comment, so comment text was lexed as live shell.
+  // An apostrophe opened an unbalanced quote (unparseable -> deny); a path, a backtick or a `$(...)`
+  // was read as a real operand (escape -> deny). A `#` at word start now opens a comment: skipped.
+
+  // The ticket's exact command: `hasn't` in a comment used to open a quote that never closed.
+  const ticket = [
+    "# Check if packages are installed",
+    "ls packages/contracts/node_modules 2>/dev/null | head -20",
+    "# Maybe pnpm hasn't been installed yet",
+    "pnpm install --frozen-lockfile 2>&1 | tail -5",
+  ].join("\n");
+  assert.equal(sh(ticket).verdict, "allow", "an apostrophe in a comment no longer denies the command");
+
+  // A path, a backtick and a `$(...)` inside a comment are prose, not operands.
+  assert.equal(sh("# see /Users/someone-else/notes.md for the format\nls src").verdict, "allow");
+  assert.equal(sh("# use `find /` here\nls src").verdict, "allow");
+  assert.equal(sh("# use $(ls /) here\nls src").verdict, "allow");
+
+  // A trailing comment on a real command.
+  assert.equal(sh("ls src # a note that isn't a problem").verdict, "allow");
+
+  // Boundaries: a mid-word `#` stays an ordinary path-scannable character, and a quoted `#` is literal.
+  assert.equal(sh("ls foo#bar").verdict, "allow");
+  assert.equal(sh("curl -s http://x/y#frag").verdict, "allow");
+  assert.equal(sh("git log --pretty=%h#x").verdict, "allow");
+  assert.equal(sh("echo '#x'").verdict, "allow");
+
+  // A comment on the line before a heredoc does not disturb the body carve-out.
+  assert.equal(sh("# a note\ncat > /tmp/x.mjs <<'EOF'\n// ../../out\nEOF").verdict, "allow");
+
+  // Genuinely unbalanced quoting outside a comment still fails closed.
+  const bad = sh("rg 'unbalanced");
+  assert.equal(bad.verdict, "deny");
+  assert.match(bad.reason ?? "", /could not be parsed/);
+
+  // A real escape hidden after a comment line is still caught - the comment stops at the newline.
+  assert.equal(sh("# a note\ncat /Users/someone-else/notes.md").verdict, "deny");
+});
+
 test("a relative path is judged from the shell's cwd persisted across Bash calls (DHK-394)", () => {
   // Claude's Bash tool keeps its cwd between calls, so a `cd` in call N moves where call N+1 resolves
   // relative paths from. One rule instance, driven with two commands, is how that state is exercised.
