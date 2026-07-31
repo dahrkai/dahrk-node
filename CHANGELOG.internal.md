@@ -19,6 +19,23 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+- [DHK-1004](https://linear.app/skakel/issue/DHK-1004) Ambient host-credential resolution
+  (`packages/executor-worktree/src/ambient-claude-auth.ts`). The node reads every credential store it
+  knows about (macOS Keychain and `~/.claude/.credentials.json`), picks the freshest unexpired
+  credential and passes it to the runtime under `CLAUDE_CODE_OAUTH_TOKEN`, rather than leaving store
+  selection to the subprocess. Diagnosed on runs `run-b9e8b611-b730-4533-beeb-dded4f52c9f4` and
+  `run-4de3fcdc-e81c-49d7-860e-0b09de8756a6`, where a launchd-supervised node read a revoked Keychain
+  token while the file store held a valid one; reproduced under a purpose-built LaunchAgent, with every
+  other variable (binary, environment, HOME, cwd, SDK code path) eliminated first.
+
+  The resolver never refreshes and never writes: the provider rotates the refresh token on every use,
+  so a refresh the node does not persist would strand the credential for whoever owns the store. The
+  same reasoning already governs the brokered subscription path.
+
+  `probeRuntimeStatuses` consumes the same resolver via an injectable `resolveAmbientAuth`, so
+  detection and the stage answer identically, and `baseOpts` in the detection tests stubs it so the
+  suite no longer depends on the developer's own Keychain.
+
 ## [0.1.30] - 2026-07-30
 
 ### Added
