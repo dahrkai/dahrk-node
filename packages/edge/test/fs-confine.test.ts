@@ -72,6 +72,28 @@ test("shell commands that reach outside the worktree are denied", () => {
   }
 });
 
+test("a newline splits a command into segments, as `;` does (DHK-998)", () => {
+  // The bug: a raw `\n` was swallowed as ordinary whitespace, so a multi-line command scanned as ONE
+  // segment. Its argv0 was fixed by the first line, and when that argv0 takes no path operands
+  // (`echo`, `printf`, `:`, `true`, `false`) the whole rest waved through - a silent worktree escape.
+  const outsideWrite = "rm -rf /Users/someone-else/notes.md"; // a write escape
+  const outsideRead = "cat /Users/someone-else/notes.md"; // a read escape
+
+  for (const argv0 of ["echo hi", "printf hi", ":", "true", "false"]) {
+    for (const escape of [outsideWrite, outsideRead]) {
+      // The `;` form was always denied; the `\n` form must now match it.
+      assert.equal(sh(`${argv0}; ${escape}`).verdict, "deny", `semicolon: ${argv0}; ${escape}`);
+      const nl = sh(`${argv0}\n${escape}`);
+      assert.equal(nl.verdict, "deny", `newline: ${argv0}\\n${escape}`);
+      assert.equal(nl.policy, "fs_confine", `${argv0}\\n${escape}`);
+    }
+  }
+
+  // A benign multi-line command is still allowed: each line is in scope, so segmenting changes nothing.
+  assert.equal(sh("echo building\npnpm -s lint && pnpm -s test").verdict, "allow");
+  assert.equal(sh("echo step 1\ngit status\ncat package.json").verdict, "allow");
+});
+
 test("the ordinary commands a build stage runs are NOT mistaken for escapes", () => {
   for (const cmd of [
     "pnpm test",

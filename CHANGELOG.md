@@ -6,6 +6,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **A newline no longer let a command slip past worktree confinement.** Confinement splits a shell
+  command into segments on control operators and path-checks each, but a raw newline was consumed as
+  ordinary whitespace and never became a splitting token, so a multi-line command was scanned as one
+  segment. Its first word decided the verdict for every line, so a benign leading command that takes
+  no path operands (`echo`, `printf`, `:`, `true`, `false`) waved the rest of the command through, and
+  a second line reaching outside the worktree was allowed with no deny and no event. A newline now
+  splits a command exactly as a semicolon does, so each line is checked on its own.
+
 ## [0.1.31] - 2026-07-31
 
 ### Fixed
