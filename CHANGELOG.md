@@ -15,6 +15,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   no path operands (`echo`, `printf`, `:`, `true`, `false`) waved the rest of the command through, and
   a second line reaching outside the worktree was allowed with no deny and no event. A newline now
   splits a command exactly as a semicolon does, so each line is checked on its own.
+- **A `#` comment no longer denies a command it appears in.** Worktree confinement lexes every shell
+  command to path-check its operands, but the lexer had no notion of a `#` comment and read comment
+  text as live shell code. An apostrophe in a comment (`# pnpm hasn't run yet`) opened a quote that
+  never closed, so the command was refused as unparseable; a path, a backtick or a `$(...)` mentioned
+  in a comment was scanned as a real operand and denied as an escape. A `#` at the start of a word now
+  opens a comment that is skipped, exactly as a heredoc body is, while a `#` mid-word (`foo#bar`, a URL
+  fragment, `--pretty=%h#x`) and a quoted `#` stay ordinary characters.
 
 ## [0.1.31] - 2026-07-31
 
