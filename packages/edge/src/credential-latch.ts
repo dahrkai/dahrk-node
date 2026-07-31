@@ -1,20 +1,24 @@
 /**
- * The refused-credential latch: this node's memory of a runtime whose AMBIENT login the provider has
+ * The refused-credential latch: this node's memory of a runtime whose credential the provider has
  * rejected, so it stops advertising a runtime it cannot actually run.
  *
- * WHY A LATCH RATHER THAN A PROBE. Detection asks two questions of each runtime (see
- * `detect-runtimes.ts`): can this process execute it, and can a stage authenticate. For an ambient
- * Claude login the second question has no cheap honest answer. "A credentials file exists" and
- * "`claude --version` answered" are both true of a login the provider revoked hours ago, and the host
- * CLI those probes reach is not even the binary that runs a stage - the Agent SDK spawns its own
- * vendored copy. The only way to learn that a credential is dead is to have one refused, and that is
- * exactly what a failed stage already tells us. So detection does not poll: it remembers.
+ * WHY A LATCH RATHER THAN A PROBE. "Is this credential still good" has no cheap honest answer that
+ * does not involve spending it. A brokered token is live when the hub mints it and can be revoked at
+ * the provider a minute later, with nothing local changing. The only way to learn that a credential is
+ * dead is to have one refused, and that is exactly what a failed stage already tells us. So detection
+ * does not poll: it remembers.
+ *
+ * This is now the ONLY credential signal detection consults. It used to sit alongside a set of host
+ * probes - a credentials file, a responding `claude --version` - each of which was equally true of a
+ * login revoked hours ago, and none of which reached the binary that actually runs a stage (the Agent
+ * SDK spawns its own vendored copy). Those probes are gone with ambient credentials; this remains
+ * because it is evidence rather than inference.
  *
  * The alternative - a liveness probe on the re-detect interval - would have to spend real tokens on a
  * real inference call, on a timer, forever, to answer a question that is almost always "yes". That is
  * a cost with no ceiling for a signal a failing stage hands us for nothing.
  *
- * DHK-998: a revoked ambient OAuth login let a node accept and burn one run per attempt at $0.00,
+ * DHK-998: a revoked OAuth credential let a node accept and burn one run per attempt at $0.00,
  * each billed to the agent, with nothing anywhere saying the credential was the problem.
  */
 import type { Runtime } from "@dahrk/contracts";

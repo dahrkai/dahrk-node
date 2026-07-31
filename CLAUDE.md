@@ -19,8 +19,10 @@ Naming conventions for this repo (summary; the source of truth is `dahrk-hq`):
 - **Nodes.** Client = the installable (this repo); Node = an enrolled running worker. **Managed** node
   (Dahrk-run) vs **self-managed** node (user-run: local machine, Docker, their cloud). Never say
   "unmanaged".
-- **Credentials.** Self-managed nodes default to **ambient credentials** (git config, `gh`, SSH agent;
-  no secrets through Dahrk). **Brokered credentials** (via the Broker) enable containers and CI.
+- **Credentials.** Every credential is **brokered**: the hub mints a short-lived, repo-scoped git token
+  from the GitHub App, opens pull requests itself through that App, and hands the node an inference
+  credential per stage from the AuthProfile bound to its pool. There is no ambient mode; a node never
+  reads the host's SSH key, `gh` login, `claude` login, Keychain, or provider env vars.
 - **Voice.** British English, no em dashes. Amber `#f5a524` is the only brand accent.
 
 ## Contributing: every source change needs a changelog note

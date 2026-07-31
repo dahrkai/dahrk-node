@@ -19,11 +19,12 @@
  *    writes to, is the only arrangement in which that cannot happen. `install` therefore persists the
  *    token before it renders anything. The service still invokes `node <this client's main.js> start` by
  *    absolute path, because launchd/systemd run with a minimal PATH where a bare `dahrk` may not resolve.
- *    For the same reason we snapshot the operator's PATH at install time into the env block, so once
- *    running the node resolves `git` - and can still see the `claude` login - the same way their
- *    interactive shell does. The agent runtimes themselves execute from bundled SDKs and need no PATH,
- *    but on an ambient node a `claude` the daemon cannot see reads as "no credentials", and it serves
- *    no Claude Jobs.
+ *    For the same reason we snapshot the operator's PATH at install time into the env block, so the
+ *    running node resolves `git` the way their interactive shell does. That is now the ONLY thing the
+ *    PATH is for: the agent runtimes execute from bundled SDKs, and no credential is read from the host,
+ *    so which shell installed the service can no longer change what the node is able to serve. It used
+ *    to: a `claude` the daemon could not see read as "no credentials", and the node silently served no
+ *    Claude Jobs.
  *
  * The plan builders (which manager, which file, what content, which loader commands) are pure so they
  * unit-test without a host or a real supervisor; `runServiceInstall` / `runServiceUninstall` are the thin
@@ -90,11 +91,10 @@ export interface PlanInputs {
   name?: string;
   /** Optional hub URL override (DAHRK_HUB_URL); unset lets the client default to wss://api.dahrk.ai. */
   hubUrl?: string;
-  /** PATH to export into the service, so the daemonised node finds `git`, and can still see the
-   *  `claude` CLI that evidences an ambient login, the same way the operator's interactive shell does.
-   *  launchd / systemd run with a minimal PATH that excludes Homebrew / npm-global bins, so without
-   *  this an ambient node would come up, connect, and find no credentials - always-on but serving no
-   *  Jobs. Unset omits it. */
+  /** PATH to export into the service, so the daemonised node finds `git` the way the operator's
+   *  interactive shell does. launchd / systemd run with a minimal PATH that excludes Homebrew /
+   *  npm-global bins, and `git` is the one host tool a run genuinely cannot proceed without. Unset
+   *  omits it. */
   pathEnv?: string;
   homeDir: string;
   /** Directory launchd writes stdout/stderr logs to (systemd uses the journal). */

@@ -664,7 +664,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
               ...((job.workspaceRef as { seedRef?: string }).seedRef
                 ? { seedRef: (job.workspaceRef as { seedRef?: string }).seedRef }
                 : {}),
-              // Brokered git credential for this job; absent on ambient nodes (host creds used).
+              // The git credential the hub minted for this job.
               ...(job.workspaceRef.credentialToken
                 ? { credentialToken: job.workspaceRef.credentialToken }
                 : {}),
@@ -769,7 +769,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         ): Promise<JobResult> => {
           active.delete(jobId);
           turnQueues.delete(jobId);
-          // Feed this node's refused-credential latch (DHK-998), so a dead ambient login stops the
+          // Feed this node's refused-credential latch (DHK-998), so a refused credential stops the
           // node advertising a runtime it cannot run instead of burning one run per attempt at $0.
           // Keyed on the summary the runtime-error classifier writes, not on `failureClass` alone:
           // `config` also covers gaps that say nothing about the INFERENCE credential (an unbound git
@@ -1080,7 +1080,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           ...(gateway ? { mcpProxyBaseUrl: gateway.baseUrl } : {}),
           // brokered inference env for a managed node (no operator login). Every runtime adapter and
           // the container executor apply it as the inference process env, so the raw key is never
-          // surfaced to the agent's own tool calls. Absent on ambient nodes. (This once said "inert
+          // surfaced to the agent's own tool calls. (This once said "inert
           // for the Claude adapter, which uses ambient inference" - untrue since DHK-89 and worth
           // correcting: that adapter reads BOTH this and the `runtimeAuth` hint below.)
           ...(job.runtimeEnv ? { runtimeEnv: job.runtimeEnv } : {}),
@@ -1353,22 +1353,11 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             base: job.base,
             ...(job.workspaceRef.credentialToken ? { credentialToken: job.workspaceRef.credentialToken } : {}),
           });
-          // Ambient nodes only: the hub set `openPr` so the edge best-effort opens the PR here (it holds
-          // the host's `gh` auth), symmetric with the ambient push. Only the clean integration path
-          // pushes (`r.pushed`), so this is a no-op for the noop/conflict/diverged outcomes and `pr`
-          // stays undefined for them. Failure is non-fatal - carried back as prError so the run stays
-          // green on the pushed branch. The deliver/noop/conflict/diverged decision itself is the pure
-          // `resolveDeliverOutcome` (push-outcome.ts).
-          const pr =
-            job.openPr && r.pushed
-              ? await deps.gitService.openPrAmbient(ref, {
-                  branch: job.branch,
-                  base: job.base,
-                  title: job.openPr.title,
-                  body: job.openPr.body,
-                })
-              : undefined;
-          return resolveDeliverOutcome(r, { jobId, branch: job.branch, base: job.base }, pr);
+          // The node never opens the pull request. It used to, whenever the hub judged the run ambient
+          // and set `openPr`: the edge shelled out to the host's `gh` CLI, so PR authorship depended on
+          // a host login and on a credential mode nothing surfaced. The hub opens every PR through the
+          // GitHub App now, on the same installation that authorised this push.
+          return resolveDeliverOutcome(r, { jobId, branch: job.branch, base: job.base });
         } catch (e) {
           return { jobId, status: "fail", summary: `push failed: ${(e as Error).message}` };
         }

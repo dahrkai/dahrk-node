@@ -6,7 +6,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { BackupPushResult, CommitPushResult, OpenPrResult } from "@dahrk/executor-worktree";
+import type { BackupPushResult, CommitPushResult } from "@dahrk/executor-worktree";
 import { resolveBackupOutcome, resolveDeliverOutcome } from "../src/push-outcome.js";
 
 const deliverCtx = { jobId: "job-1", branch: "dahrk/run-7", base: "main" };
@@ -21,7 +21,7 @@ const commit = (over: Partial<CommitPushResult> = {}): CommitPushResult => ({
 });
 
 test("deliver noop: the delta is empty/scratch-only, so it is a successful no-op - nothing pushed, no integration, no PR", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "noop", pushed: false, nothingToCommit: true }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "noop", pushed: false, nothingToCommit: true }), deliverCtx);
   assert.equal(r.status, "ok");
   assert.equal(r.pushed, false);
   assert.equal(r.nothingToCommit, true);
@@ -44,47 +44,33 @@ test("deliver conflict: base advanced and merging it conflicted - still ok (a re
 });
 
 test("deliver conflict without conflictFiles: the field is omitted, not set to undefined", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "conflict", pushed: false }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "conflict", pushed: false }), deliverCtx);
   assert.equal(r.integration, "conflict");
   assert.ok(!("conflictFiles" in r), "conflictFiles is absent when the primitive did not report them");
 });
 
 test("deliver diverged: unrelated history cannot auto-integrate - a real fail, not an ok conflict", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "diverged", pushed: false }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "diverged", pushed: false }), deliverCtx);
   assert.equal(r.status, "fail");
   assert.equal(r.pushed, false);
   assert.equal(r.integration, undefined, "diverged is not forwarded as an integration outcome");
   assert.match(r.summary, /branch history diverged from main; cannot auto-integrate on dahrk\/run-7/);
 });
 
-test("deliver clean with an opened PR: forwards integration + the PR url/number", () => {
-  const pr: OpenPrResult = { prUrl: "https://gh/pr/9", prNumber: 9 };
-  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx, pr);
+test("deliver clean: no PR fields at all - the node does not open pull requests", () => {
+  // It used to forward `prUrl`/`prNumber`/`prError` from its own `gh` invocation on the ambient path.
+  // The hub opens every PR through the GitHub App now, so it already knows the answer and never learns
+  // it from the push result.
+  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx);
   assert.equal(r.status, "ok");
   assert.equal(r.pushed, true);
   assert.equal(r.integration, "clean");
-  assert.equal(r.prUrl, "https://gh/pr/9");
-  assert.equal(r.prNumber, 9);
-  assert.ok(!("prError" in r));
+  assert.ok(!("prUrl" in r) && !("prNumber" in r) && !("prError" in r));
   assert.equal(r.summary, "committed abcdef1 and pushed dahrk/run-7");
 });
 
-test("deliver clean with a non-fatal PR error: forwards prError, no url/number", () => {
-  const pr: OpenPrResult = { prError: "gh not authenticated" };
-  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx, pr);
-  assert.equal(r.status, "ok");
-  assert.equal(r.prError, "gh not authenticated");
-  assert.ok(!("prUrl" in r), "no prUrl when the PR did not open");
-  assert.ok(!("prNumber" in r));
-});
-
-test("deliver clean with no PR requested: no PR fields at all", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx, undefined);
-  assert.ok(!("prUrl" in r) && !("prNumber" in r) && !("prError" in r));
-});
-
 test("deliver absent integration (legacy push-only path) is treated as clean", () => {
-  const r = resolveDeliverOutcome(commit({ integration: undefined }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: undefined }), deliverCtx);
   assert.equal(r.status, "ok");
   assert.equal(r.pushed, true);
   assert.ok(!("integration" in r), "no integration field when the primitive reported none");
@@ -92,12 +78,12 @@ test("deliver absent integration (legacy push-only path) is treated as clean", (
 });
 
 test("deliver clean, nothing to commit but a ref pushed: the 'branch pushed' summary", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "clean", nothingToCommit: true, pushed: true }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "clean", nothingToCommit: true, pushed: true }), deliverCtx);
   assert.equal(r.summary, "no changes to commit; branch pushed");
 });
 
 test("deliver clean, nothing to commit and nothing pushed: the 'nothing pushed' summary", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "clean", nothingToCommit: true, pushed: false }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "clean", nothingToCommit: true, pushed: false }), deliverCtx);
   assert.equal(r.summary, "no changes to commit; nothing pushed");
 });
 
@@ -109,7 +95,7 @@ const footprint = {
 };
 
 test("deliver clean forwards the diff footprint fields onto the PushResult (DHK-615)", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "clean", footprint }), deliverCtx, undefined) as typeof footprint & {
+  const r = resolveDeliverOutcome(commit({ integration: "clean", footprint }), deliverCtx) as typeof footprint & {
     integration?: string;
   };
   assert.deepEqual(r.numstat, { files: 2, added: 4, removed: 1 });
@@ -130,12 +116,12 @@ test("deliver conflict forwards the footprint too (a conflicted merge still deli
 });
 
 test("deliver forwards no footprint fields when the primitive reported none (zero-diff / older edge)", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "clean" }), deliverCtx);
   assert.ok(!("numstat" in r) && !("scope" in r) && !("changedPaths" in r) && !("changedPathsTruncated" in r));
 });
 
 test("deliver noop forwards no footprint fields (nothing was delivered)", () => {
-  const r = resolveDeliverOutcome(commit({ integration: "noop", pushed: false, nothingToCommit: true }), deliverCtx, undefined);
+  const r = resolveDeliverOutcome(commit({ integration: "noop", pushed: false, nothingToCommit: true }), deliverCtx);
   assert.ok(!("numstat" in r) && !("changedPaths" in r));
 });
 

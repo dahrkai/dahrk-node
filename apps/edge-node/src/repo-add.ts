@@ -67,19 +67,19 @@ const httpsFormOf = (r: GitRemote): string => `https://${r.host}/${r.owner}/${r.
 const isHttpsRemote = (url: string): boolean => /^https?:\/\//i.test(url.trim());
 
 /**
- * Choose the git URL form to register, adapting to what the host can authenticate (the ticket's explicit
- * ask - do not blindly assume one protocol):
- *  - An HTTPS origin is registered as-is.
- *  - An SSH origin is kept when the host has an SSH key/agent identity to push with.
- *  - An SSH origin with no key is normalised to canonical HTTPS and flagged `converted`, so the caller
- *    can warn that it made the change. (Real private-clone credential setup stays with DHK-252; this
- *    only picks a sensible URL form.)
- * An unparseable origin is passed through unchanged rather than mangled.
+ * Choose the git URL form to register: always canonical HTTPS.
+ *
+ * A git credential is always brokered by the hub, and a brokered token can only be presented over
+ * HTTPS - the worktree service rewrites `https://` to `https://x-access-token@`, while an scp-style or
+ * `ssh://` remote passes through untouched and silently falls back to whatever key the host holds. So
+ * an SSH origin is normalised and flagged `converted`, whether or not this host has a key: having one
+ * is no longer a reason to keep the SSH form, it is the thing that used to mask the mismatch until a
+ * key rotation broke the clone. An unparseable origin is passed through rather than mangled; the hub
+ * refuses a non-HTTPS URL at registration.
  */
-export function chooseGitUrl(input: { originUrl: string; sshKeyPresent: boolean }): { gitUrl: string; converted: boolean } {
+export function chooseGitUrl(input: { originUrl: string }): { gitUrl: string; converted: boolean } {
   const originUrl = input.originUrl.trim();
   if (isHttpsRemote(originUrl)) return { gitUrl: originUrl, converted: false };
-  if (input.sshKeyPresent) return { gitUrl: originUrl, converted: false };
   const parsed = parseGitRemote(originUrl);
   if (!parsed) return { gitUrl: originUrl, converted: false };
   return { gitUrl: httpsFormOf(parsed), converted: true };

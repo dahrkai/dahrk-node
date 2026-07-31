@@ -9,7 +9,7 @@
  * hub's expectations exactly.
  */
 import type { PushJob, PushResult } from "@dahrk/contracts";
-import type { BackupPushResult, CommitPushResult, OpenPrResult } from "@dahrk/executor-worktree";
+import type { BackupPushResult, CommitPushResult } from "@dahrk/executor-worktree";
 
 /**
  * The backup-push mode `PushJob.mode` carries. Declared on the contract since `@dahrk/contracts@0.6.0`;
@@ -31,7 +31,7 @@ export interface BackupOutcomeContext {
 }
 
 /**
- * Map a `commitAndPush` result (plus any already-opened ambient PR) onto the `PushResult`. The four
+ * Map a `commitAndPush` result onto the `PushResult`. The four
  * integration outcomes are distinct terminal states:
  *  - `noop`: the branch's delta over the base is empty or scratch-only, so the work is already present.
  *    A successful no-op (`ok`, nothing pushed, no PR).
@@ -41,16 +41,13 @@ export interface BackupOutcomeContext {
  *  - `diverged`: the branch and base share no history, so the base can never auto-integrate. Unlike a
  *    content conflict an agent cannot resolve this (the branch needs rebuilding), so it is a real
  *    `fail`.
- *  - clean / absent: the push landed (or found nothing to commit); forward the PR fields if one opened.
+ *  - clean / absent: the push landed (or found nothing to commit).
  *
- * The PR is opened by the caller (it holds the host `gh` auth) only on the clean path (`r.pushed`), so
- * `pr` is `undefined` for every non-clean outcome and this function never needs to gate on it.
+ * The node no longer reports PR fields at all: it used to open the PR itself with the host's `gh` auth
+ * on an ambient run, and forward `prUrl`/`prNumber`/`prError` from here. The hub opens every PR through
+ * the GitHub App now, so it already knows the answer and never learns it from the push result.
  */
-export function resolveDeliverOutcome(
-  r: CommitPushResult,
-  job: DeliverOutcomeContext,
-  pr: OpenPrResult | undefined,
-): PushResult {
+export function resolveDeliverOutcome(r: CommitPushResult, job: DeliverOutcomeContext): PushResult {
   const { jobId, branch, base } = job;
 
   if (r.integration === "noop") {
@@ -101,9 +98,6 @@ export function resolveDeliverOutcome(
     nothingToCommit: r.nothingToCommit,
     commitsAhead: r.commitsAhead,
     ...(r.integration ? { integration: r.integration } : {}),
-    ...(pr?.prUrl ? { prUrl: pr.prUrl } : {}),
-    ...(pr?.prNumber !== undefined ? { prNumber: pr.prNumber } : {}),
-    ...(pr?.prError ? { prError: pr.prError } : {}),
     ...(r.footprint ?? {}),
     summary: r.nothingToCommit
       ? `no changes to commit; ${r.pushed ? "branch pushed" : "nothing pushed"}`

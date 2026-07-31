@@ -58,21 +58,24 @@ test("parseGitRemote: a nested org path (GitLab subgroup) joins all non-last seg
 // -- chooseGitUrl (the SSH-vs-HTTPS decision) --------------------------------
 
 test("chooseGitUrl: an HTTPS origin is kept as-is", () => {
-  assert.deepEqual(chooseGitUrl({ originUrl: "https://github.com/org/repo.git", sshKeyPresent: false }), {
+  assert.deepEqual(chooseGitUrl({ originUrl: "https://github.com/org/repo.git" }), {
     gitUrl: "https://github.com/org/repo.git",
     converted: false,
   });
 });
 
-test("chooseGitUrl: an SSH origin is kept when an SSH key is present", () => {
-  assert.deepEqual(chooseGitUrl({ originUrl: "git@github.com:org/repo.git", sshKeyPresent: true }), {
-    gitUrl: "git@github.com:org/repo.git",
-    converted: false,
+test("chooseGitUrl: an SSH origin is normalised to canonical HTTPS, even with a key present", () => {
+  // Having an SSH key used to be a reason to keep the SSH form. It is now the thing that used to MASK
+  // the mismatch: a brokered token can only ride HTTPS, so an SSH remote quietly fell back to the
+  // host's key until a rotation broke the clone.
+  assert.deepEqual(chooseGitUrl({ originUrl: "git@github.com:org/repo.git" }), {
+    gitUrl: "https://github.com/org/repo.git",
+    converted: true,
   });
 });
 
-test("chooseGitUrl: an SSH origin with no key is normalised to canonical HTTPS and flagged", () => {
-  assert.deepEqual(chooseGitUrl({ originUrl: "git@github.com:org/repo.git", sshKeyPresent: false }), {
+test("chooseGitUrl: an SSH origin is normalised to canonical HTTPS and flagged", () => {
+  assert.deepEqual(chooseGitUrl({ originUrl: "git@github.com:org/repo.git" }), {
     gitUrl: "https://github.com/org/repo.git",
     converted: true,
   });
@@ -80,7 +83,7 @@ test("chooseGitUrl: an SSH origin with no key is normalised to canonical HTTPS a
 
 test("chooseGitUrl: an unparseable SSH-like URL is passed through unchanged, never mangled", () => {
   // A local path or garbage that looks neither HTTPS nor SCP should not be destroyed.
-  assert.deepEqual(chooseGitUrl({ originUrl: "not-a-remote", sshKeyPresent: false }), {
+  assert.deepEqual(chooseGitUrl({ originUrl: "not-a-remote" }), {
     gitUrl: "not-a-remote",
     converted: false,
   });

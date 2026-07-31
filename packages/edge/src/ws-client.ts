@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
-import type { CredentialMode, EdgeToHub, HubToEdge, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
+import type { EdgeToHub, HubToEdge, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, HealthCounters } from "./health.js";
@@ -84,11 +84,6 @@ export interface EdgeOptions {
   reprobeRuntimes?: () => Promise<Runtime[]>;
   /** How often to re-probe runtimes (ms) when `reprobeRuntimes` is set. Default 60000. */
   runtimeRecheckMs?: number;
-  /** Where this node's git credentials come from; advertised to the hub. Default `ambient`. */
-  credentialMode?: CredentialMode;
-  /** True when the operator explicitly set the credential mode. Only then is it sent in the
-   *  `hello` frame as an override; otherwise the hub derives it from the pool and pushes it in `welcome`. */
-  credentialModeExplicit?: boolean;
   /** Stable node id a fleet node presents on connect, so the hub routes Jobs to it and keeps its
    *  crash-recovery flush node-scoped. Omitted = the hub registers it under the default node id. */
   nodeId?: string;
@@ -127,7 +122,7 @@ export interface EdgeOptions {
    *  re-attaches without `--token`) and the name/tenant (so `dahrk status` can name the node without
    *  dialling). Gating on the welcome, rather than on connect, is what keeps a token the hub would
    *  reject from ever reaching the disk. */
-  onEnrolled?: (welcome: { name: string; tenantId: string; credentialMode: CredentialMode }) => void;
+  onEnrolled?: (welcome: { name: string; tenantId: string }) => void;
   /** Abort to stop the node: closes the socket and suppresses the reconnect. For embedders that own
    *  the process lifecycle (and for tests); `main.ts` lets process exit do it. */
   signal?: AbortSignal;
@@ -447,7 +442,6 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       enrolToken: enrolToken ?? "",
       detectedRuntimes: currentRuntimes,
       servesRepoIds: opts.servesRepoIds ?? [],
-      ...(opts.credentialModeExplicit && opts.credentialMode ? { credentialMode: opts.credentialMode } : {}),
       nodeId,
       ...(opts.name ? { name: opts.name } : {}),
       os: osPlatform(),
@@ -556,20 +550,15 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         {
           name: msg.name,
           tenantId: msg.tenantId,
-          credentialMode: msg.credentialMode,
           heartbeatMs: msg.heartbeatMs,
           ...(shipper ? { telemetry: shipper.current() } : {}),
         },
-        `EDGE_WELCOMED:${msg.name} tenant=${msg.tenantId} credentialMode=${msg.credentialMode}`,
+        `EDGE_WELCOMED:${msg.name} tenant=${msg.tenantId}`,
       );
       // The token is now known-good: let the caller cache it. Never fatal - failing to persist only
       // means the next boot needs `--token` again, which must not take down a healthy node.
       try {
-        opts.onEnrolled?.({
-          name: msg.name,
-          tenantId: msg.tenantId,
-          credentialMode: msg.credentialMode,
-        });
+        opts.onEnrolled?.({ name: msg.name, tenantId: msg.tenantId });
       } catch (e) {
         log.warn({ err: e }, `EDGE_ENROL_PERSIST_FAILED ${(e as Error).message}`);
       }
@@ -744,9 +733,8 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       log.info({ hubUrl: opts.hubUrl, nodeId, connectCount }, "EDGE_CONNECTED");
       // Two-way handshake: announce ourselves with the runtimes we detected, our persisted
       // id, and host info; the hub replies `welcome` with our tenant + policy (or closes the socket on a
-      // bad token). `credentialMode` is sent only as an explicit operator override; otherwise the hub
-      // derives it from the pool. `enrolToken` is required but tolerated-absent here so a
-      // misconfigured node still surfaces the hub's ENROL_REQUIRED close rather than crashing locally.
+      // bad token). `enrolToken` is required but tolerated-absent here so a misconfigured node still
+      // surfaces the hub's ENROL_REQUIRED close rather than crashing locally.
       sendHello();
       // re-send the result of every finished-but-maybe-unacknowledged job. If the hub restarted
       // while a result was in flight (or just after), the new process forgot the awakeable mapping; the

@@ -38,7 +38,6 @@ import { runInteractiveLoop, runBatchLoop, maxTurnCeiling } from "./turn-loop.js
 import { ManagedMailbox } from "./mailbox.js";
 import { createStageCompleteTool, type StageCompleteTool } from "./stage-complete-tool.js";
 import { createAskUserQuestionTool, ASK_USER_QUESTION_ALIAS } from "./ask-user-question-tool.js";
-import { resolveAmbientClaudeAuth, type AmbientAuthDeps } from "./ambient-claude-auth.js";
 
 /**
  * Anchor every stage to its worktree. The claude_code preset injects the dynamic
@@ -156,50 +155,25 @@ export function sandboxOptions(ctx: RunnerContext): Partial<Options> {
 }
 
 /**
- * Brokered inference for a credential-less node (DHK-89). A managed / Docker-isolated node has no
- * ambient `claude` login, so the hub mints the provider key into `runtimeEnv` (claude-code ->
- * ANTHROPIC_API_KEY) and delivers it on the Job; the edge threads it onto the RunnerContext. Pass it
- * as the CLI subprocess env so the runtime authenticates. The SDK's `env` REPLACES the inherited
- * environment when set, so spread `process.env` to keep PATH etc. The key rides the child-process env
- * only, never the agent's own tool surface. Absent on ambient nodes -> `{}` -> the SDK inherits
- * process.env (the operator's ambient login), unchanged.
+ * Brokered inference (DHK-89). A node has no login of its own, so the hub mints the provider key into
+ * `runtimeEnv` (claude-code -> ANTHROPIC_API_KEY) or the subscription token onto `runtimeAuth`, and
+ * delivers it on the Job; the edge threads it onto the RunnerContext. Pass it as the CLI subprocess env
+ * so the runtime authenticates. The SDK's `env` REPLACES the inherited environment when set, so spread
+ * `process.env` to keep PATH etc. The key rides the child-process env only, never the agent's own tool
+ * surface.
+ *
+ * There is no ambient branch (DHK-1006). This used to fall back to resolving the HOST's own Claude
+ * login - the macOS Keychain, `~/.claude/.credentials.json` - when the job carried no credential. A
+ * stage now runs on the credential the hub attached or it does not run: returning `{}` here means the
+ * SDK inherits `process.env` and reports its own authentication error, which is the honest outcome for
+ * a job that arrived without one.
  */
-export function runtimeEnvOptions(ctx: RunnerContext, deps: AmbientAuthDeps = {}): Partial<Options> {
+export function runtimeEnvOptions(ctx: RunnerContext): Partial<Options> {
   const auth = runtimeAuthEnv(ctx);
-  // Brokered: the hub decided the credential, so nothing local gets a say.
   if (ctx.runtimeEnv || Object.keys(auth).length > 0) {
     return { env: { ...process.env, ...ctx.runtimeEnv, ...auth } };
   }
-  // Ambient: resolve the host login ourselves rather than letting the subprocess pick a store
-  // (DHK-1004). Absent a resolvable credential we return `{}` exactly as before, so a host that
-  // authenticates some other way is left completely alone.
-  const ambient = ambientAuthEnv(deps);
-  if (Object.keys(ambient).length === 0) return {};
-  return { env: { ...process.env, ...ambient } };
-}
-
-/**
- * The ambient half of the above (DHK-1004): the host's own login, resolved explicitly.
- *
- * Returns `{}` - meaning "change nothing, let the runtime do what it always did" - whenever we have no
- * better answer than the subprocess would reach on its own:
- *
- * - an explicit credential is already in the environment, which the operator set deliberately and
- *   which must outrank anything we discover on disk;
- * - no store holds a usable credential, in which case injecting nothing keeps the existing behaviour
- *   and the runtime reports its own authentication error.
- *
- * When it does resolve, the token rides the child process env under the same var the brokered
- * subscription path uses, so the agent's own tool calls never see it.
- */
-export function ambientAuthEnv(
-  deps: AmbientAuthDeps = {},
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  if (env[CLAUDE_OAUTH_ENV] || env.ANTHROPIC_API_KEY) return {};
-  const resolution = resolveAmbientClaudeAuth(deps);
-  if (!resolution.chosen) return {};
-  return { [CLAUDE_OAUTH_ENV]: resolution.chosen.token };
+  return {};
 }
 
 /** The env var the Claude runtime reads a subscription (Claude Pro/Max) OAuth token from. Distinct
@@ -348,7 +322,7 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     // .claude/ + CLAUDE.md + .mcp.json, which is all section 9 actually requires. Claude auth is
     // keychain/OAuth and independent of settingSources, so dropping "user" does not affect it.
     settingSources: ["project", "local"],
-    // Brokered inference env (DHK-89), for a managed / Docker-isolated node with no ambient login.
+    // Brokered inference env (DHK-89): a node has no login of its own.
     ...runtimeEnvOptions(ctx),
     ...(ctx.config.model ? { model: ctx.config.model } : {}),
     ...(ctx.sessionId ? { resume: ctx.sessionId } : {}),

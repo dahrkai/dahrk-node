@@ -8,8 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildEdgeOptions,
-  isCredentialModeExplicit,
-  resolveCredentialMode,
   resolveNodeId,
   resolveRuntimes,
   DEFAULT_HUB_URL,
@@ -23,7 +21,6 @@ test("ambient edge: no enrolment env leaves the managed fields absent", () => {
   assert.equal(opts.nodeId, undefined);
   assert.equal(opts.enrolToken, undefined);
   assert.equal(opts.tenantId, undefined);
-  assert.equal(opts.credentialMode, "ambient");
   assert.deepEqual(opts.runtimes, ["claude-code"]);
 });
 
@@ -38,7 +35,6 @@ test("managed profile: enrolment + tenant env is passed through", () => {
   assert.equal(opts.nodeId, "node-platform-local");
   assert.equal(opts.enrolToken, "tok-123");
   assert.equal(opts.tenantId, "t_platform");
-  assert.equal(opts.credentialMode, "brokered");
 });
 
 test("the pi runtime is honoured, not silently dropped", () => {
@@ -85,12 +81,6 @@ test("DAHRK_RUNTIMES still overrides the detected set", () => {
   assert.equal(opts.nodeId, "uuid-3");
 });
 
-test("credentialMode is only marked explicit when the operator set it", () => {
-  assert.equal(buildEdgeOptions({ ...base }).credentialModeExplicit, false);
-  assert.equal(buildEdgeOptions({ ...base, DAHRK_CREDENTIAL_MODE: "brokered" }).credentialModeExplicit, true);
-  assert.equal(buildEdgeOptions({ ...base, DAHRK_CREDENTIAL_MODE: "brokered" }).credentialMode, "brokered");
-});
-
 test("DAHRK_NODE_NAME sets the display-name override", () => {
   assert.equal(buildEdgeOptions({ ...base }).name, undefined);
   assert.equal(buildEdgeOptions({ ...base, DAHRK_NODE_NAME: "my-mac" }).name, "my-mac");
@@ -122,33 +112,17 @@ test("resolveRuntimes: env override wins; mock runner skips probing", async () =
 test("resolveRuntimes: the override wins in BOTH credential modes, without probing either", async () => {
   // The override is the operator's escape hatch from everything this module decides - including the
   // credential half. If detection is wrong about their host, pinning must still work.
-  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }, "ambient"), ["pi"]);
-  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }, "brokered"), ["pi"]);
+  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }), ["pi"]);
+  assert.deepEqual(await resolveRuntimes({ DAHRK_RUNTIMES: "pi" }), ["pi"]);
 });
 
-test("resolveRuntimes: a brokered node serves Pi where an ambient one cannot", async () => {
-  // The clean-container case that used to advertise nothing whatever the mode. Asserted as an
-  // invariant rather than as fixed sets, because this call deliberately reads the REAL host (that is
-  // its job) and the developer running the tests may well have a Claude login: the brokered set is
-  // host-independent, the ambient one is not.
-  const env = { PATH: "/nonexistent" };
-  const brokered = await resolveRuntimes(env, "brokered");
-  const ambient = await resolveRuntimes(env, "ambient");
-  assert.deepEqual(brokered, ["claude-code", "pi"], "brokered needs nothing from the host");
-  assert.equal(ambient.includes("pi"), false, "this env carries no provider key, and a `pi` login is not one");
-  assert.equal(
-    ambient.every((r) => brokered.includes(r)),
-    true,
-    "ambient is a subset of brokered: credentials can only ever remove runtimes, never add them",
-  );
-});
-
-test("resolveCredentialMode: brokered only when explicitly asked; anything else is ambient", () => {
-  assert.equal(resolveCredentialMode({ DAHRK_CREDENTIAL_MODE: "brokered" }), "brokered");
-  assert.equal(resolveCredentialMode({ DAHRK_CREDENTIAL_MODE: "ambient" }), "ambient");
-  assert.equal(resolveCredentialMode({}), "ambient", "unset assumes the mode that advertises less");
-  assert.equal(isCredentialModeExplicit({}), false);
-  assert.equal(isCredentialModeExplicit({ DAHRK_CREDENTIAL_MODE: "ambient" }), true);
+test("resolveRuntimes: the advertised set does not depend on the host's logins or PATH", async () => {
+  // The clean-container case. This used to differ by credential mode: a brokered node advertised both
+  // runtimes while an ambient one advertised only what the host could authenticate, so the answer moved
+  // with the developer's own `claude` login. Detection is capability-only now, so an empty PATH and a
+  // credential-free env change nothing.
+  const both = await resolveRuntimes({ PATH: "/nonexistent" });
+  assert.deepEqual(both, ["claude-code", "pi"], "needs nothing from the host but the SDKs");
 });
 
 test("resolveNodeId: --ephemeral mints a throwaway id and never touches disk", () => {

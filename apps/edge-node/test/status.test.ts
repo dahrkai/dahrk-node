@@ -33,7 +33,7 @@ const facts = (over: Partial<StatusFacts> = {}): StatusFacts => ({
   stateFile: "/home/u/.dahrk/node.json",
   state: { nodeId: "node-1", enrolToken: "sket_abc", name: "local-a1", tenantId: "t_default" },
   envToken: false,
-  runtimes: [{ runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host", cliVersion: "1.2.3" }],
+  runtimes: [{ runtime: "claude-code", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }],
   presence: { kind: "running", pid: 42 },
   jobs: [],
   service: { installed: true, running: true, pid: 42 },
@@ -55,7 +55,7 @@ test("the happy path names the node, its tenant, its runtime versions, and that 
   const out = report();
   assert.match(out, /Enrolled\s+local-a1/);
   assert.match(out, /t_default/);
-  assert.match(out, /Runtimes\s+claude-code 1\.2\.3/);
+  assert.match(out, /Runtimes\s+claude-code/);
   assert.match(out, /Work\s+idle/);
 });
 
@@ -240,7 +240,7 @@ function deps(over: Partial<StatusDeps> & { stateDir: string }): StatusDeps {
     platform: "darwin",
     homeDir: "/home/u",
     env: { DAHRK_STATE_DIR: over.stateDir },
-    probeRuntimes: async () => [{ runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host", cliVersion: "1.2.3" }],
+    probeRuntimes: async () => [{ runtime: "claude-code", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }],
     fileExists: () => true,
     capture: () => ({ code: 0, stdout: '\t"PID" = 79747;\n' }),
     lockedPid: () => undefined,
