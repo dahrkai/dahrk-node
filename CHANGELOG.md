@@ -6,6 +6,19 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **A node running as a background service could fail every stage on a login that was perfectly
+  valid.** On macOS the Claude login lives in two stores, and refreshing it rotates the token in one
+  while leaving the other holding a token the provider has since revoked. Which store a process reaches
+  depends on the security session it was started in, so a node started by `launchd` could read the
+  stale copy and fail every stage on its first turn with `401 OAuth access token has been revoked`,
+  while the same login worked perfectly from a terminal. The node now resolves the host credential
+  itself, picking the freshest one that has not expired and passing it to the runtime explicitly, so
+  the answer no longer depends on how the node was started. Detection asks the same question, so an
+  expired login grounds the runtime instead of advertising one that cannot work, and a node whose
+  stores disagree says so while still running.
+
 ## [0.1.30] - 2026-07-30
 
 ### Added

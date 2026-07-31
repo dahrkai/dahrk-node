@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { RunnerContext } from "@dahrk/contracts";
-import { runtimeEnvOptions } from "../src/claude-adapter.js";
+import { runtimeEnvOptions, ambientAuthEnv } from "../src/claude-adapter.js";
 
 const ctx = (over: Partial<RunnerContext> = {}): RunnerContext =>
   ({
@@ -24,8 +24,38 @@ const ctx = (over: Partial<RunnerContext> = {}): RunnerContext =>
     ...over,
   }) as RunnerContext;
 
-test("ambient node (no runtimeEnv): no env option, so the SDK keeps the operator's ambient login", () => {
-  assert.deepEqual(runtimeEnvOptions(ctx()), {});
+/** No host credential anywhere: the pre-DHK-1004 ambient shape, where we add nothing at all. */
+const noHostCredential = { platform: "linux" as const, readFile: () => undefined, readKeychain: () => undefined };
+
+test("ambient node with no resolvable host credential: no env option, so the SDK keeps doing what it always did", () => {
+  assert.deepEqual(runtimeEnvOptions(ctx(), noHostCredential), {});
+});
+
+test("ambient node WITH a host credential: it is resolved and passed explicitly (DHK-1004)", () => {
+  // Before DHK-1004 the adapter passed nothing and let the subprocess choose a credential store. On a
+  // host with two stores that choice depended on the security session the node was started in, so a
+  // launchd node could read a revoked token and fail every stage. Resolving here makes it deterministic.
+  const opts = runtimeEnvOptions(ctx(), {
+    platform: "linux",
+    now: () => 1_000,
+    readFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "sk-host", expiresAt: 9_999_999 } }),
+    readKeychain: () => undefined,
+  });
+  assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, "sk-host", "the resolved host token rides the child env");
+  assert.equal(opts.env?.PATH, process.env.PATH, "and the inherited environment survives");
+});
+
+test("an explicit credential in the environment outranks anything we find on disk", () => {
+  const opts = ambientAuthEnv(
+    {
+      platform: "linux",
+      now: () => 1_000,
+      readFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "sk-disk", expiresAt: 9_999_999 } }),
+      readKeychain: () => undefined,
+    },
+    { CLAUDE_CODE_OAUTH_TOKEN: "sk-operator" },
+  );
+  assert.deepEqual(opts, {}, "the operator set it deliberately; we must not override it");
 });
 
 test("brokered node: the minted provider key is set in env, over an inherited process.env", () => {
@@ -86,7 +116,7 @@ test("ambient node with runtimeAuth but no runtimeEnv: no env option (the hint a
   // Self-managed nodes may carry a hint describing their provider without minting runtime credentials.
   // Absence of runtimeEnv must produce the no-env path, not a broken partial env.
   const hint = { providers: [{ kind: "api_key" as const, provider: "anthropic", envVar: "ANTHROPIC_API_KEY" }] };
-  const opts = runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext);
+  const opts = runtimeEnvOptions({ ...ctx(), runtimeAuth: hint } as RunnerContext, noHostCredential);
   assert.deepEqual(opts, {}, "no runtimeEnv -> no env option, even when runtimeAuth carries a hint");
 });
 

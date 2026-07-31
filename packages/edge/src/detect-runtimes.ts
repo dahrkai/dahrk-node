@@ -33,7 +33,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CredentialMode, Runtime } from "@dahrk/contracts";
-import { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "@dahrk/executor-worktree";
+import {
+  RUNTIME_SDK,
+  canResolveSdk,
+  piAmbientCredentialAvailable,
+  resolveAmbientClaudeAuth,
+  type AmbientAuthDeps,
+  type AmbientAuthResolution,
+} from "@dahrk/executor-worktree";
 import { credentialLatch, type CredentialLatch } from "./credential-latch.js";
 
 /** Where a stage's credentials would come from, or `none` if nothing can authenticate it here. */
@@ -110,6 +117,10 @@ export interface DetectOptions {
   /** This node's refused-credential memory. Defaults to the process-wide latch the stage runner
    *  writes to; injected in tests so a probe never depends on process state. */
   latch?: CredentialLatch;
+  /** Injectable ambient-credential resolution (DHK-1004), so detection is testable without a real host
+   *  login or Keychain. Defaults to the same resolver the Claude adapter authenticates a stage with,
+   *  which is what makes detection's answer and the stage's answer the same answer. */
+  resolveAmbientAuth?: (deps: AmbientAuthDeps) => AmbientAuthResolution;
 }
 
 /** One `<cmd> --version` invocation. Resolves the trimmed first non-empty output line on exit 0;
@@ -187,6 +198,7 @@ export async function probeRuntimeStatuses(opts: DetectOptions = {}): Promise<Ru
   const attempts = opts.attempts ?? DEFAULT_ATTEMPTS;
   const canResolve = opts.canResolve ?? canResolveSdk;
   const latch = opts.latch ?? credentialLatch;
+  const resolveAmbient = opts.resolveAmbientAuth ?? resolveAmbientClaudeAuth;
 
   const ambient = credentialMode === "ambient";
   const [versions, piAmbient] = await Promise.all([
@@ -241,6 +253,25 @@ export async function probeRuntimeStatuses(opts: DetectOptions = {}): Promise<Ru
         detail: `the provider refused this host's ${spec.cmd} login: re-authenticate as the user this node runs as (\`${spec.cmd} auth login\`), or set ${CLAUDE_CREDENTIAL_ENV[1]} in the node service definition`,
       };
     }
+    // An explicit credential in the environment is the operator's own answer and outranks the stores.
+    if (CLAUDE_CREDENTIAL_ENV.some((k) => (env[k] ?? "").trim() !== "")) {
+      return { ...base, credential: "ambient" as const, available: true, detail: "credential in the environment" };
+    }
+    // Otherwise resolve the host login the same way a stage will (DHK-1004), so detection answers "can
+    // this node authenticate" rather than the far weaker "does a login exist somewhere". The detail
+    // carries the store it resolved from, and flags a divergence that would break any process reaching
+    // the other one.
+    const resolved = resolveAmbient({ homeDir: home });
+    if (resolved.chosen) {
+      return { ...base, credential: "ambient" as const, available: true, detail: resolved.detail };
+    }
+    // Stores were found but none is usable (expired). That is a real "cannot authenticate", and saying
+    // so here stops the node advertising a runtime that would fail on its first turn.
+    if (resolved.candidates.length > 0) {
+      return { ...base, credential: "none" as const, available: false, detail: resolved.detail };
+    }
+    // No store we understand, but the host answered the CLI probe: it may be authenticating in a way we
+    // do not model, so preserve the previous behaviour rather than grounding a working node.
     if (hasAmbientClaudeLogin(env, home, cliVersion !== undefined)) {
       return { ...base, credential: "ambient" as const, available: true, detail: "ambient login on this host" };
     }

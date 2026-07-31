@@ -91,6 +91,14 @@ export { REFUSED_CREDENTIAL_SUMMARY } from "./turn-loop.js";
 export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js";
 /** Which SDK each runtime executes through, resolved from the package that actually imports them. */
 export { RUNTIME_SDK, canResolveSdk, piAmbientCredentialAvailable } from "./runtime-sdks.js";
+// DHK-1004: ambient host-credential resolution, shared so detection and the stage answer identically.
+export { resolveAmbientClaudeAuth } from "./ambient-claude-auth.js";
+export type {
+  AmbientAuthDeps,
+  AmbientAuthResolution,
+  AmbientCredential,
+  AmbientCredentialSource,
+} from "./ambient-claude-auth.js";
 /** The Pi runtime adapter: the model-agnostic runtime for the managed node. */
 export { createPiRunner, PI_STAGE_COMPLETE_TOOL, buildBrokeredPiMcpServers, createBrokeredMcpExtension, assertSessionCapabilities, EMBEDDED_PI_CAPABILITIES } from "./pi-adapter.js";
 export type { PiSessionLike, PiSessionCapabilities, PiSessionFactory, PiRunnerDeps, BrokeredPiMcpServer } from "./pi-adapter.js";

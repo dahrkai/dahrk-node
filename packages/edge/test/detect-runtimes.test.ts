@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AmbientAuthResolution } from "@dahrk/executor-worktree";
 import { detectRuntimes, probeRuntimeStatuses, type DetectOptions } from "../src/detect-runtimes.js";
 import { createCredentialLatch } from "../src/credential-latch.js";
 
@@ -31,10 +32,23 @@ function baseOpts(overrides: Partial<DetectOptions> = {}): DetectOptions {
     // Default to "Pi finds no usable provider in this env". Tests that care drive it explicitly; every
     // other test gets a deterministic answer instead of whatever the developer has exported.
     piAmbientCredential: async () => false,
+    // Default to "no host Claude credential anywhere". Without this the resolver would read the real
+    // macOS Keychain of whoever is running the tests, so the suite's answer would depend on the
+    // developer's own login (DHK-1004).
+    resolveAmbientAuth: () => ({ candidates: [], diverged: false, detail: "no ambient Claude login found" }),
     timeoutMs: 2000,
     ...overrides,
   };
 }
+
+/** A resolution standing in for a usable host login, optionally a diverged one. */
+const resolved = (over: Partial<AmbientAuthResolution> = {}): AmbientAuthResolution => ({
+  chosen: { token: "sk-host", source: "file" },
+  candidates: [{ token: "sk-host", source: "file" }],
+  diverged: false,
+  detail: "ambient Claude login resolved from the file store",
+  ...over,
+});
 
 /** Build a temp bin dir holding a passing fake CLI per name, prepend it to PATH, run fn, then clean up
  *  and restore PATH. */
@@ -338,5 +352,73 @@ test("brokered: the latch does not withhold a runtime the hub credentials", asyn
   await withFakeBins([], async () => {
     const statuses = await probeRuntimeStatuses(baseOpts({ credentialMode: "brokered", latch }));
     assert.equal(statuses.find((s) => s.runtime === "claude-code")?.available, true);
+  });
+});
+
+// --- ambient credential resolution (DHK-1004) ---------------------------------------------------
+
+test("ambient: a resolvable host credential advertises claude-code and reports the store it came from", async () => {
+  await withFakeBins([], async () => {
+    const statuses = await probeRuntimeStatuses(
+      baseOpts({ credentialMode: "ambient", resolveAmbientAuth: () => resolved() }),
+    );
+    const claude = statuses.find((s) => s.runtime === "claude-code");
+    assert.equal(claude?.available, true);
+    assert.equal(claude?.credential, "ambient");
+    assert.match(claude?.detail ?? "", /file store/, "the detail names the store, so the answer is explicable");
+  });
+});
+
+test("ambient: an expired host credential grounds the runtime instead of advertising a doomed login", async () => {
+  // The pre-DHK-1004 detection asked only whether a login EXISTED, which an expired or revoked one
+  // satisfies perfectly well. The node then took a Job per attempt and failed each on its first turn.
+  await withFakeBins([], async () => {
+    const statuses = await probeRuntimeStatuses(
+      baseOpts({
+        credentialMode: "ambient",
+        resolveAmbientAuth: () => ({
+          candidates: [{ token: "sk-old", source: "keychain", expiresAt: 1 }],
+          diverged: false,
+          detail: "the ambient Claude login has expired in every store (keychain)",
+        }),
+      }),
+    );
+    const claude = statuses.find((s) => s.runtime === "claude-code");
+    assert.equal(claude?.available, false, "an expired credential is not a credential");
+    assert.equal(claude?.credential, "none");
+    assert.match(claude?.detail ?? "", /expired/);
+  });
+});
+
+test("ambient: a divergence between stores is surfaced even though the stage will run", async () => {
+  await withFakeBins([], async () => {
+    const statuses = await probeRuntimeStatuses(
+      baseOpts({
+        credentialMode: "ambient",
+        resolveAmbientAuth: () =>
+          resolved({ diverged: true, detail: "resolved from the file store; NOTE the keychain store holds a different, older token" }),
+      }),
+    );
+    const claude = statuses.find((s) => s.runtime === "claude-code");
+    assert.equal(claude?.available, true, "we can still run: we resolved a good credential ourselves");
+    assert.match(claude?.detail ?? "", /older token/, "but the operator is told the host needs repairing");
+  });
+});
+
+test("ambient: an explicit credential in the environment outranks the stores and skips resolution", async () => {
+  let resolutions = 0;
+  await withFakeBins([], async () => {
+    const statuses = await probeRuntimeStatuses(
+      baseOpts({
+        credentialMode: "ambient",
+        env: { PATH: process.env.PATH ?? "", ANTHROPIC_API_KEY: "sk-explicit" },
+        resolveAmbientAuth: () => {
+          resolutions += 1;
+          return resolved();
+        },
+      }),
+    );
+    assert.equal(statuses.find((s) => s.runtime === "claude-code")?.available, true);
+    assert.equal(resolutions, 0, "the operator's own answer is not second-guessed against disk");
   });
 });
