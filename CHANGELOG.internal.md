@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
 ### Changed
 
 - DHK-1006: ambient credentials deleted end to end. Removed `ambient-claude-auth.ts` (Keychain +
@@ -28,8 +30,13 @@ this file is left verbatim.
   to a capability probe plus the refused-credential latch: no CLI `--version` probing, no PATH
   dependence, no injected `piAmbientCredential` / `resolveAmbientAuth` seams.
 - `credentialMode` is gone from the wire in both directions (`hello`, `advertise`, `welcome`), so the
-  hub no longer pushes a mode and the node no longer sends or corrects one. Needs a `@dahrk/contracts`
-  release; the node's catalog entry must move with it.
+  hub no longer pushes a mode and the node no longer sends or corrects one. The field's removal from
+  the contract itself lands in `@dahrk/contracts` 0.13.0, which this release does **not** pin: the
+  node stops reading the field here, and the catalog entry moves separately. Shipping on `^0.12.0` is
+  therefore safe rather than provisional, since 0.12.0 still declares the field and the node simply
+  ignores it. The `^0.13.0` bump is prepared on `chore/contracts-0.13.0` and is the confirmation step.
+- `@dahrk/contracts` catalog entry `^0.11.1` -> `^0.12.0`. A caret cannot cross a pre-1.0 minor, so
+  the bump needs a PR; it touches only the catalogue entry and the lockfile.
 - `resolveDeliverOutcome` no longer takes an `OpenPrResult`: the node reports no PR fields at all, since
   the hub opens every PR through the GitHub App.
 
