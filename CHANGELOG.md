@@ -6,6 +6,25 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **A running node now checks for a new release as often as it says it does.** The daemon woke on the
+  same period as the "have we checked recently?" gate, but the timestamp it compares against is written
+  when a check finishes, so every wake arrived a fraction of a second too early, did nothing, and left
+  no record of having done nothing. The real cadence was half the configured one, and a node could sit
+  for ten hours on a six hour interval while reporting itself checked and current. The daemon now wakes
+  several times per interval and the gate tolerates a little clock skew.
+- **`dahrk status` no longer puts a tick on an answer it cannot vouch for.** A cached result was
+  presented as `✔ up to date` for up to four check intervals - a full day at the default. A release
+  published an hour after the last check was reported as "you are current" for the rest of that day.
+  The tick is now reserved for an answer from inside the current interval; an older one is reported
+  with its age instead, and a genuinely stale one still points at `dahrk update --check`.
+- **A failed update check is recorded rather than passing silently.** The check still fails open, but
+  it now notes when it last failed, and the daemon logs the outcome of every check rather than only the
+  ones that found an update. A node whose checks have been timing out for a week no longer looks
+  identical to one that checked a minute ago. The periodic check also gets a longer timeout than the
+  one that runs while an operator waits for a node to start.
+
 ## [0.2.0] - 2026-08-01
 
 ### Changed

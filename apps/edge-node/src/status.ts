@@ -32,6 +32,7 @@ import {
   checkIntervalMs,
   checkSuppressed,
   isStale,
+  isVouchable,
   type UpdateStatus,
 } from "./update-check.js";
 
@@ -240,6 +241,13 @@ function currency(f: StatusFacts): string {
   }
   // `available` already has its own loud line above; here we only date it.
   if (u.kind === "available") return `  ${dim(`(checked ${age})`)}`;
+  // Current, but the answer has outlived the interval it was meant to be refreshed in: report it, do not
+  // bless it. The tick is the claim "we checked"; between one and two intervals we did not, and an
+  // operator reading a tick would stop looking - which is exactly what happened when a release landed two
+  // hours after a ten hour old check and `status` went on saying "up to date".
+  if (!isVouchable(u.checkedAt, f.now, f.updateIntervalMs)) {
+    return `  ${dim(`latest known ${u.latest} (checked ${age})`)}`;
+  }
   return `  ${symbol("ok")} ${dim(`up to date (checked ${age})`)}`;
 }
 

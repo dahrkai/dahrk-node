@@ -105,8 +105,21 @@ test("an available update gets its own line, right under the verdict, where the 
 });
 
 test("being CURRENT is stated positively, and dated - silence used to mean this AND 'no idea'", () => {
-  const out = report({ update: { kind: "current", checkedAt: NOW - 3 * 3600_000 } });
+  const out = report({ update: { kind: "current", checkedAt: NOW - 3 * 3600_000, latest: "0.1.7" } });
   assert.match(out, /Client\s+0\.1\.7\s+.*up to date \(checked 3h ago\)/);
+});
+
+test("the TICK is only for an answer inside the interval - not merely one that is not yet stale", () => {
+  // The reported bug. A 10h old answer under a 6h interval is not stale enough to nag about, but a check
+  // was due four hours ago and did not land, and 0.2.0 shipped in the gap. `status` said "✔ up to date"
+  // throughout. Report the answer and its age; do not put a tick on a claim we cannot make.
+  const out = report({
+    update: { kind: "current", checkedAt: NOW - 10 * 3600_000, latest: "0.1.7" },
+    updateIntervalMs: 6 * 3600_000,
+  });
+  assert.doesNotMatch(out, /up to date/, "a check was due and did not land - we are not vouching for this");
+  assert.match(out, /latest known 0\.1\.7 \(checked 10h ago\)/, "still worth showing, just not blessing");
+  assert.doesNotMatch(out, /to refresh/, "not stale enough to nag about either - that is a louder band");
 });
 
 test("NEVER having checked says so, and names the command that fixes it", () => {
@@ -116,10 +129,10 @@ test("NEVER having checked says so, and names the command that fixes it", () => 
 });
 
 test("a STALE answer is not presented as fact - no tick, and it points at the refresh", () => {
-  // Four intervals past the last check. The registry may have moved several times since; saying "up to
+  // Well past the staleness bound. The registry may have moved several times since; saying "up to
   // date ✔" here would be believed, and would be a guess.
   const out = report({
-    update: { kind: "current", checkedAt: NOW - 30 * 3600_000 },
+    update: { kind: "current", checkedAt: NOW - 30 * 3600_000, latest: "0.1.7" },
     updateIntervalMs: 6 * 3600_000,
   });
   assert.match(out, /as of 1d 6h ago - run `dahrk update --check` to refresh/);

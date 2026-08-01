@@ -53,12 +53,26 @@ export interface NodeState {
    *  that it works offline. */
   updateCheckedAt?: string;
   updateLatest?: string;
+  /** When a check last FAILED (ISO-8601). Written on the fail-open path, which otherwise leaves no trace
+   *  at all: without it, a node whose every check times out is byte-for-byte indistinguishable from one
+   *  that checked a moment ago and is current, and `updateCheckedAt` sits frozen at whenever the last
+   *  success happened. Never consulted to decide whether to check - purely so that a human, or the next
+   *  diagnosis, can see that we have been trying and failing. */
+  updateCheckFailedAt?: string;
 }
 
 /** Does the operator want this node up? See `NodeState.desired`. */
 export type DesiredState = "running" | "stopped";
 
-const STRING_FIELDS = ["nodeId", "enrolToken", "name", "tenantId", "updateCheckedAt", "updateLatest"] as const;
+const STRING_FIELDS = [
+  "nodeId",
+  "enrolToken",
+  "name",
+  "tenantId",
+  "updateCheckedAt",
+  "updateLatest",
+  "updateCheckFailedAt",
+] as const;
 
 /** `desired` is the one field with a closed set of values, so it is validated rather than copied: an
  *  unrecognised value (a hand-edited file, a future client) reads as absent, which falls back to the
