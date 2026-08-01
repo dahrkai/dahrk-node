@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-08-01
+
 ### Changed
 
 - DHK-1006: bump the `@dahrk/contracts` catalog pin to `^0.13.0`, the release that removes

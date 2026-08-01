@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-08-01
+
 ### Changed
 
 - **Every credential now comes from the hub, and the node no longer reads your machine's logins.**
@@ -1200,7 +1202,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.32...HEAD
+[0.1.32]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...v0.1.32
 [0.1.31]: https://github.com/dahrkai/dahrk-node/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...v0.1.29
