@@ -120,23 +120,6 @@ test("resolveWorktreesDir single-sources the base the service exposes for hello 
   }
 });
 
-test("openPrAmbient is non-fatal: an unparseable git URL yields a prError, never throws", async () => {
-  // The ambient PR is best-effort. When owner/repo cannot be derived it must return a reason (so the
-  // run stays green on the pushed branch), not throw and wedge the action.
-  const svc = createGitService({ worktreesDir: "/tmp/none", mirrorsDir: "/tmp/none" });
-  const ref: WorkspaceRef = {
-    repoId: "r",
-    gitUrl: "not-a-url",
-    repo: "r",
-    baseBranch: "main",
-    worktreePath: "/tmp/none",
-    scratchPath: "/tmp/none/.dahrk",
-  };
-  const res = await svc.openPrAmbient(ref, { branch: "dahrk/x", base: "main", title: "t", body: "b" });
-  assert.equal(res.prUrl, undefined);
-  assert.match(res.prError ?? "", /cannot derive owner\/repo/);
-});
-
 test("commitAndPush commits the worktree and pushes the per-issue branch to the remote", async () => {
   const remote = makeBareRemote();
   const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));

@@ -49,7 +49,7 @@ export const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 8;
 
 /** Keys we must NOT redact despite matching a pattern above, because they are the identifiers that
- *  make a log joinable to a hub run. Without this, `credentialMode` (an enum: ambient|brokered) would
+ *  make a log joinable to a hub run. Without this, a short enum-valued field would
  *  be dropped by the "credential" pattern and the log would lose a field we actively want. */
 const KEY_ALLOWLIST = new Set(["credentialmode"]);
 

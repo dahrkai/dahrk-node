@@ -47,7 +47,7 @@ test("checkRuntimes: none available warns, and the warning carries every reason"
 test("checkHub: no url fails; welcome passes; an enrolment rejection still counts as reachable", () => {
   assert.equal(checkHub(undefined, undefined).status, "fail");
 
-  const ok: HubProbeResult = { ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "ambient" };
+  const ok: HubProbeResult = { ok: true, nodeId: "n", name: "x", tenantId: "t_a" };
   assert.equal(checkHub("ws://h", ok).status, "pass");
 
   const rejected: HubProbeResult = { ok: false, reason: "rejected", code: 4401, detail: "bad" };
@@ -60,7 +60,7 @@ test("checkHub: no url fails; welcome passes; an enrolment rejection still count
 test("checkToken: absence fails; validity/expiry mapped from the probe", () => {
   assert.equal(checkToken(false, "ws://h", undefined).status, "fail");
 
-  const ok: HubProbeResult = { ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "ambient" };
+  const ok: HubProbeResult = { ok: true, nodeId: "n", name: "x", tenantId: "t_a" };
   const good = checkToken(true, "ws://h", ok);
   assert.equal(good.status, "pass");
   assert.match(good.detail ?? "", /t_a/);
@@ -111,7 +111,7 @@ test("runDoctor: happy path returns exit 0 and prints a green report", async () 
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
       probeRuntimes: async () => okStatuses,
-      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "ambient" }),
+      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a" }),
       out: (l) => lines.push(l),
     },
   );
@@ -150,42 +150,25 @@ test("runDoctor: with no hub url it never probes and still fails on the missing 
   assert.equal(code, 1);
 });
 
-test("runDoctor: the hub saying `brokered` re-probes, so a container is not told it has no runtimes", async () => {
-  // Doctor cannot know the credential mode before it connects, so it probes as ambient (which on a
-  // credential-less container reports nothing available) and then asks. The hub is the authority.
-  const modes: (string | undefined)[] = [];
+test("runDoctor: runtime detection asks no credential question, so one probe is the answer", async () => {
+  // Doctor used to probe as ambient, ask the hub for the credential mode, and re-probe when they
+  // disagreed - so a credential-less container was not told it had no runtimes, while an operator's
+  // explicit pin was never overwritten. Detection now answers only "is this runtime's SDK resolvable",
+  // which the hub cannot change, so it probes once and there is no pin to respect.
+  let probes = 0;
   const lines: string[] = [];
   await runDoctor(
     { hubUrl: "ws://h:1", token: "sket_good" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
-      probeRuntimes: async (opts) => {
-        modes.push(opts?.credentialMode);
-        return opts?.credentialMode === "brokered"
-          ? [{ runtime: "pi", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }]
-          : [{ runtime: "pi", capable: true, credential: "none", available: false, detail: "needs brokered credentials" }];
+      probeRuntimes: async () => {
+        probes += 1;
+        return [{ runtime: "pi", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }];
       },
-      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "brokered" }),
+      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a" }),
       out: (l) => lines.push(l),
     },
   );
-  assert.deepEqual(modes, ["ambient", "brokered"]);
+  assert.equal(probes, 1, "one probe, no re-probe");
   assert.match(lines.join("\n"), /pi \(brokered credentials from the hub\)/);
-});
-
-test("runDoctor: an operator's pinned credential mode is never re-probed away", async () => {
-  const modes: (string | undefined)[] = [];
-  await runDoctor(
-    { hubUrl: "ws://h:1", token: "sket_good", credentialMode: "ambient" },
-    {
-      nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
-      probeRuntimes: async (opts) => {
-        modes.push(opts?.credentialMode);
-        return okStatuses;
-      },
-      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a", credentialMode: "brokered" }),
-      out: () => {},
-    },
-  );
-  assert.deepEqual(modes, ["ambient"], "a pin is a deliberate choice; the hub does not overwrite it");
 });

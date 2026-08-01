@@ -180,7 +180,7 @@ export function renderStatus(f: StatusFacts): string[] {
     kv(
       "Runtimes",
       available.length > 0
-        ? available.map((r) => (r.cliVersion ? `${r.runtime} ${dim(r.cliVersion)}` : r.runtime)).join(", ")
+        ? available.map((r) => r.runtime).join(", ")
         : dim("none available - this node will serve no Jobs (`dahrk doctor` says why)"),
     ),
   );

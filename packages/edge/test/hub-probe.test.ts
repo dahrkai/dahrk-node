@@ -37,7 +37,6 @@ test("welcome -> ok with tenant and name", async () => {
             nodeId: "dahrk-doctor",
             name: "brave-otter",
             tenantId: "t_acme",
-            credentialMode: "ambient",
             heartbeatMs: 5000,
             allowedRepos: [],
           }),
@@ -49,7 +48,6 @@ test("welcome -> ok with tenant and name", async () => {
       if (r.ok) {
         assert.equal(r.tenantId, "t_acme");
         assert.equal(r.name, "brave-otter");
-        assert.equal(r.credentialMode, "ambient");
       }
     },
   );

@@ -6,6 +6,31 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Changed
+
+- **Every credential now comes from the hub, and the node no longer reads your machine's logins.**
+  Git authenticates with a short-lived, repo-scoped token the hub mints from the GitHub App
+  installation, pull requests are opened by the hub through that same App, and inference authenticates
+  on the credential you connected in the portal. The node no longer consults your SSH key, your `gh`
+  login, your `claude` login, the macOS Keychain, `~/.claude/.credentials.json`, or provider keys in
+  its environment. This removes a class of failure where what a node could do depended on which shell
+  started it, or on a token that had been revoked with nothing local changing.
+- **A node advertises a runtime whenever it can execute it.** Runtime detection used to ask a second
+  question - is there a login on this host a stage could borrow - and withhold a runtime when the
+  answer was no. It now asks only whether the runtime's SDK is installed. The one credential signal
+  that remains is a credential the provider has actually refused, which still withdraws that runtime
+  until a later stage authenticates.
+- **`dahrk repo add` always registers the HTTPS clone URL.** A brokered token can only be presented
+  over HTTPS, so an SSH remote is normalised whether or not this host has a key. Having a key used to
+  keep the SSH form, which is what masked the mismatch until a key rotation broke the clone.
+
+### Removed
+
+- `DAHRK_CREDENTIAL_MODE` (and its `SKAKEL_CREDENTIAL_MODE` alias). There is no longer an ambient mode
+  for it to select.
+- The SSH key, `claude` login and `gh` CLI checks in `dahrk doctor` and `dahrk preflight`. None of them
+  is consulted when a stage runs, so warning about them pointed at the wrong thing.
+
 ### Fixed
 
 - **A newline no longer let a command slip past worktree confinement.** Confinement splits a shell

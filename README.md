@@ -76,12 +76,11 @@ The node works out which runtimes it can actually serve, mints and persists a st
 `~/.dahrk/node.json`, dials out to the hub, and waits for Jobs. It advertises no inbound ports;
 repositories are cloned on demand from each Job's git URL.
 
-A runtime is advertised only when both halves hold: the node can **execute** it (its SDK ships with
-the client, so this is normally a given) and can **credential** it. On a brokered node the hub
-supplies the key, so everything is servable. On an ambient node a stage borrows a login that already
-exists on the host, which works for Claude and never for Pi - a Pi stage runs in a hermetic config
-directory and deliberately never reads `~/.pi`. Run `dahrk doctor` to see the verdict and reason for
-each runtime.
+A runtime is advertised when the node can **execute** it, i.e. when its SDK ships with the client,
+which is normally a given. Credentials are not a second question: the hub supplies them per stage, so
+anything executable is servable. The one exception is a credential the provider has actually refused,
+which withdraws that runtime until a later stage authenticates. Run `dahrk doctor` to see the verdict
+and reason for each runtime.
 
 Only one node runs per machine: they would share this machine's node id and race each other for Jobs, so
 a second `start` refuses rather than dialling the hub twice.
@@ -103,9 +102,9 @@ by hand; `dahrk service uninstall` is how you remove the service entirely, as op
 Because the node id is persisted at `~/.dahrk/node.json`, the service re-attaches as the **same** node
 across restarts - no hand-set `DAHRK_NODE_ID`. The token (and any `--name` / `--hub-url`) is baked into
 the service's environment block, not its command line, so it never shows up in `ps`. Your current `PATH`
-is snapshotted into that block too, so the daemon finds `git` - and, on an ambient node, can still see
-the `claude` login - the same way your shell does. Start the node from a shell where `dahrk doctor`
-already reports what you expect.
+is snapshotted into that block too, so the daemon finds `git` the same way your shell does. That is all
+the PATH is for: no credential is read from the host, so which shell you start the node from cannot
+change what it is able to serve.
 
 - **macOS** writes `~/Library/LaunchAgents/ai.dahrk.node.plist` and loads it with `launchctl`.
 - **Linux** writes `~/.config/systemd/user/dahrk-node.service`, runs `systemctl --user enable --now`, and
@@ -249,10 +248,8 @@ env var.
 | `--name` / `DAHRK_NODE_NAME` | Display-name override (else the hub assigns one). |
 | `DAHRK_RUNTIMES` | Comma list to override runtime auto-detection (`claude-code,pi`). Wins unconditionally. |
 | `DAHRK_REPOS` | Optional self-hosted allowlist of registry repo ids to serve. |
-| `DAHRK_CREDENTIAL_MODE` | `ambient` (host credentials) or `brokered` (hub-brokered tokens). |
 | `DAHRK_NODE_ID` / `DAHRK_TENANT_ID` | Explicit identity overrides (managed profile). |
 | `DAHRK_WORKTREES_DIR` / `DAHRK_MIRRORS_DIR` / `DAHRK_STATE_DIR` | Local paths (default under `~/.dahrk`). |
-| `DAHRK_GIT_TOKEN` | Git credential for ambient-mode clone/push. |
 | `DAHRK_LOG_LEVEL` | Level for stdout (default `info`). The log **file** is written at `debug` regardless - see [`docs/logging.md`](docs/logging.md). |
 | `DAHRK_LOG_FILE_LEVEL` / `DAHRK_LOG_FILE` | Level for `node.jsonl` (default `debug`); set `DAHRK_LOG_FILE=0` to disable the file sink. |
 | `DAHRK_CRASH_EXIT` | Set `1` to exit on an uncaught exception rather than log it and carry on. |

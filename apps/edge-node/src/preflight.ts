@@ -23,7 +23,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants as fsConstants, existsSync, readdirSync, statfsSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, statfsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HubProbeResult } from "@dahrk/edge";
@@ -64,16 +64,15 @@ export interface RepoProbe {
   detail?: string;
 }
 
-/** Which host tools are present. Absence of anything but `git` is a finding, not a floor failure. */
+/** Which host tools are present. Absence of anything but `git` is a finding, not a floor failure.
+ *
+ *  The SSH key, `claude` login and `gh` CLI checks are gone (DHK-1006). Every credential is brokered by
+ *  the hub, so none of them is consulted at run time: git authenticates with a minted installation
+ *  token over HTTPS, the PR is opened hub-side through the GitHub App, and inference authenticates on
+ *  the auth profile bound to this node's pool. Warning about their absence taught the operator to look
+ *  in exactly the wrong place. */
 export interface ToolPresence {
   git: boolean;
-  /** An SSH key the agent can push with (a key file or a loaded agent identity). */
-  sshKey: boolean;
-  /** The `claude` CLI is on PATH. Note this is evidence of an ambient LOGIN, not of the runtime being
-   *  installed: a stage executes the SDK's own bundled binary, never this one. */
-  claude: boolean;
-  /** `gh` is installed (ambient GitHub auth for PR opening). */
-  gh: boolean;
   docker: boolean;
 }
 
@@ -139,17 +138,7 @@ export function checkTools(tools: ToolPresence): CheckResult[] {
     present
       ? { status: "pass", label, detail: "available" }
       : { status: "warn", label, detail: missing };
-  return [
-    git,
-    finding(tools.sshKey, "SSH key", "no key or agent identity found; pushing over SSH will fail"),
-    finding(
-      tools.claude,
-      "Claude login",
-      "no `claude` on PATH; on an ambient node that reads as no credentials, so it serves no Claude stages",
-    ),
-    finding(tools.gh, "gh CLI", "not installed; ambient PR opening is unavailable"),
-    finding(tools.docker, "docker", "not present; container stages are unavailable"),
-  ];
+  return [git, finding(tools.docker, "docker", "not present; container stages are unavailable")];
 }
 
 // -- analyse (deterministic plain-English read) ------------------------------
@@ -250,7 +239,7 @@ export async function runPreflight(inputs: PreflightInputs, deps: Partial<Prefli
     ? await d.probeHub({
         hubUrl: inputs.hubUrl,
         ...(inputs.token ? { enrolToken: inputs.token } : {}),
-        runtimes: host.tools.claude ? ["claude-code"] : [],
+        runtimes: ["claude-code"],
         ...(inputs.clientVersion ? { clientVersion: inputs.clientVersion } : {}),
       })
     : undefined;
@@ -325,22 +314,6 @@ function commandPresent(cmd: string): boolean {
   }
 }
 
-/** A pushable SSH identity exists: a `*.pub` under `~/.ssh`, or a key loaded in the running ssh-agent.
- *  Exported so `dahrk repo add` can make the SSH-vs-HTTPS choice from the same signal preflight uses. */
-export function sshKeyPresent(): boolean {
-  try {
-    const dir = join(homedir(), ".ssh");
-    if (existsSync(dir) && readdirSync(dir).some((f) => f.endsWith(".pub"))) return true;
-  } catch {
-    /* fall through to the agent probe */
-  }
-  try {
-    execFileSync("ssh-add", ["-l"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** Resolve a directory's writability by probing access (W_OK); a missing dir is not writable. */
 function writable(dir: string): boolean {
@@ -427,9 +400,6 @@ export function gatherHostFacts(repoPath: string): HostFacts {
     freeDiskBytes: freeDiskBytes(root),
     tools: {
       git: commandPresent("git"),
-      sshKey: sshKeyPresent(),
-      claude: commandPresent("claude"),
-      gh: commandPresent("gh"),
       docker: commandPresent("docker"),
     },
     repo: probeRepo(repoPath),

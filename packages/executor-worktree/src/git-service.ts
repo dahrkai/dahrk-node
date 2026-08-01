@@ -193,35 +193,13 @@ export interface ReconcileInterruptedResult {
   pushed: boolean;
 }
 
-/** Options for {@link GitService.openPrAmbient}. */
-export interface OpenPrOpts {
-  /** The pushed branch to open the PR from. */
-  branch: string;
-  /** The base branch to target. */
-  base: string;
-  /** The PR title (composed deterministically by the hub). */
-  title: string;
-  /** The PR body (composed deterministically by the hub). */
-  body: string;
-}
-
-/** Outcome of {@link GitService.openPrAmbient}: a PR ref on success, or a non-fatal `prError`. */
-export interface OpenPrResult {
-  /** The opened/existing PR's URL, when one was produced. */
-  prUrl?: string;
-  /** The opened/existing PR's number, when one was produced. */
-  prNumber?: number;
-  /** A non-fatal reason the PR could not be opened (gh missing/unauthed, API error). */
-  prError?: string;
-}
-
 export interface GitService {
   /** Ensure the repo's mirror (clone-on-demand) and add a per-run worktree off it. */
   createWorktree(spec: WorktreeSpec): Promise<WorkspaceRef>;
   /**
    * Stage and commit the worktree changes (if any) and push HEAD to `opts.branch` on the REAL remote
    * (not `origin`/the local mirror). Deterministic side effect for the `open-pr` action; does no
-   * inference. Pushes via the brokered token when given, else ambient host credentials.
+   * inference. Pushes via the brokered token the hub attached to the job.
    */
   commitAndPush(ref: WorkspaceRef, opts: CommitPushOpts): Promise<CommitPushResult>;
   /**
@@ -233,14 +211,6 @@ export interface GitService {
    * force-updated. Returns the preserved sha and the ref it landed on.
    */
   backupPush(ref: WorkspaceRef, opts: BackupPushOpts): Promise<BackupPushResult>;
-  /**
-   * Ambient-node PR fallback: after a successful push, best-effort open (or reuse) the PR via the
-   * host's `gh` CLI, using the host's ambient `gh` auth (or `GH_TOKEN`/`GITHUB_TOKEN`). Symmetric with
-   * the ambient SSH push. Never throws: any failure (gh missing/unauthed, API error) is returned as
-   * `prError`, leaving the already-pushed branch as the deliverable. Brokered nodes do not use this;
-   * the hub opens their PR through the credential broker.
-   */
-  openPrAmbient(ref: WorkspaceRef, opts: OpenPrOpts): Promise<OpenPrResult>;
   /**
    * Make an interrupted run's worktree safe to reuse (DHK-416): preserve whatever the killed agent left
    * uncommitted, then hard-reset the tree back to its last commit.
@@ -356,18 +326,6 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     } catch {
       return false;
     }
-  };
-
-  /** Run the `gh` CLI in `cwd`, returning stdout. Throws on non-zero exit or a missing binary. */
-  const gh = (cwd: string, args: string[]): string =>
-    execFileSync("gh", args, { cwd, stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8" });
-  /** A human-readable reason from a failed `gh` invocation: ENOENT means gh is not installed; a
-   *  non-zero exit carries its stderr (gh's "not authenticated"/API messages land there). */
-  const ghError = (e: unknown): string => {
-    const err = e as { code?: string; stderr?: string | Buffer; message?: string };
-    if (err?.code === "ENOENT") return "gh CLI not installed on this node";
-    const stderr = typeof err?.stderr === "string" ? err.stderr : err?.stderr?.toString();
-    return (stderr?.trim() || err?.message || String(e)).split("\n")[0] ?? String(e);
   };
 
   /**
@@ -1100,61 +1058,6 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       git(worktreePath, ["clean", "-fd", "--exclude", SCRATCH_DIR]);
 
       return { dirty: true, headSha, tailSha, wipRef, pushed };
-    },
-
-    async openPrAmbient(ref, opts) {
-      const ownerRepo = parseOwnerRepo(ref.gitUrl);
-      if (!ownerRepo) return { prError: `cannot derive owner/repo from ${ref.gitUrl}` };
-      const { worktreePath } = ref;
-      const branch = sanitizeBranchName(opts.branch);
-      // Always target the GitHub repo explicitly (`--repo`): a mirror-backed worktree's `origin` may
-      // be the local mirror, not GitHub, so letting gh infer the repo from the remote is unreliable.
-      const repoArgs = ["--repo", ownerRepo];
-      // Read back the PR for this head, so we return a number+url whether we just opened it or it
-      // already existed (idempotent, mirroring the push). Best-effort: a failure yields undefined.
-      const readBack = (): OpenPrResult | undefined => {
-        try {
-          const pr = JSON.parse(gh(worktreePath, ["pr", "view", branch, ...repoArgs, "--json", "number,url"])) as {
-            number?: number;
-            url?: string;
-          };
-          return pr.url
-            ? { prUrl: pr.url, ...(pr.number !== undefined ? { prNumber: pr.number } : {}) }
-            : undefined;
-        } catch {
-          return undefined;
-        }
-      };
-      // The body may be arbitrarily long / contain markdown; pass it via a temp file, never argv.
-      const tmp = mkdtempSync(join(tmpdir(), "dahrk-pr-"));
-      const bodyFile = join(tmp, "body.md");
-      try {
-        writeFileSync(bodyFile, opts.body ?? "");
-        try {
-          gh(worktreePath, [
-            "pr",
-            "create",
-            ...repoArgs,
-            "--head",
-            branch,
-            "--base",
-            opts.base,
-            "--title",
-            opts.title,
-            "--body-file",
-            bodyFile,
-          ]);
-        } catch (e) {
-          // An existing PR for this head is success (re-summons re-run open-pr). Any other failure
-          // (gh missing/unauthed, API error) is non-fatal: surface a reason, keep the pushed branch.
-          const existing = readBack();
-          if (existing) return existing;
-          return { prError: ghError(e) };
-        }
-        return readBack() ?? { prError: "gh pr create reported success but no PR was found" };
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
     },
 
     async teardownWorktree(ref) {

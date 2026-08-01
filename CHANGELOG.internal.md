@@ -19,6 +19,20 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- DHK-1006: ambient credentials deleted end to end. Removed `ambient-claude-auth.ts` (Keychain +
+  `~/.claude/.credentials.json` resolution), `piAmbientCredentialAvailable`, `openPrAmbient` and the
+  `gh` helpers in `git-service.ts`, the `sshKeyPresent` preflight probe, and `DAHRK_CREDENTIAL_MODE`
+  with its `resolveCredentialMode` / `isCredentialModeExplicit` helpers. `detect-runtimes.ts` collapses
+  to a capability probe plus the refused-credential latch: no CLI `--version` probing, no PATH
+  dependence, no injected `piAmbientCredential` / `resolveAmbientAuth` seams.
+- `credentialMode` is gone from the wire in both directions (`hello`, `advertise`, `welcome`), so the
+  hub no longer pushes a mode and the node no longer sends or corrects one. Needs a `@dahrk/contracts`
+  release; the node's catalog entry must move with it.
+- `resolveDeliverOutcome` no longer takes an `OpenPrResult`: the node reports no PR fields at all, since
+  the hub opens every PR through the GitHub App.
+
 ## [0.1.31] - 2026-07-31
 
 ### Fixed

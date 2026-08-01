@@ -33,7 +33,7 @@ export interface HubProbeOptions {
 }
 
 export type HubProbeResult =
-  | { ok: true; nodeId: string; name: string; tenantId: string; credentialMode: string }
+  | { ok: true; nodeId: string; name: string; tenantId: string }
   | { ok: false; reason: "unreachable"; detail: string }
   | { ok: false; reason: "timeout"; detail: string }
   | { ok: false; reason: "rejected"; code: number; detail: string }
@@ -125,13 +125,7 @@ export function probeHub(opts: HubProbeOptions): Promise<HubProbeResult> {
         return; // ignore anything that is not a frame we can parse
       }
       if (msg.type === "welcome") {
-        done({
-          ok: true,
-          nodeId: msg.nodeId,
-          name: msg.name,
-          tenantId: msg.tenantId,
-          credentialMode: msg.credentialMode,
-        });
+        done({ ok: true, nodeId: msg.nodeId, name: msg.name, tenantId: msg.tenantId });
       }
     });
 

@@ -22,7 +22,7 @@
  *
  * Everything remains overridable for power users and the managed profile: `--token` / `--name` /
  * `--hub-url` flags win over the matching `DAHRK_*` env vars (the legacy `SKAKEL_*` names are still
- * accepted as aliases), and `DAHRK_RUNTIMES`, `DAHRK_CREDENTIAL_MODE`, `DAHRK_NODE_ID`,
+ * accepted as aliases), and `DAHRK_RUNTIMES`, `DAHRK_NODE_ID`,
  * `DAHRK_TENANT_ID` still act as explicit overrides.
  */
 import { execFileSync } from "node:child_process";
@@ -46,7 +46,7 @@ import {
   type CredentialSource,
   type EdgeOptions,
 } from "@dahrk/edge";
-import type { CredentialMode, Runtime } from "@dahrk/contracts";
+import type { Runtime } from "@dahrk/contracts";
 import { parseCli, usage, type RepoAddFlags, type RunFlags, type StartFlags } from "./cli.js";
 import { runDiagnose, defaultDiagnoseDeps, defaultBundlePath } from "./diagnose.js";
 import { runDoctor } from "./doctor.js";
@@ -62,7 +62,7 @@ import {
 import { defaultLockDeps, acquireLock, isAlive, parseLock } from "./lock.js";
 import { defaultLogsDeps, parseRecords, rotateIfLarge, runLogs } from "./logs.js";
 import { installProcessSafetyNet, writeCrashRecord } from "./process-safety.js";
-import { probeRepo, runPreflight, sshKeyPresent } from "./preflight.js";
+import { probeRepo, runPreflight } from "./preflight.js";
 import {
   runNodeRestart,
   runNodeStart,
@@ -145,32 +145,17 @@ export function resolveNodeId(env: NodeJS.ProcessEnv, opts: { ephemeral?: boolea
   return nodeId;
 }
 
-/** Did the operator pin the credential mode? An explicit pin is sent in `hello` and, because it is a
- *  deliberate choice, is never overwritten by the mode the hub reports back in `welcome`. */
-export const isCredentialModeExplicit = (env: NodeJS.ProcessEnv): boolean =>
-  env.DAHRK_CREDENTIAL_MODE != null;
-
-/** The credential mode `resolveRuntimes` should assume. `DAHRK_CREDENTIAL_MODE` is the operator's
- *  explicit override; unset means ambient until the hub says otherwise in `welcome`. */
-export function resolveCredentialMode(env: NodeJS.ProcessEnv): CredentialMode {
-  return env.DAHRK_CREDENTIAL_MODE === "brokered" ? "brokered" : "ambient";
-}
-
 /** Resolve the runtimes this node advertises. `DAHRK_RUNTIMES` is an explicit override; otherwise
- *  detect which runtimes this node can both execute and credential, so the hub never routes a Job to
- *  one the node cannot run. The mock runner path (tests / local dev) skips detection entirely.
+ *  detect which runtimes this node can execute, so the hub never routes a Job to one the node cannot
+ *  run. The mock runner path (tests / local dev) skips detection entirely.
  *
- *  `credentialMode` is passed rather than read from env because the hub can correct it: an
- *  unconfigured node boots assuming `ambient` (the safe assumption - it advertises less), learns it is
- *  brokered from `welcome`, and the re-probe seam then re-resolves with the truth. */
-export async function resolveRuntimes(
-  env: NodeJS.ProcessEnv,
-  credentialMode: CredentialMode = resolveCredentialMode(env),
-): Promise<Runtime[]> {
+ *  There is no credential mode to pass any more: detection asks only whether a runtime's SDK resolves
+ *  from here. The hub brokers the credential for whatever it routes. */
+export async function resolveRuntimes(env: NodeJS.ProcessEnv): Promise<Runtime[]> {
   const override = list(env.DAHRK_RUNTIMES).filter(isRuntime);
   if (override.length > 0) return override;
   if ((env.DAHRK_RUNNER ?? "real") === "mock") return ["claude-code"];
-  return detectRuntimes({ credentialMode, env });
+  return detectRuntimes({ env });
 }
 
 /**
@@ -187,11 +172,6 @@ export function buildEdgeOptions(env: NodeJS.ProcessEnv, resolved?: ResolvedBoot
   // (a binding, not a definition); empty = serve any repo, cloning on demand (demoted from the
   // former list of pre-cloned local paths).
   const servesRepoIds = list(env.DAHRK_REPOS);
-  // Credential mode is now pushed from the hub in `welcome`; `DAHRK_CREDENTIAL_MODE` is an explicit
-  // override that is sent in `hello` only when the operator set it. Keep a resolved default for the
-  // legacy advertise path.
-  const credentialModeExplicit = isCredentialModeExplicit(env);
-  const credentialMode = resolveCredentialMode(env);
   // Runtimes: an explicit env list overrides; otherwise use the auto-detected set (may be empty, which
   // is the point - do not advertise a runtime the node cannot run). No `resolved` = legacy default.
   const envRuntimes = list(env.DAHRK_RUNTIMES).filter(isRuntime);
@@ -218,8 +198,6 @@ export function buildEdgeOptions(env: NodeJS.ProcessEnv, resolved?: ResolvedBoot
     hubUrl,
     ...(servesRepoIds.length > 0 ? { servesRepoIds } : {}),
     runtimes,
-    credentialMode,
-    credentialModeExplicit,
     // Identity: the persisted UUID (or an explicit id); the hub assigns a display name unless --name /
     // DAHRK_NODE_NAME overrides it.
     ...(nodeId ? { nodeId } : {}),
@@ -452,12 +430,7 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     supervised: env.DAHRK_SUPERVISED === "1",
   });
   if (token) env.DAHRK_ENROL_TOKEN = token;
-  // The credential mode this node believes it is in. Mutable, because the hub is the authority and only
-  // says so in `welcome` - after `hello` has already advertised. Booting on the env value means an
-  // unconfigured node assumes `ambient`, which is the safe direction: it advertises a subset and then
-  // widens once the hub confirms it is brokered, rather than advertising runtimes it cannot credential.
-  let credentialMode = resolveCredentialMode(env);
-  const runtimes = await resolveRuntimes(env, credentialMode);
+  const runtimes = await resolveRuntimes(env);
   // Compare against the set advertised on the previous boot (persisted in node.json). A runtime that
   // was there last run and is missing now is a degradation worth shouting about - the exact silent
   // failure DHK-390 was about - as distinct from one that was simply never installed. Skipped for an
@@ -499,27 +472,13 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     // and re-advertises when the set changes. Reuses `resolveRuntimes`, so `DAHRK_RUNTIMES` still wins
     // (a pinned override never re-probes to something else) and the mock runner path stays stable.
     //
-    // It reads `credentialMode` fresh on every tick, which is what lets a brokered node correct the
-    // ambient assumption it booted on: `welcome` updates the variable, the next tick re-resolves, and
-    // the edge re-advertises. Bounded by the recheck interval (60s by default), so a brokered node is
-    // briefly under-advertised on first connect rather than wrongly advertised - the safe way round.
-    reprobeRuntimes: () => resolveRuntimes(env, credentialMode),
+    reprobeRuntimes: () => resolveRuntimes(env),
     ...(env.DAHRK_RUNTIME_RECHECK_MS ? { runtimeRecheckMs: Number(env.DAHRK_RUNTIME_RECHECK_MS) } : {}),
     // What this node is running, on disk, so a crash mid-stage does not silently re-run the stage from
     // scratch (DHK-416). Skipped for an ephemeral node for the same reason it never caches a token: a
     // one-shot CI node touches no state dir, and has no next boot to recover into.
     ...(flags.ephemeral ? {} : { jobLedger: fileJobLedger(jobLedgerFile(stateDir(env))) }),
-    // Always hooked, even for an ephemeral node that persists nothing: `welcome` is the only place the
-    // hub states this node's credential mode, and an ephemeral node (CI, a container) is exactly the
-    // shape most likely to be brokered. Persisting the enrolment is the part that stays conditional.
     onEnrolled: (welcome) => {
-      if (welcome.credentialMode !== credentialMode && !isCredentialModeExplicit(env)) {
-        logger.info(
-          { from: credentialMode, to: welcome.credentialMode },
-          `CREDENTIAL_MODE_CORRECTED:${welcome.credentialMode} - re-resolving which runtimes this node can serve`,
-        );
-        credentialMode = welcome.credentialMode;
-      }
       if (persist) persistEnrolment(env, { token, name: welcome.name, tenantId: welcome.tenantId });
     },
     // How a rejected node heals. Reads `node.json` DIRECTLY rather than going through
@@ -612,22 +571,18 @@ function statusDeps(env: NodeJS.ProcessEnv): StatusDeps {
     // The rich probe - the same one `doctor` runs. An explicit DAHRK_RUNTIMES override still wins, and
     // is reported as available-without-a-reason, because a pinned runtime was never probed.
     //
-    // `status` is a purely LOCAL command, so it cannot ask the hub which credential mode this node is
-    // in and reports on the locally-known one. On an unpinned brokered node that understates the set
-    // until `welcome` corrects the running node; `doctor`, which does dial the hub, is the one to
-    // believe.
     probeRuntimes: async () => {
       const override = list(env.DAHRK_RUNTIMES).filter(isRuntime);
       if (override.length > 0) {
         return RUNTIMES.map((r) => ({
           runtime: r,
           capable: override.includes(r),
-          credential: (override.includes(r) ? "ambient" : "none") as CredentialSource,
+          credential: (override.includes(r) ? "brokered" : "none") as CredentialSource,
           available: override.includes(r),
           detail: override.includes(r) ? "pinned by DAHRK_RUNTIMES" : "not in DAHRK_RUNTIMES",
         }));
       }
-      return probeRuntimeStatuses({ credentialMode: resolveCredentialMode(env), env });
+      return probeRuntimeStatuses({ env });
     },
     fileExists: (path) => existsSync(path),
     capture: (argv) => {
@@ -740,7 +695,7 @@ async function runRepoAdd(flags: RepoAddFlags): Promise<number> {
   }
 
   // Choose the URL form the host can authenticate, warning when an SSH remote had to become HTTPS.
-  const { gitUrl, converted } = chooseGitUrl({ originUrl: probe.remoteUrl, sshKeyPresent: sshKeyPresent() });
+  const { gitUrl, converted } = chooseGitUrl({ originUrl: probe.remoteUrl });
   if (converted) {
     uiOut("");
     uiOut(verdict("warn", `No SSH key found on this host, so the SSH remote was registered as HTTPS: ${gitUrl}`));
@@ -813,9 +768,6 @@ async function main(): Promise<void> {
         // the flag/env if given, else the one cached by the last successful enrolment.
         token: resolveEnrolToken(env),
         clientVersion: CLIENT_VERSION,
-        // Only when pinned. Left unset, doctor probes as ambient and then re-probes on whatever the
-        // hub reports, which is how it tells a brokered node the truth about what it can serve.
-        ...(isCredentialModeExplicit(env) ? { credentialMode: resolveCredentialMode(env) } : {}),
       });
       break;
     }
@@ -896,7 +848,6 @@ async function main(): Promise<void> {
           {
             ...(resolveEnrolToken(env) ? { token: resolveEnrolToken(env) as string } : {}),
             hubUrl: env.DAHRK_HUB_URL ?? DEFAULT_HUB_URL,
-            ...(isCredentialModeExplicit(env) ? { credentialMode: resolveCredentialMode(env) } : {}),
           },
           // Stripped: stdout is a TTY here (the operator is watching), so the doctor correctly colours its
           // report - but this copy is going into a JSON file that someone will open in an editor and paste

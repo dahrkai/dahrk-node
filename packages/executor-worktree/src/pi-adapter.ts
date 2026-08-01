@@ -747,7 +747,7 @@ async function defaultCreatePiSession(ctx: RunnerContext, appendSystemPrompt?: s
   assertSdkSymbol("getAgentDir", getAgentDir, ver);
   assertSdkSymbol("resolveCliModel", resolveCliModel, ver);
 
-  // The auth-profile hint (DHK-509) is the sole source of provider identity; absent on ambient nodes.
+  // The auth-profile hint (DHK-509) is the sole source of provider identity.
   const hint = readAuthHint(ctx);
   // A fresh per-stage config dir keeps the stage hermetic - Pi never inherits machine-global ~/.pi auth
   // or models config. The OAuth `auth.json` and any custom-provider `models.json` are written into it
@@ -1041,7 +1041,7 @@ function modelFamily(id: string): string {
  * and it never invents a model - if nothing available matches, the resolution is left exactly as Pi
  * made it so Pi raises its own clear error rather than one we fabricate.
  *
- * With no available models at all (nothing brokered, ambient/self-managed node), this is a no-op:
+ * With no available models at all (nothing brokered onto this job), this is a no-op:
  * Pi resolves against whatever the operator has configured, exactly as before.
  *
  * `fallbackModel` is the LAST resort (the selected auth profile's `defaultModel`), for when the family

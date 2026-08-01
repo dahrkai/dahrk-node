@@ -13,7 +13,6 @@
  * inputs, prints the report, and returns the process exit code (non-zero iff any check FAILED - a WARN
  * alone still passes).
  */
-import type { CredentialMode } from "@dahrk/contracts";
 import type { DetectOptions, HubProbeResult, RuntimeStatus } from "@dahrk/edge";
 import { probeHub as realProbeHub, probeRuntimeStatuses } from "@dahrk/edge";
 import { dim, out as uiOut, symbol, verdict, type Level } from "./ui.js";
@@ -188,8 +187,6 @@ export interface DoctorInputs {
   hubUrl?: string;
   token?: string;
   clientVersion?: string;
-  /** The operator's pinned credential mode, if any. When pinned, the hub's answer does not override it. */
-  credentialMode?: CredentialMode;
 }
 
 /**
@@ -198,9 +195,7 @@ export interface DoctorInputs {
  */
 export async function runDoctor(inputs: DoctorInputs, deps: Partial<DoctorDeps> = {}): Promise<number> {
   const d = { ...defaultDeps(), ...deps };
-  // Probe on the mode we know locally first, because the runtime set is an input to the hub probe.
-  const assumed: CredentialMode = inputs.credentialMode ?? "ambient";
-  let statuses = await d.probeRuntimes({ credentialMode: assumed });
+  const statuses = await d.probeRuntimes({});
 
   const probe = inputs.hubUrl
     ? await d.probeHub({
@@ -211,13 +206,9 @@ export async function runDoctor(inputs: DoctorInputs, deps: Partial<DoctorDeps> 
       })
     : undefined;
 
-  // The hub is the authority on credential mode, and doctor has just asked it. Re-probe when it
-  // disagrees, so a brokered node is not told its runtimes are unavailable for want of a local login
-  // it was never meant to have. An operator's explicit pin still wins - that is what it is for.
-  if (probe?.ok && !inputs.credentialMode && probe.credentialMode !== assumed) {
-    const corrected = probe.credentialMode === "brokered" ? "brokered" : "ambient";
-    statuses = await d.probeRuntimes({ credentialMode: corrected });
-  }
+  // There used to be a re-probe here: the hub was the authority on credential mode, so doctor asked it
+  // and re-ran detection when the local assumption disagreed. Detection no longer asks a credential
+  // question at all - it answers "is this runtime's SDK resolvable" - so the first probe is the answer.
 
   const checks: CheckResult[] = [
     checkNode(d.nodeVersion),
