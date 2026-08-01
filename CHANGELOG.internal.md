@@ -23,6 +23,13 @@ this file is left verbatim.
 
 ### Changed
 
+- DHK-1006: bump the `@dahrk/contracts` catalog pin to `^0.13.0`, the release that removes
+  `credentialMode` from `hello`/`advertise`/`welcome`, `PushJob.openPr`, and the `PushResult` PR
+  fields. The client stopped reading all of them in 6912cbe, so this is the confirmation rather than
+  the migration: it now compiles against a contract where those fields do not exist.
+
+### Changed
+
 - DHK-1006: ambient credentials deleted end to end. Removed `ambient-claude-auth.ts` (Keychain +
   `~/.claude/.credentials.json` resolution), `piAmbientCredentialAvailable`, `openPrAmbient` and the
   `gh` helpers in `git-service.ts`, the `sshKeyPresent` preflight probe, and `DAHRK_CREDENTIAL_MODE`
