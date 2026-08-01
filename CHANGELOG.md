@@ -14,7 +14,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   reconnect". A node now detects how it was installed, tells the hub whether it can drive its own
   upgrade, and if it can, runs the package manager and restarts onto the new build without needing
   anybody at a terminal. An install the client cannot drive (a `curl` install, a source checkout) says
-  so immediately, and the portal shows the command to run by hand instead of waiting.
+  so immediately, and the portal shows the command to run by hand instead of waiting. (#161)
 
 ### Fixed
 
@@ -23,17 +23,17 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   when a check finishes, so every wake arrived a fraction of a second too early, did nothing, and left
   no record of having done nothing. The real cadence was half the configured one, and a node could sit
   for ten hours on a six hour interval while reporting itself checked and current. The daemon now wakes
-  several times per interval and the gate tolerates a little clock skew.
+  several times per interval and the gate tolerates a little clock skew. (#161)
 - **`dahrk status` no longer puts a tick on an answer it cannot vouch for.** A cached result was
   presented as `✔ up to date` for up to four check intervals - a full day at the default. A release
   published an hour after the last check was reported as "you are current" for the rest of that day.
   The tick is now reserved for an answer from inside the current interval; an older one is reported
-  with its age instead, and a genuinely stale one still points at `dahrk update --check`.
+  with its age instead, and a genuinely stale one still points at `dahrk update --check`. (#161)
 - **A failed update check is recorded rather than passing silently.** The check still fails open, but
   it now notes when it last failed, and the daemon logs the outcome of every check rather than only the
   ones that found an update. A node whose checks have been timing out for a week no longer looks
   identical to one that checked a minute ago. The periodic check also gets a longer timeout than the
-  one that runs while an operator waits for a node to start.
+  one that runs while an operator waits for a node to start. (#161)
 
 ## [0.2.0] - 2026-08-01
 
