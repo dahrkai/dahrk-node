@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isDrivableChannel } from "@dahrk/contracts";
 import {
   detectChannel,
   isNewer,
@@ -257,6 +258,17 @@ test("wireChannel: `homebrew` crosses to the wire as `brew`, or a drivable node 
   assert.equal(wireChannel("homebrew"), "brew");
   assert.equal(wireChannel("npm"), "npm");
   assert.equal(wireChannel("unknown"), "unknown");
+
+  // Asserted against the REAL contract, not a copy of its strings: this is the predicate the hub runs on
+  // the ack to decide between driving the upgrade and telling the operator to run it themselves. Every
+  // channel we can actually drive locally must pass it, or the two halves disagree in production only.
+  for (const local of ["npm", "homebrew"] as const) {
+    assert.ok(
+      isDrivableChannel(wireChannel(local)),
+      `the hub would refuse to drive a ${local} install (sent as "${wireChannel(local)}")`,
+    );
+  }
+  assert.equal(isDrivableChannel(wireChannel("unknown")), false, "and an unknown install is never driven");
 });
 
 test("planRemoteUpgrade: a drivable channel accepts, upgrades, and ALWAYS restarts - no TTY needed", async () => {
