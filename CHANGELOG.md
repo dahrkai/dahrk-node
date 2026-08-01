@@ -6,6 +6,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **The node applies an upgrade the hub asks for.** The portal's Update button opens an upgrade request
+  on the hub, but this client had no handler for it: the request was dropped, nothing was acknowledged,
+  and five minutes later the hub gave up and reported a node that had never gone anywhere as "did not
+  reconnect". A node now detects how it was installed, tells the hub whether it can drive its own
+  upgrade, and if it can, runs the package manager and restarts onto the new build without needing
+  anybody at a terminal. An install the client cannot drive (a `curl` install, a source checkout) says
+  so immediately, and the portal shows the command to run by hand instead of waiting.
+
 ### Fixed
 
 - **A running node now checks for a new release as often as it says it does.** The daemon woke on the

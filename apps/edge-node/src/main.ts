@@ -71,7 +71,7 @@ import {
   runServiceUninstall,
   STOP_FOREIGN_NODE,
 } from "./service.js";
-import { fetchLatestVersion, runUpdate, type UpdateDeps } from "./update.js";
+import { fetchLatestVersion, planRemoteUpgrade, runUpdate, type UpdateDeps } from "./update.js";
 import { confirm, hint, isInteractive, kv, out as uiOut, stripAnsi, verdict } from "./ui.js";
 import {
   BACKGROUND_FETCH_TIMEOUT_MS,
@@ -484,6 +484,9 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     onEnrolled: (welcome) => {
       if (persist) persistEnrolment(env, { token, name: welcome.name, tenantId: welcome.tenantId });
     },
+    // The hub-driven upgrade (DHK-1001). The wire client owns the ack and its ordering; everything that
+    // needs a package manager or the supervisor lives here, which is why this is a callback at all.
+    onUpgrade: async ({ target }) => planRemoteUpgrade(target, updateStateDeps(env)),
     // How a rejected node heals. Reads `node.json` DIRECTLY rather than going through
     // `resolveEnrolToken`, and that is the whole point: the disk is where re-enrolment writes, so it is
     // the only place a *newer* token can appear. (Deliberately narrower than boot-time resolution, which
