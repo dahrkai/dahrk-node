@@ -7,7 +7,7 @@ packages:
 # ^0.10.0. A caret on a 0.x version does not cross the minor, so a split like that silently freezes
 # part of the workspace on an older wire protocol. Bump this entry, not the manifests.
 catalog:
-  "@dahrk/contracts": "^0.12.0"
+  "@dahrk/contracts": "^0.13.0"
 
 onlyBuiltDependencies:
   - esbuild
