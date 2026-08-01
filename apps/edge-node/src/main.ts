@@ -71,15 +71,18 @@ import {
   runServiceUninstall,
   STOP_FOREIGN_NODE,
 } from "./service.js";
-import { fetchLatestVersion, runUpdate, type UpdateDeps } from "./update.js";
+import { fetchLatestVersion, planRemoteUpgrade, runUpdate, type UpdateDeps } from "./update.js";
 import { confirm, hint, isInteractive, kv, out as uiOut, stripAnsi, verdict } from "./ui.js";
 import {
+  BACKGROUND_FETCH_TIMEOUT_MS,
+  CHECK_TICKS_PER_INTERVAL,
   checkForUpdate,
   checkIntervalMs,
   checkSuppressed,
   jitterMs,
-  renderUpdateLogLine,
+  renderCheckLogLine,
   renderUpdateNotice,
+  runUpdateCheck,
   type UpdateCheckDeps,
 } from "./update-check.js";
 import { lastConnection, runStatus, type StatusDeps } from "./status.js";
@@ -481,6 +484,9 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     onEnrolled: (welcome) => {
       if (persist) persistEnrolment(env, { token, name: welcome.name, tenantId: welcome.tenantId });
     },
+    // The hub-driven upgrade (DHK-1001). The wire client owns the ack and its ordering; everything that
+    // needs a package manager or the supervisor lives here, which is why this is a callback at all.
+    onUpgrade: async ({ target }) => planRemoteUpgrade(target, updateStateDeps(env)),
     // How a rejected node heals. Reads `node.json` DIRECTLY rather than going through
     // `resolveEnrolToken`, and that is the whole point: the disk is where re-enrolment writes, so it is
     // the only place a *newer* token can appear. (Deliberately narrower than boot-time resolution, which
@@ -542,18 +548,28 @@ async function offerUpdate(env: NodeJS.ProcessEnv): Promise<void> {
 }
 
 /** The daemon half: no prompt, no self-update, just a line in the log so that whoever eventually reads it
- *  (or greps a fleet's logs) can see the node is behind. Jittered, so a thousand nodes booted from one
- *  image do not all ask npm the same question in the same second. */
+ *  (or greps a fleet's logs) can see the node is behind - and, now, that it is still asking at all. Jittered,
+ *  so a thousand nodes booted from one image do not all ask npm the same question in the same second. */
 function scheduleUpdateChecks(env: NodeJS.ProcessEnv): void {
   if (checkSuppressed(env)) return;
-  const deps = updateCheckDeps(env);
+  // Nobody is waiting on the periodic check, so it gets the patient timeout rather than the one sized for
+  // an operator watching a node start.
+  const deps = { ...updateCheckDeps(env), fetchTimeoutMs: BACKGROUND_FETCH_TIMEOUT_MS };
   const tick = async (): Promise<void> => {
-    const available = await checkForUpdate(CLIENT_VERSION, deps);
-    if (available) process.stdout.write(`${renderUpdateLogLine(available)}\n`);
+    const line = renderCheckLogLine(await runUpdateCheck(CLIENT_VERSION, deps));
+    if (line) process.stdout.write(`${line}\n`);
   };
+  const intervalMs = checkIntervalMs(env);
   // unref'd throughout: an update check must never be the reason a node refuses to exit.
   setTimeout(() => void tick(), jitterMs(Math.random())).unref();
-  setInterval(() => void tick(), checkIntervalMs(env)).unref();
+  // `DAHRK_UPDATE_CHECK_INTERVAL_MS=0` means "check on every start", which is a statement about the boot
+  // check above, not an instruction to poll npm as fast as the event loop allows. A repeating timer here
+  // would be a busy loop against the registry (setInterval clamps 0 to 1ms), so there simply is not one.
+  if (intervalMs <= 0) return;
+  // Deliberately NOT `intervalMs`: ticking on the interval always arrives fractionally before the gate
+  // opens (the timestamp is written when the fetch resolves), so every other tick would do nothing and the
+  // real cadence would be half the configured one. See CHECK_TICKS_PER_INTERVAL.
+  setInterval(() => void tick(), Math.max(1, Math.floor(intervalMs / CHECK_TICKS_PER_INTERVAL))).unref();
 }
 
 /** The real IO `dahrk status` runs on: the host, the state file, the supervisor probe, the pidfile, the job

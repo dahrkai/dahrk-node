@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
-import type { EdgeToHub, HubToEdge, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
+import type { EdgeToHub, HubToEdge, InstallChannel, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, HealthCounters } from "./health.js";
@@ -123,6 +123,29 @@ export interface EdgeOptions {
    *  dialling). Gating on the welcome, rather than on connect, is what keeps a token the hub would
    *  reject from ever reaching the disk. */
   onEnrolled?: (welcome: { name: string; tenantId: string }) => void;
+  /**
+   * Apply a hub-driven self-update (DHK-1001/DHK-341). Called when the hub sends an `upgrade` frame to a
+   * node whose operator opted into `portal` upgrades.
+   *
+   * A CALLBACK rather than an implementation here, because upgrading means detecting the install channel,
+   * invoking a package manager, and restarting the service - all of which live in the CLI (`update.ts`,
+   * `service.ts`) and pull in `node:child_process`. This package is the wire client and stays free of
+   * both. Omitted (a library embedding, the tests) = the node reports `accepted:false` with channel
+   * `unknown`, which the hub settles as `manual` - the honest answer for a client that cannot drive its
+   * own upgrade.
+   *
+   * Split into a DECISION and an `apply` thunk on purpose. The ack has to be on the wire before the
+   * package manager runs (see the dispatch), so a single callback that both decided and upgraded would
+   * force the ack to come after tens of seconds of `npm install` and a process-ending restart - which is
+   * to say, usually never. Resolving with the detected `channel`, whether it is `accepted`, and a thunk
+   * the caller invokes afterwards keeps the ordering a property of the code rather than of timing.
+   */
+  onUpgrade?: (req: { target: string; deadlineMs: number }) => Promise<{
+    channel: InstallChannel;
+    accepted: boolean;
+    /** Do the upgrade. Called only when `accepted`, and only after the ack has been sent. */
+    apply?: () => Promise<void>;
+  }>;
   /** Abort to stop the node: closes the socket and suppresses the reconnect. For embedders that own
    *  the process lifecycle (and for tests); `main.ts` lets process exit do it. */
   signal?: AbortSignal;
@@ -197,6 +220,10 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
   let enrolToken = opts.enrolToken;
   /** Consecutive failed reconnects, i.e. the exponent of the backoff. Cleared by a `welcome`. */
   let reconnectAttempts = 0;
+  /** Whether a hub-driven upgrade (DHK-1001) is being applied. Deliberately NOT reset on reconnect: an
+   *  accepted upgrade ends in a restart, so a socket that drops mid-upgrade is the expected path and a
+   *  frame re-sent across it must not start a second package-manager run against the same install. */
+  let upgrading = false;
   /** The poll a parked node runs. Deliberately NOT unref'd: while parked there is no socket and no
    *  heartbeat, so this timer is the only thing holding the event loop open, and it holding the process
    *  alive is the point - an exited node cannot notice that its token was replaced. */
@@ -578,6 +605,62 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // the state you were trying to look at. Still clamped to the local ceiling by the shipper.
       shipper?.setPolicy(msg.telemetry);
       log.info({ telemetry: shipper?.current() ?? msg.telemetry }, `EDGE_POLICY:logs=${shipper?.current().logs ?? msg.telemetry.logs}`);
+      return;
+    }
+    if (msg.type === "upgrade") {
+      // The hub asking an opted-in node to self-update (DHK-1001). Until this existed the frame fell
+      // straight through the dispatch and was dropped: the hub sent it, nothing acked, the node never
+      // restarted, and five minutes later the deadline classified a node that had never left as
+      // "did not reconnect". The portal's Update button could not work, and said so misleadingly.
+      //
+      // ACK BEFORE APPLYING, always. The ack moves the hub `sent -> applying`, and the work that follows
+      // is a package manager: tens of seconds with the socket held open, then a deliberate restart that
+      // takes this process down. An ack sent afterwards would race the restart and frequently never
+      // arrive at all.
+      if (upgrading) {
+        // A re-sent frame for an upgrade already in flight. Dropping it matches how a duplicate job
+        // dispatch is handled: the original attempt still owns the package manager and the restart.
+        log.warn({ target: msg.target }, `UPGRADE_DUPLICATE:${msg.target}`);
+        return;
+      }
+      upgrading = true;
+      log.info({ target: msg.target, deadlineMs: msg.deadlineMs }, `UPGRADE_REQUESTED:${msg.target}`);
+      let result: { channel: InstallChannel; accepted: boolean; apply?: () => Promise<void> };
+      try {
+        // No handler wired (a library embedding, the tests) is not a failure - it is a client that
+        // cannot drive its own upgrade, which is exactly what `accepted:false` means to the hub.
+        result = opts.onUpgrade
+          ? await opts.onUpgrade({ target: msg.target, deadlineMs: msg.deadlineMs })
+          : { channel: "unknown", accepted: false };
+      } catch (e) {
+        // A handler that throws must still ack. Silence here is the failure mode this whole branch
+        // exists to remove: the hub would wait out the deadline and report `gone`, which is a claim
+        // about the node having vanished rather than about an upgrade that errored.
+        log.error({ err: e, target: msg.target }, `UPGRADE_ERROR:${msg.target} ${(e as Error).message}`);
+        result = { channel: "unknown", accepted: false };
+      }
+      send({ type: "upgrade-ack", nodeId: msg.nodeId, channel: result.channel, accepted: result.accepted });
+      log.info(
+        { target: msg.target, channel: result.channel, accepted: result.accepted },
+        `UPGRADE_ACK:${result.accepted ? "applying" : "manual"} channel=${result.channel}`,
+      );
+      if (!result.accepted) {
+        // Nothing is being applied, so let a later frame try again - an operator may fix the install and
+        // retry. An accepted upgrade leaves the latch set: this process is on its way out.
+        upgrading = false;
+        return;
+      }
+      if (result.apply) {
+        try {
+          await result.apply();
+        } catch (e) {
+          // The upgrade failed after we said we would do it. Nothing to un-say - the hub classifies this
+          // by what the node's version is when it next connects, and an unchanged one settles `silent`,
+          // which is precisely the right verdict for "restarted, version did not move".
+          log.error({ err: e, target: msg.target }, `UPGRADE_FAILED:${msg.target} ${(e as Error).message}`);
+          upgrading = false;
+        }
+      }
       return;
     }
     if (msg.type === "cancel") {

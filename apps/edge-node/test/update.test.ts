@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isDrivableChannel } from "@dahrk/contracts";
 import {
   detectChannel,
   isNewer,
+  planRemoteUpgrade,
   upgradeCommand,
   runUpdate,
+  wireChannel,
   type UpdateDeps,
 } from "../src/update.ts";
 
@@ -243,4 +246,96 @@ test("runUpdate: a registry failure writes NOTHING - we must not record an answe
   });
   assert.equal(await runUpdate({ currentVersion: "0.1.3", check: false }, deps), 1);
   assert.deepEqual(saved, [], "a failed check must leave the previous answer, and its age, untouched");
+});
+
+// --- the hub-driven upgrade (DHK-1001) ------------------------------------------------------------
+
+test("wireChannel: `homebrew` crosses to the wire as `brew`, or a drivable node reads as manual", () => {
+  // The two vocabularies were invented separately and disagree on exactly one word. Both sides are
+  // strings, so no type would have caught it: an ack saying "homebrew" fails the hub's
+  // `isDrivableChannel` check and settles a perfectly upgradeable node as `manual` - a silent,
+  // plausible-looking failure that produces a copy-paste command instead of an upgrade.
+  assert.equal(wireChannel("homebrew"), "brew");
+  assert.equal(wireChannel("npm"), "npm");
+  assert.equal(wireChannel("unknown"), "unknown");
+
+  // Asserted against the REAL contract, not a copy of its strings: this is the predicate the hub runs on
+  // the ack to decide between driving the upgrade and telling the operator to run it themselves. Every
+  // channel we can actually drive locally must pass it, or the two halves disagree in production only.
+  for (const local of ["npm", "homebrew"] as const) {
+    assert.ok(
+      isDrivableChannel(wireChannel(local)),
+      `the hub would refuse to drive a ${local} install (sent as "${wireChannel(local)}")`,
+    );
+  }
+  assert.equal(isDrivableChannel(wireChannel("unknown")), false, "and an unknown install is never driven");
+});
+
+test("planRemoteUpgrade: a drivable channel accepts, upgrades, and ALWAYS restarts - no TTY needed", async () => {
+  // The reason this is not just `runUpdate`. `offerRestart` refuses to restart without a TTY, so under a
+  // daemon the upgrade lands on disk and the node keeps serving the OLD build for ever - and the hub,
+  // seeing a version that never moved, settles the intent `silent`. Nobody is at a terminal here; being
+  // asked to upgrade is the consent.
+  const { deps, ran, counter, saved } = harness({ interactive: () => false, nodeRunning: () => true });
+  const plan = planRemoteUpgrade("0.2.0", deps);
+  assert.equal(plan.accepted, true);
+  assert.equal(plan.channel, "npm");
+  await plan.apply!();
+  assert.deepEqual(ran, [["npm", "install", "-g", "dahrk-node@latest"]]);
+  assert.equal(counter.restarts, 1, "a node that does not restart is still on the old build");
+  assert.deepEqual(saved, [{ updateCheckedAt: new Date(NOW).toISOString(), updateLatest: "0.2.0" }]);
+});
+
+test("planRemoteUpgrade: never prompts, even where `runUpdate` would have", async () => {
+  let asked = 0;
+  const { deps, counter } = harness({
+    interactive: () => true, // a TTY is present, and it must still not be consulted
+    nodeRunning: () => true,
+    confirm: async () => {
+      asked++;
+      return false;
+    },
+  });
+  await planRemoteUpgrade("0.2.0", deps).apply!();
+  assert.equal(asked, 0, "a remote upgrade has nobody to ask - the hub already decided");
+  assert.equal(counter.restarts, 1);
+});
+
+test("planRemoteUpgrade: an undrivable install refuses UP FRONT rather than failing at the deadline", async () => {
+  // curl / from-source: no package manager to invoke. Answering immediately is what turns a five minute
+  // wait ending in "did not reconnect" into a command on the row.
+  const { deps, ran } = harness({ binPath: "/opt/dahrk/bin/dahrk" });
+  const plan = planRemoteUpgrade("0.2.0", deps);
+  assert.equal(plan.accepted, false);
+  assert.equal(plan.channel, "unknown");
+  assert.equal(plan.apply, undefined, "nothing to run, so nothing is offered to run");
+  assert.deepEqual(ran, []);
+});
+
+test("planRemoteUpgrade: a failing package manager throws rather than reporting a phantom success", async () => {
+  const { deps, counter } = harness({
+    runUpgrade: () => ({ code: 243, output: "npm error EACCES: permission denied" }),
+  });
+  await assert.rejects(() => planRemoteUpgrade("0.2.0", deps).apply!(), /exit 243/);
+  assert.equal(counter.restarts, 0, "a failed upgrade must not restart onto the same build");
+});
+
+test("planRemoteUpgrade: a failed RESTART throws - the upgrade is on disk but not in effect", async () => {
+  const { deps } = harness({ restart: async () => 1 });
+  await assert.rejects(() => planRemoteUpgrade("0.2.0", deps).apply!(), /restart failed/);
+});
+
+test("planRemoteUpgrade: honours the hub's PINNED target, and never re-reads `latest`", async () => {
+  // The hub pins the target when the intent opens precisely so a release landing mid-rollout cannot fail
+  // a node against a version nobody asked it to install.
+  let fetched = 0;
+  const { deps, saved } = harness({
+    fetchLatest: async () => {
+      fetched++;
+      return "0.3.0";
+    },
+  });
+  await planRemoteUpgrade("0.2.0", deps).apply!();
+  assert.equal(fetched, 0, "the registry is not consulted - the hub already decided the target");
+  assert.equal(saved[0]!.updateLatest, "0.2.0");
 });

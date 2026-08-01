@@ -8,15 +8,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  BACKGROUND_FETCH_TIMEOUT_MS,
   cachedUpdate,
   isStale,
+  isVouchable,
   checkForUpdate,
   checkIntervalMs,
   checkSuppressed,
   DEFAULT_INTERVAL_MS,
+  FETCH_TIMEOUT_MS,
   jitterMs,
+  renderCheckLogLine,
   renderUpdateLogLine,
   renderUpdateNotice,
+  runUpdateCheck,
   shouldCheck,
   type UpdateCheckDeps,
 } from "../src/update-check.ts";
@@ -30,6 +35,52 @@ test("shouldCheck: asks once, then not again until the interval is up", () => {
   assert.equal(shouldCheck(NOW, undefined, DEFAULT_INTERVAL_MS, env), true, "never checked: check now");
   assert.equal(shouldCheck(NOW, iso(NOW - 1000), DEFAULT_INTERVAL_MS, env), false, "just checked: do not");
   assert.equal(shouldCheck(NOW, iso(NOW - DEFAULT_INTERVAL_MS), DEFAULT_INTERVAL_MS, env), true, "a day on");
+});
+
+/**
+ * Count the checks a scheduler ticking every `tickMs` actually performs over `horizonMs`.
+ *
+ * The one detail that matters is `FETCH_COST_MS`: `updateCheckedAt` records when a check RESOLVED, so it
+ * is always written a little AFTER the tick that started it. That few milliseconds is the entire bug this
+ * simulates - it is enough to push the next same-period tick under the gate, every single time.
+ */
+function simulateChecks(tickMs: number, intervalMs: number, horizonMs: number): number {
+  const FETCH_COST_MS = 50;
+  let last: string | undefined;
+  let checks = 0;
+  for (let t = tickMs; t <= horizonMs; t += tickMs) {
+    if (!shouldCheck(NOW + t, last, intervalMs, {})) continue;
+    checks++;
+    last = iso(NOW + t + FETCH_COST_MS);
+  }
+  return checks;
+}
+
+test("CADENCE: a scheduler on the interval must not silently check at HALF the rate", () => {
+  // The regression. `setInterval(tick, interval)` plus a gate of `now - checkedAt >= interval` looks
+  // obviously correct and is not: the timestamp is written when the fetch resolves, so every tick lands
+  // fractionally early, takes the not-due branch, and writes and logs nothing. A node reported itself
+  // "checked and up to date" for ten hours on a six hour interval, and missed a release by two.
+  const hour = 3_600_000;
+  const interval = 6 * hour;
+  const day = 24 * hour;
+
+  assert.equal(simulateChecks(interval, interval, day), 4, "ticking ON the interval still checks 4x a day");
+  assert.equal(simulateChecks(interval / 4, interval, day), 4, "and so does the sub-interval scheduler");
+  // Belt and braces: whatever the tick rate, a day of a six hour interval is four checks, never two.
+  for (const ticks of [1, 2, 3, 4, 6]) {
+    assert.equal(simulateChecks(interval / ticks, interval, day), 4, `${ticks} ticks per interval`);
+  }
+});
+
+test("shouldCheck: the skew tolerance never swallows the interval itself", () => {
+  // The tolerance is a fudge for a timestamp written late, not licence to check early. It must stay well
+  // inside the interval, and must not turn a deliberately tiny interval into one that never fires.
+  assert.equal(shouldCheck(NOW, iso(NOW - 1000), DEFAULT_INTERVAL_MS, {}), false, "a second ago: no");
+  assert.equal(shouldCheck(NOW, iso(NOW - 3_600_000), DEFAULT_INTERVAL_MS, {}), false, "an hour in: still no");
+  // `DAHRK_UPDATE_CHECK_INTERVAL_MS=0` documents "check every start"; the tolerance must not break that.
+  assert.equal(shouldCheck(NOW, iso(NOW), 0, {}), true, "a zero interval always checks");
+  assert.equal(shouldCheck(NOW, iso(NOW - 1), 1000, {}), false, "a 1s interval is not widened to a minute");
 });
 
 test("shouldCheck: a nonsense or future timestamp checks now rather than never again", () => {
@@ -61,12 +112,14 @@ test("jitterMs: stays inside the spread, so a fleet's checks scatter instead of 
 });
 
 /** Fake IO: a controllable clock, registry, and state file. */
+type SavedPatch = { updateCheckedAt?: string; updateLatest?: string; updateCheckFailedAt?: string };
+
 function deps(over: Partial<UpdateCheckDeps> & { state?: NodeState } = {}): UpdateCheckDeps & {
-  saved: Array<{ updateCheckedAt: string; updateLatest: string }>;
+  saved: SavedPatch[];
   fetches: number;
 } {
   let state: NodeState = over.state ?? {};
-  const saved: Array<{ updateCheckedAt: string; updateLatest: string }> = [];
+  const saved: SavedPatch[] = [];
   let fetches = 0;
   return {
     env: {},
@@ -123,6 +176,71 @@ test("FAIL OPEN: a registry that throws, times out, or lies is silently no-notic
   assert.equal(await checkForUpdate("0.1.8", garbage), undefined, "an unparseable version is not 'newer'");
 });
 
+test("OBSERVABLE: the three ways of saying nothing are told apart, and logged", async () => {
+  // `checkForUpdate` returns undefined for current, not-due AND failed alike, and the daemon only ever
+  // logged the fourth case. So the tick that quietly did nothing every interval left no trace anywhere -
+  // not in the log, not in the state file - and the bug was invisible until someone compared a state file
+  // timestamp against a publish time by hand.
+  const current = await runUpdateCheck("0.2.1", deps());
+  assert.deepEqual(current, { kind: "current", latest: "0.2.1" });
+  assert.equal(renderCheckLogLine(current), "UPDATE_CHECK:current latest=0.2.1");
+
+  const available = await runUpdateCheck("0.1.8", deps());
+  assert.equal(available.kind, "available");
+  assert.equal(renderCheckLogLine(available), "UPDATE_AVAILABLE:0.2.1 current=0.1.8");
+
+  const fresh = deps({ state: { updateCheckedAt: iso(NOW - 1000), updateLatest: "0.2.1" } });
+  const notDue = await runUpdateCheck("0.2.1", fresh);
+  assert.deepEqual(notDue, { kind: "not-due", checkedAt: iso(NOW - 1000) });
+  assert.equal(fresh.fetches, 0, "not-due must not touch the registry");
+  assert.match(renderCheckLogLine(notDue)!, /^UPDATE_CHECK:not-due since=/);
+
+  const suppressed = await runUpdateCheck("0.1.8", deps({ env: { CI: "true" } }));
+  assert.deepEqual(suppressed, { kind: "suppressed" });
+  assert.equal(renderCheckLogLine(suppressed), undefined, "opted out means no line either");
+});
+
+test("a FAILED check is recorded, so a node failing for a week cannot look current", async () => {
+  // The fail-open path wrote nothing at all, which meant "every check has timed out since Tuesday" and
+  // "checked a minute ago, you are current" were the same state file. `updateCheckedAt` deliberately does
+  // NOT move: the age of the last real answer is what `status` reasons about, and advancing it on a
+  // failure would launder "could not ask" into "asked recently".
+  const boom = deps({
+    state: { updateCheckedAt: iso(NOW - 7 * 86_400_000), updateLatest: "0.1.8" },
+    fetchLatest: async () => {
+      throw new Error("getaddrinfo ENOTFOUND registry.npmjs.org");
+    },
+  });
+  const outcome = await runUpdateCheck("0.1.8", boom);
+  assert.equal(outcome.kind, "failed");
+  assert.match(renderCheckLogLine(outcome)!, /^UPDATE_CHECK:failed reason=getaddrinfo/);
+  assert.deepEqual(boom.saved, [{ updateCheckFailedAt: iso(NOW) }]);
+  assert.equal(boom.saved[0]!.updateCheckedAt, undefined, "a failure must not pose as a successful check");
+});
+
+test("the periodic check gets a patient timeout, the start-path check a short one", async () => {
+  // Nobody waits on the daemon's check, so giving up after 1.5s only loses releases on a slow link. The
+  // start-path bound stays short because there an operator IS waiting.
+  assert.ok(BACKGROUND_FETCH_TIMEOUT_MS > FETCH_TIMEOUT_MS, "the background bound must be the patient one");
+
+  // A registry that answers in 80ms: too slow for a 20ms bound, comfortable for a 5s one. The same fetch
+  // under the two bounds is the only thing that proves the deps' value is the one actually applied.
+  const slowRegistry = (signal?: AbortSignal): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve("0.2.1"), 80);
+      signal?.addEventListener("abort", () => {
+        clearTimeout(t);
+        reject(new Error("aborted"));
+      });
+    });
+
+  const impatient = await runUpdateCheck("0.1.8", deps({ fetchTimeoutMs: 20, fetchLatest: slowRegistry }));
+  assert.equal(impatient.kind, "failed", "a 20ms bound gives up on an 80ms registry");
+
+  const patient = await runUpdateCheck("0.1.8", deps({ fetchTimeoutMs: 5_000, fetchLatest: slowRegistry }));
+  assert.equal(patient.kind, "available", "a generous bound lets the same answer land");
+});
+
 test("CACHED: a second check inside the interval does not touch the registry", async () => {
   const d = deps();
   await checkForUpdate("0.1.8", d);
@@ -168,6 +286,7 @@ test("cachedUpdate: 'you are current' and 'I have never checked' are DIFFERENT a
   assert.deepEqual(cachedUpdate({ updateLatest: "0.1.8", updateCheckedAt: AT }, "0.1.8", BIN), {
     kind: "current",
     checkedAt: Date.parse(AT),
+    latest: "0.1.8",
   });
   assert.deepEqual(cachedUpdate({}, "0.1.8", BIN), { kind: "unknown" }, "nothing has ever asked");
 });
@@ -186,10 +305,22 @@ test("isStale: a cached answer goes stale at a MULTIPLE of the interval, so one 
   const hour = 3_600_000;
   const interval = 6 * hour;
   assert.equal(isStale(now - 3 * hour, now, interval), false, "fresher than one interval");
-  assert.equal(isStale(now - 12 * hour, now, interval), false, "old, but not yet misleading");
-  assert.equal(isStale(now - 25 * hour, now, interval), true, "past 4 intervals: stop stating it as fact");
+  assert.equal(isStale(now - 9 * hour, now, interval), false, "overdue, but still worth showing");
+  assert.equal(isStale(now - 13 * hour, now, interval), true, "past 2 intervals: stop stating it as fact");
   // Someone who checks hourly hears about staleness sooner, without discovering a second knob.
-  assert.equal(isStale(now - 5 * hour, now, hour), true);
+  assert.equal(isStale(now - 3 * hour, now, hour), true);
+});
+
+test("isVouchable: the TICK is a narrower claim than merely not-stale", () => {
+  // The gap between these two predicates is the bug this pair exists to close. A 10h old answer under a 6h
+  // interval is not yet stale - still worth printing - but we have no business putting a green tick on it:
+  // a check was due four hours ago and did not land, and 0.2.0 could have shipped in between. It did.
+  const now = Date.parse(AT);
+  const hour = 3_600_000;
+  const interval = 6 * hour;
+  assert.equal(isVouchable(now - 3 * hour, now, interval), true, "inside the interval: we did check");
+  assert.equal(isVouchable(now - 10 * hour, now, interval), false, "a check was due and did not land");
+  assert.equal(isStale(now - 10 * hour, now, interval), false, "...yet not stale enough to nag about");
 });
 
 test("BOUNDED: a registry that hangs forever is aborted, not waited on - a start must never hang", async () => {

@@ -16,6 +16,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import type { InstallChannel } from "@dahrk/contracts";
 import { nodeIsRunning, runNodeRestart } from "./service.js";
 import { writeState } from "./state.js";
 import { arrow, confirm, dim, hint, isInteractive, kv, out as uiOut, verdict } from "./ui.js";
@@ -47,6 +48,28 @@ export function upgradeCommand(channel: Channel): { argv: string[]; display: str
       return { argv: ["brew", "upgrade", "dahrkai/tap/dahrk"], display: CHANNEL_COMMANDS.homebrew };
     case "unknown":
       return null;
+  }
+}
+
+/**
+ * This module's {@link Channel} as the wire's `InstallChannel` (DHK-1001).
+ *
+ * The two vocabularies were invented separately and disagree on one word: here the Homebrew channel is
+ * `homebrew`, on the wire it is `brew`. Sending the local spelling would fail the hub's
+ * `isDrivableChannel` check and settle a perfectly drivable node as `manual` - a silent, plausible-looking
+ * failure that no type would have caught, since both sides are just strings. Hence one explicit crossing
+ * point rather than a cast.
+ *
+ * `unknown` stays `unknown`: locally it means "we could not tell", which is exactly what it means there.
+ */
+export function wireChannel(channel: Channel): InstallChannel {
+  switch (channel) {
+    case "npm":
+      return "npm";
+    case "homebrew":
+      return "brew";
+    case "unknown":
+      return "unknown";
   }
 }
 
@@ -251,6 +274,62 @@ async function offerRestart(d: UpdateDeps): Promise<void> {
   // success line: the upgrade landed, but the node is still serving the old build, and that is the fact.
   if (code !== 0) d.out(hint("The node is still on the old build. Run `dahrk restart` once it is free."));
   else d.out(verdict("ok", "Node restarted on the new build."));
+}
+
+/** What a hub-driven upgrade decided, and how to carry it out. See {@link planRemoteUpgrade}. */
+export interface RemoteUpgradePlan {
+  channel: InstallChannel;
+  accepted: boolean;
+  apply?: () => Promise<void>;
+}
+
+/**
+ * The hub-driven counterpart to `dahrk update` (DHK-1001/DHK-341): decide whether this install can be
+ * driven, and hand back a thunk that drives it.
+ *
+ * Split from `runUpdate` rather than bolted onto it, because the two answer to different callers and the
+ * differences are not options on one flow:
+ *
+ *  - It never prompts and never consults `interactive()`. `offerRestart` refuses to restart without a TTY,
+ *    which under a daemon means the upgrade lands on disk and the node goes on serving the OLD build
+ *    indefinitely - the hub then sees a node that never changed version and settles the intent `silent`.
+ *    A remote upgrade has no human to ask; being asked to upgrade IS the consent.
+ *  - It restarts unconditionally on success, because that is the only thing that makes the new build take
+ *    effect, and the hub is waiting to see the version move before its deadline.
+ *  - It refuses a non-drivable channel up front, so the hub can settle `manual` and show a copy-paste
+ *    command rather than waiting out a deadline on a node that was never going to move.
+ *
+ * `target` is what the hub asked for and is honoured as given: the hub pins it when the intent opens
+ * precisely so a release landing mid-rollout cannot fail a node against a version nobody asked it to
+ * install. We do not re-read `latest` here.
+ */
+export function planRemoteUpgrade(target: string, deps: Partial<UpdateDeps> = {}): RemoteUpgradePlan {
+  const d = { ...defaultDeps(), ...deps };
+  const channel = detectChannel(d.binPath);
+  const wire = wireChannel(channel);
+  const cmd = upgradeCommand(channel);
+  // No command means no package manager to invoke (a curl install, a from-source checkout). Say so
+  // rather than trying and failing: `accepted:false` is a real answer the hub renders as a command.
+  if (!cmd) return { channel: wire, accepted: false };
+
+  return {
+    channel: wire,
+    accepted: true,
+    apply: async () => {
+      const { code, output } = d.runUpgrade(cmd.argv);
+      if (code !== 0) {
+        // Surfaced to the node's log, not to a terminal - there is nobody at one. The hub will classify
+        // this by the version the node comes back on.
+        for (const line of output.split("\n")) if (line.trim()) d.out(line);
+        throw new Error(`upgrade command failed (exit ${code}): ${cmd.display}`);
+      }
+      d.saveResult({ updateCheckedAt: new Date(d.now()).toISOString(), updateLatest: target });
+      // Unconditional, and never a prompt. A node that does not restart is still running the old build,
+      // which is the whole failure this path exists to avoid.
+      const restartCode = await d.restart();
+      if (restartCode !== 0) throw new Error(`restart failed (exit ${restartCode})`);
+    },
+  };
 }
 
 /** Fetch the latest published version from the npm registry's `latest` dist-tag. Exported so the passive

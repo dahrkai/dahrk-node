@@ -6,6 +6,35 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- **The node applies an upgrade the hub asks for.** The portal's Update button opens an upgrade request
+  on the hub, but this client had no handler for it: the request was dropped, nothing was acknowledged,
+  and five minutes later the hub gave up and reported a node that had never gone anywhere as "did not
+  reconnect". A node now detects how it was installed, tells the hub whether it can drive its own
+  upgrade, and if it can, runs the package manager and restarts onto the new build without needing
+  anybody at a terminal. An install the client cannot drive (a `curl` install, a source checkout) says
+  so immediately, and the portal shows the command to run by hand instead of waiting. (#161)
+
+### Fixed
+
+- **A running node now checks for a new release as often as it says it does.** The daemon woke on the
+  same period as the "have we checked recently?" gate, but the timestamp it compares against is written
+  when a check finishes, so every wake arrived a fraction of a second too early, did nothing, and left
+  no record of having done nothing. The real cadence was half the configured one, and a node could sit
+  for ten hours on a six hour interval while reporting itself checked and current. The daemon now wakes
+  several times per interval and the gate tolerates a little clock skew. (#161)
+- **`dahrk status` no longer puts a tick on an answer it cannot vouch for.** A cached result was
+  presented as `✔ up to date` for up to four check intervals - a full day at the default. A release
+  published an hour after the last check was reported as "you are current" for the rest of that day.
+  The tick is now reserved for an answer from inside the current interval; an older one is reported
+  with its age instead, and a genuinely stale one still points at `dahrk update --check`. (#161)
+- **A failed update check is recorded rather than passing silently.** The check still fails open, but
+  it now notes when it last failed, and the daemon logs the outcome of every check rather than only the
+  ones that found an update. A node whose checks have been timing out for a week no longer looks
+  identical to one that checked a minute ago. The periodic check also gets a longer timeout than the
+  one that runs while an operator waits for a node to start. (#161)
+
 ## [0.2.0] - 2026-08-01
 
 ### Changed
