@@ -23,13 +23,6 @@ this file is left verbatim.
 
 ### Changed
 
-- DHK-1006: bump the `@dahrk/contracts` catalog pin to `^0.13.0`, the release that removes
-  `credentialMode` from `hello`/`advertise`/`welcome`, `PushJob.openPr`, and the `PushResult` PR
-  fields. The client stopped reading all of them in 6912cbe, so this is the confirmation rather than
-  the migration: it now compiles against a contract where those fields do not exist.
-
-### Changed
-
 - DHK-1006: ambient credentials deleted end to end. Removed `ambient-claude-auth.ts` (Keychain +
   `~/.claude/.credentials.json` resolution), `piAmbientCredentialAvailable`, `openPrAmbient` and the
   `gh` helpers in `git-service.ts`, the `sshKeyPresent` preflight probe, and `DAHRK_CREDENTIAL_MODE`
@@ -37,13 +30,12 @@ this file is left verbatim.
   to a capability probe plus the refused-credential latch: no CLI `--version` probing, no PATH
   dependence, no injected `piAmbientCredential` / `resolveAmbientAuth` seams.
 - `credentialMode` is gone from the wire in both directions (`hello`, `advertise`, `welcome`), so the
-  hub no longer pushes a mode and the node no longer sends or corrects one. The field's removal from
-  the contract itself lands in `@dahrk/contracts` 0.13.0, which this release does **not** pin: the
-  node stops reading the field here, and the catalog entry moves separately. Shipping on `^0.12.0` is
-  therefore safe rather than provisional, since 0.12.0 still declares the field and the node simply
-  ignores it. The `^0.13.0` bump is prepared on `chore/contracts-0.13.0` and is the confirmation step.
-- `@dahrk/contracts` catalog entry `^0.11.1` -> `^0.12.0`. A caret cannot cross a pre-1.0 minor, so
-  the bump needs a PR; it touches only the catalogue entry and the lockfile.
+  hub no longer pushes a mode and the node no longer sends or corrects one.
+- `@dahrk/contracts` catalog entry `^0.11.1` -> `^0.13.0`, across two bumps (#156, #158). 0.13.0 is the
+  release that actually removes `credentialMode`, `PushJob.openPr` and the `PushResult` PR fields from
+  the contract, so shipping on it is the confirmation rather than the migration: this release compiles
+  against a contract where those fields do not exist, which is the only way to prove no stale reference
+  survived. A caret cannot cross a pre-1.0 minor, which is why each step needed its own PR.
 - `resolveDeliverOutcome` no longer takes an `OpenPrResult`: the node reports no PR fields at all, since
   the hub opens every PR through the GitHub App.
 
