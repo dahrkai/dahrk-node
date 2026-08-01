@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
 ### Changed
 
 - **Every credential now comes from the hub, and the node no longer reads your machine's logins.**
@@ -14,22 +16,22 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   on the credential you connected in the portal. The node no longer consults your SSH key, your `gh`
   login, your `claude` login, the macOS Keychain, `~/.claude/.credentials.json`, or provider keys in
   its environment. This removes a class of failure where what a node could do depended on which shell
-  started it, or on a token that had been revoked with nothing local changing.
+  started it, or on a token that had been revoked with nothing local changing. (#157)
 - **A node advertises a runtime whenever it can execute it.** Runtime detection used to ask a second
   question - is there a login on this host a stage could borrow - and withhold a runtime when the
   answer was no. It now asks only whether the runtime's SDK is installed. The one credential signal
   that remains is a credential the provider has actually refused, which still withdraws that runtime
-  until a later stage authenticates.
+  until a later stage authenticates. (#157)
 - **`dahrk repo add` always registers the HTTPS clone URL.** A brokered token can only be presented
   over HTTPS, so an SSH remote is normalised whether or not this host has a key. Having a key used to
-  keep the SSH form, which is what masked the mismatch until a key rotation broke the clone.
+  keep the SSH form, which is what masked the mismatch until a key rotation broke the clone. (#157)
 
 ### Removed
 
 - `DAHRK_CREDENTIAL_MODE` (and its `SKAKEL_CREDENTIAL_MODE` alias). There is no longer an ambient mode
-  for it to select.
+  for it to select. (#157)
 - The SSH key, `claude` login and `gh` CLI checks in `dahrk doctor` and `dahrk preflight`. None of them
-  is consulted when a stage runs, so warning about them pointed at the wrong thing.
+  is consulted when a stage runs, so warning about them pointed at the wrong thing. (#157)
 
 ### Fixed
 
@@ -39,14 +41,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   segment. Its first word decided the verdict for every line, so a benign leading command that takes
   no path operands (`echo`, `printf`, `:`, `true`, `false`) waved the rest of the command through, and
   a second line reaching outside the worktree was allowed with no deny and no event. A newline now
-  splits a command exactly as a semicolon does, so each line is checked on its own.
+  splits a command exactly as a semicolon does, so each line is checked on its own. (#154)
 - **A `#` comment no longer denies a command it appears in.** Worktree confinement lexes every shell
   command to path-check its operands, but the lexer had no notion of a `#` comment and read comment
   text as live shell code. An apostrophe in a comment (`# pnpm hasn't run yet`) opened a quote that
   never closed, so the command was refused as unparseable; a path, a backtick or a `$(...)` mentioned
   in a comment was scanned as a real operand and denied as an escape. A `#` at the start of a word now
   opens a comment that is skipped, exactly as a heredoc body is, while a `#` mid-word (`foo#bar`, a URL
-  fragment, `--pretty=%h#x`) and a quoted `#` stay ordinary characters.
+  fragment, `--pretty=%h#x`) and a quoted `#` stay ordinary characters. (#155)
 
 ## [0.1.31] - 2026-07-31
 
@@ -1200,7 +1202,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...v0.2.0
 [0.1.31]: https://github.com/dahrkai/dahrk-node/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/dahrkai/dahrk-node/compare/v0.1.28...v0.1.29
