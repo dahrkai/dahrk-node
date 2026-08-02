@@ -9,9 +9,9 @@ The npm package is `dahrk-node`; the command it installs is `dahrk`.
 
 ## Install
 
-Needs **Node 22+** and a way to authenticate stages: a logged-in `claude` on this host, a provider key
-in the environment, or enrolment into a brokered pool (which needs neither). The agent runtimes
-themselves ship inside the client - there is nothing else to install. Run `dahrk doctor` to check.
+Needs **Node 22+**, `git`, and somewhere to put worktrees. The agent runtimes ship inside the client,
+and stages authenticate with credentials the hub supplies per job, so there is no login to set up here.
+Run `dahrk doctor` to check.
 
 ```bash
 npm install -g dahrk-node                          # npm
