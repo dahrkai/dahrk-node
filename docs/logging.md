@@ -107,8 +107,9 @@ still being there weeks later.
 
 ## Secrets
 
-A node holds real credentials: your SSH keys, your `gh` token, `DAHRK_GIT_TOKEN`, your Anthropic
-session. Everything written to a log passes through a scrubber first
+A node handles real credentials, even though it holds none of its own: the hub attaches a git token, MCP
+keys and inference auth to each job, and `DAHRK_GIT_TOKEN` carries the git token to a `git` subprocess
+for the length of one operation. Everything written to a log passes through a scrubber first
 (`packages/edge/src/redact.ts`), which drops:
 
 - values under any key that looks sensitive (`*token*`, `*secret*`, `*password*`, `authorization`, ...);
@@ -195,7 +196,8 @@ that stage.)
 
 | | Where it goes |
 |---|---|
-| Your source tree, SSH keys, git tokens, model-provider session, `.env` files | **Stay on this machine.** Never sent. |
+| Your source tree and `.env` files | **Stay on this machine.** Never sent. |
+| Your SSH keys, `gh` token and model-provider logins | **Never read at all.** A node authenticates only with what the hub attaches to a job, so your own credentials take no part in a run. |
 | Node logs, crash records, support bundles | **Stay on this machine** on a node you run. Only leave if you enable shipping, or send a bundle. |
 | Node health (uptime, version, counts) | **Sent to the hub.** Metadata only. `DAHRK_TELEMETRY=off` stops it. |
 | Agent trace events (reasoning, tool calls, tool results - which can quote file content) | **Sent to the hub** while a stage runs. |

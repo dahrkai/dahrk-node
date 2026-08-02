@@ -29,10 +29,10 @@ Sign up and mint a token at [app.dahrk.ai](https://app.dahrk.ai); full docs live
 
 ## 30-second quickstart
 
-Needs **Node 22+** and a way to authenticate stages: either a logged-in `claude` on this host, or
-`ANTHROPIC_API_KEY` in the environment, or enrolment into a brokered pool (which needs neither). The
-agent runtimes themselves ship inside the client, so there is nothing else to install. Pick any
-channel; all install the same version and provide the `dahrk` command:
+Needs **Node 22+**, `git`, and somewhere to put worktrees. Nothing else: the agent runtimes ship
+inside the client, and stages authenticate with credentials the hub supplies per job, so there is no
+login to set up on this machine. Pick any channel; all install the same version and provide the
+`dahrk` command:
 
 ```bash
 npm install -g dahrk-node                          # npm
