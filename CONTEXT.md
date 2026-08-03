@@ -127,6 +127,21 @@ _Avoid_: Integration, install, org.
 A Linear workspace exposed by a Connection. Contains the issues that become runs.
 _Avoid_: Org, team (a team is a subdivision of a workspace).
 
+**Broker**:
+The hub component that turns a stored `credentialRef` into the credential a job carries. It **mints**
+where the provider allows it (a GitHub App installation token, scoped to one repo, about an hour) and
+**forwards** where it does not (a third-party API key has no exchange endpoint, so there is nothing to
+mint from).
+_Avoid_: Vault, secret store (it deliberately brokers rather than stores).
+
+**Brokered credential**:
+Any credential the hub attaches to a job: the git token, an MCP server's key, the inference credential.
+There is no other kind. A node holds none of its own and reads nothing from the machine it runs on - not
+its SSH key, `gh` login, `claude` login, keychain, or provider environment variables. "Brokered" says
+where a credential came from, not how long it lives.
+_Avoid_: Ambient credentials, credential mode, brokered node (retired: there is no non-brokered
+alternative for either to distinguish).
+
 ### The control surface
 
 **Control surface**:
@@ -159,16 +174,13 @@ The one-time exchange that turns an installed `dahrk-node` into a trusted edge n
 the hub and presents a short-lived hub-minted enrolment token over the WebSocket.
 _Avoid_: Registration, pairing, login.
 
-**Ambient node**:
-A node that authenticates to git, inference, and MCP servers with the operator's own locally installed
-credentials (SSH agent, `gh` auth, `claude` keychain). The hub sends no credential material. The
-free-tier default for self-hosted nodes.
-_Avoid_: Unmanaged (imprecise; describes a mode, not the credential model).
-
-**Brokered node**:
-A node that receives short-lived, per-job credentials minted by the hub's credential broker instead of
-holding long-lived secrets. Used by managed and self-hosted container nodes.
-_Avoid_: Managed (managed is a hosting model; brokered is a credential model - orthogonal).
+**Brokered credential**:
+Any credential the hub attaches to a job: the git token, an MCP server's key, the inference credential.
+The node holds none of its own and reads none from the machine it runs on. "Brokered" says where the
+credential came from, not how long it lives - the git token is minted and short-lived, while an MCP or
+API key is the stored secret forwarded, because a third-party key has nothing to mint from.
+_Avoid_: Ambient credentials, credential mode, brokered node (there is no other kind; see
+`docs/adr/0001-a-node-reads-no-host-credentials.md`).
 
 **Mirror cache**:
 The edge-local bare-repo cache (`~/.dahrk/mirrors/<repoId>`) the node fetches into before creating a
@@ -187,5 +199,5 @@ _Avoid_: Session (unqualified), runner (a runner is the `Runner`-shaped adapter 
 ## Sources
 
 - Workspace-root `CONTEXT.md` - the shared kernel this file mirrors.
-- `dahrk-harness/docs/data-boundary.md` - the ambient vs brokered credential model.
+- `docs/adr/0001-a-node-reads-no-host-credentials.md` - why a node holds no credentials of its own.
 - `docs/logging.md` - the node's edge-local logs, crash records, and `dahrk diagnose`.
