@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
 ### Added
 
 - **The node applies an upgrade the hub asks for.** The portal's Update button opens an upgrade request
@@ -24,17 +26,17 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   itself claimed the token, and the node that started seconds later was refused as an impostor: the
   install reported success, `dahrk status` showed the new tenant read straight off the disk it had just
   written, and the node sat parked serving nothing while the setup page waited for it forever. Every
-  probe now runs as this node, so checking a token and using it are the same act.
+  probe now runs as this node, so checking a token and using it are the same act. (#163)
 - **Re-enrolling a node that is already running takes effect.** `dahrk start --token <new>` wrote the new
   token to disk but left the running daemon on the old one, because starting something already running is
   deliberately a no-op. The node kept serving the previous tenant, and its next connection quietly wrote
   the old token back over the new one, so the re-enrolment vanished with no error anywhere. Changing a
   node's enrolment now restarts it. If a stage is in flight the restart is refused, as before, but it now
-  says plainly that the token is saved and the node is still on the previous one.
+  says plainly that the token is saved and the node is still on the previous one. (#163)
 - **A node that heals itself no longer breaks itself again.** A node whose token the hub rejected parks
   and watches for a better one. On finding it, it reconnected correctly, then cached the *rejected* token
   over the good one, so the next reboot parked forever on a token nothing could improve on. It now caches
-  the token the hub actually accepted.
+  the token the hub actually accepted. (#163)
 - **A running node now checks for a new release as often as it says it does.** The daemon woke on the
   same period as the "have we checked recently?" gate, but the timestamp it compares against is written
   when a check finishes, so every wake arrived a fraction of a second too early, did nothing, and left
@@ -1248,7 +1250,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...v0.2.0
 [0.1.31]: https://github.com/dahrkai/dahrk-node/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/dahrkai/dahrk-node/compare/v0.1.29...v0.1.30

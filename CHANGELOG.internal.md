@@ -19,6 +19,25 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
+### Changed
+
+- **Documentation now matches the credential model 0.2.0 actually shipped.** `CONTEXT.md` still defined
+  `Ambient node` as a term of the ubiquitous language, and `README.md` (the npm front door) still told a
+  new user their node needs either a logged-in `claude` on the host or `ANTHROPIC_API_KEY` in the
+  environment. Both were removed in 0.2.0. `Brokered node` was a tautology and is replaced by
+  `Brokered credential`, and `docs/logging.md` now separates "never sent" from "never read at all".
+  Docs only, no client behaviour changed. (#162, DHK-1006)
+
+### Added
+
+- **ADR 0001, a node reads no host credentials.** Records the decision behind the 0.2.0 credential
+  broker, arguing from the failure modes rather than the tickets: a service whose capabilities depended
+  on which shell started it, two credential stores that could disagree, and a token revocable with
+  nothing local changing. Creates `docs/adr/`, per `docs/agents/domain.md`. Companion to
+  dahrkai/dahrk-harness#593. (#162)
+
 ## [0.2.0] - 2026-08-01
 
 ### Changed
