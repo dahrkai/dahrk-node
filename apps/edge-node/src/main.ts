@@ -264,7 +264,7 @@ async function start(flags: StartFlags): Promise<number> {
   // The unit we are about to write carries no token, so the daemon will read it from `node.json`. Getting
   // it there is therefore part of starting, not a side effect of the first successful connect.
   const enrolled = await enrolToDisk(env);
-  if (enrolled !== 0) return enrolled;
+  if (enrolled.code !== 0) return enrolled.code;
 
   // `--no-service`: the operator supervises the node themselves (a container, pm2, their own unit), so we
   // enrol - the token is now on disk - but stop short of installing the always-on service. This is the
@@ -280,9 +280,22 @@ async function start(flags: StartFlags): Promise<number> {
   // months. It is the one good moment to mention there is a newer one.
   await offerUpdate(env);
 
-  const outcome = await runNodeStart(serviceInputs(env));
+  const outcome =
+    serviceActionFor(enrolled.changed) === "restart"
+      ? await runNodeRestart(serviceInputs(env))
+      : await runNodeStart(serviceInputs(env));
 
-  if (outcome.kind === "error") return outcome.code;
+  if (outcome.kind === "error") {
+    // `restart` refuses while a stage is in flight, which is right: a stage is minutes of agent time and
+    // real money. But the operator must not read that as "enrolment failed" - the new token IS on disk,
+    // and the only thing left is picking a moment to bounce the daemon.
+    if (enrolled.changed) {
+      uiOut("");
+      uiOut(verdict("ok", "The new enrolment token is saved."));
+      uiOut(hint("This node is still serving on the previous token; run `dahrk restart --force` (or wait for the job to finish) to switch."));
+    }
+    return outcome.code;
+  }
   if (outcome.kind === "running") {
     setDesired(env, "running");
     // Whether we started it or found it already up, the useful answer is the same, and it is the one the
@@ -310,6 +323,20 @@ const serviceInputs = (env: NodeJS.ProcessEnv): { token?: string; name?: string;
 });
 
 /**
+ * How `dahrk start` must reach the service, given whether the enrolment on disk just changed (DHK-1041).
+ *
+ * "Ensure running" is the wrong verb for a re-enrolment. `runNodeStart` deliberately no-ops on a healthy
+ * node (restarting what already works is its own bug), but the live daemon read its token at ITS boot and
+ * keeps it in memory: it will never notice the new one. So `dahrk start --token <new>` reported success,
+ * `dahrk status` read the new tenant straight off the disk it had just written, and the node carried on
+ * serving the old tenant entirely - until its next welcome persisted the OLD token back over the new one
+ * and erased the evidence. Re-enrolling is a restart.
+ */
+export function serviceActionFor(enrolmentChanged: boolean): "restart" | "start" {
+  return enrolmentChanged ? "restart" : "start";
+}
+
+/**
  * Put the token the operator just gave us on disk, where the daemon will look for it.
  *
  * The daemon no longer inherits a token from its unit, so `dahrk start --token <t>` has to write it down
@@ -322,20 +349,27 @@ const serviceInputs = (env: NodeJS.ProcessEnv): { token?: string; name?: string;
  * would be its own kind of wrong. Nothing to do when the token is the one already on disk - that is the
  * ordinary `dahrk start` / reboot path, and it must not need the network at all.
  *
- * Returns a process exit code: 0 = the disk is good, 2 = the hub rejected the token.
+ * Returns the process exit code (0 = the disk is good, 2 = the hub rejected the token) and whether the
+ * enrolment actually CHANGED, which decides whether a already-running daemon has to be restarted to pick
+ * it up (see `start`).
  */
-async function enrolToDisk(env: NodeJS.ProcessEnv): Promise<number> {
+async function enrolToDisk(env: NodeJS.ProcessEnv): Promise<{ code: number; changed: boolean }> {
   const token = resolveEnrolToken(env);
-  if (!token || token === readPersistedToken(env)) return 0;
+  if (!token || token === readPersistedToken(env)) return { code: 0, changed: false };
 
   const hubUrl = env.DAHRK_HUB_URL ?? DEFAULT_HUB_URL;
-  const probe = await probeHub({ hubUrl, enrolToken: token, clientVersion: CLIENT_VERSION });
+  // Probe as OURSELVES, never as a borrowed id (DHK-1041). The hub claims a one-shot enrolment token for
+  // the id that presents it, so probing under a throwaway id spent the token and locked this node out of
+  // its own enrolment. `resolveNodeId` mints and persists the id if this is a first install, which is the
+  // same id the daemon reads on its next boot: same user, same state dir, so they cannot diverge.
+  const nodeId = resolveNodeId(env);
+  const probe = await probeHub({ hubUrl, enrolToken: token, nodeId, clientVersion: CLIENT_VERSION });
   if (!probe.ok && probe.reason === "rejected") {
     uiOut("");
     uiOut(verdict("fail", `The hub rejected that enrolment token: ${probe.detail}`));
     uiOut("");
     uiOut(hint("Get a fresh token at https://app.dahrk.ai, then run `dahrk start --token <token>` again."));
-    return 2;
+    return { code: 2, changed: false };
   }
   if (!probe.ok) {
     uiOut("");
@@ -345,7 +379,7 @@ async function enrolToDisk(env: NodeJS.ProcessEnv): Promise<number> {
     token,
     ...(probe.ok ? { name: probe.name, tenantId: probe.tenantId } : {}),
   });
-  return 0;
+  return { code: 0, changed: true };
 }
 
 /**
@@ -482,7 +516,11 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     // one-shot CI node touches no state dir, and has no next boot to recover into.
     ...(flags.ephemeral ? {} : { jobLedger: fileJobLedger(jobLedgerFile(stateDir(env))) }),
     onEnrolled: (welcome) => {
-      if (persist) persistEnrolment(env, { token, name: welcome.name, tenantId: welcome.tenantId });
+      // The token the hub ACCEPTED, not the one this process booted with (DHK-1041). They differ after an
+      // unpark, and persisting the boot-time one there overwrote the good token with the rejected one.
+      if (persist) {
+        persistEnrolment(env, { token: welcome.enrolToken, name: welcome.name, tenantId: welcome.tenantId });
+      }
     },
     // The hub-driven upgrade (DHK-1001). The wire client owns the ack and its ordering; everything that
     // needs a package manager or the supervisor lives here, which is why this is a callback at all.
@@ -670,6 +708,7 @@ async function runWorkflow(flags: RunFlags): Promise<number> {
     ...(hubUrl ? { hubUrl } : {}),
     ...(token ? { token } : {}),
     clientVersion: CLIENT_VERSION,
+    nodeId: resolveNodeId(env),
   });
 }
 
@@ -784,6 +823,8 @@ async function main(): Promise<void> {
         // the flag/env if given, else the one cached by the last successful enrolment.
         token: resolveEnrolToken(env),
         clientVersion: CLIENT_VERSION,
+        // And under the same identity, so "is this token good?" is answered for THIS node (DHK-1041).
+        nodeId: resolveNodeId(env),
       });
       break;
     }
@@ -864,6 +905,7 @@ async function main(): Promise<void> {
           {
             ...(resolveEnrolToken(env) ? { token: resolveEnrolToken(env) as string } : {}),
             hubUrl: env.DAHRK_HUB_URL ?? DEFAULT_HUB_URL,
+            nodeId: resolveNodeId(env),
           },
           // Stripped: stdout is a TTY here (the operator is watching), so the doctor correctly colours its
           // report - but this copy is going into a JSON file that someone will open in an editor and paste

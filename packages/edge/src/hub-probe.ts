@@ -25,8 +25,16 @@ export interface HubProbeOptions {
   enrolToken?: string;
   /** Runtimes to advertise in the probe `hello` (cosmetic; the hub does not gate welcome on them). */
   runtimes?: Runtime[];
-  /** Node id to present; defaults to a fixed `dahrk-doctor` so repeated probes reuse one record. */
-  nodeId?: string;
+  /** The node id to present. REQUIRED, and it must be this machine's real, persisted id (DHK-1041).
+   *
+   *  It used to default to a fixed `dahrk-doctor`, on the theory that a probe is a throwaway. It is
+   *  not: the probe does a real `hello`, so the hub CLAIMS the one-shot enrolment token for whatever id
+   *  it presents. Under that default, `dahrk start --token` spent the token as `dahrk-doctor` and the
+   *  daemon that connected seconds later, as itself, was refused. The whole onboarding flow could never
+   *  complete. Presenting the real id makes the probe's claim the node's own claim, and stops the hub
+   *  registering a phantom `dahrk-doctor` node against the tenant. No default: the compiler is what
+   *  guarantees no caller reintroduces a borrowed identity. */
+  nodeId: string;
   clientVersion?: string;
   /** How long to wait for `welcome` after the socket opens (default 8000ms). */
   timeoutMs?: number;
@@ -57,14 +65,7 @@ function enrolmentDetail(code: number): string {
 
 /** Dial the hub, do the `hello`/`welcome` handshake, and resolve a single verdict. Never rejects. */
 export function probeHub(opts: HubProbeOptions): Promise<HubProbeResult> {
-  const {
-    hubUrl,
-    enrolToken,
-    runtimes = [],
-    nodeId = "dahrk-doctor",
-    clientVersion = "0.0.0",
-    timeoutMs = 8000,
-  } = opts;
+  const { hubUrl, enrolToken, runtimes = [], nodeId, clientVersion = "0.0.0", timeoutMs = 8000 } = opts;
 
   return new Promise((resolve) => {
     let settled = false;

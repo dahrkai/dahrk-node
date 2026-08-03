@@ -118,7 +118,7 @@ function deps(host: HostFacts, out: string[], node = "v22.0.0"): Partial<Preflig
 
 test("runPreflight: a sound floor exits 0, streams all five stages, and links the report", async () => {
   const out: string[] = [];
-  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1" }, deps(okHost, out));
+  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1", nodeId: "node-under-test" }, deps(okHost, out));
   assert.equal(code, 0);
   const text = out.join("\n");
   // Every stage is streamed as `[n/5] <label>`.
@@ -131,14 +131,14 @@ test("runPreflight: a sound floor exits 0, streams all five stages, and links th
 test("runPreflight: an unsound floor (not a git repo) exits 1", async () => {
   const out: string[] = [];
   const host: HostFacts = { ...okHost, repo: { path: "/w/app", isGitRepo: false, headResolves: false, detail: "not a repo" } };
-  const code = await runPreflight({ repoPath: "/w/app" }, deps(host, out));
+  const code = await runPreflight({ repoPath: "/w/app", nodeId: "node-under-test" }, deps(host, out));
   assert.equal(code, 1);
   assert.match(out.join("\n"), /UNSOUND - 1 floor check failed/);
 });
 
 test("runPreflight: an old Node exits 1 as an unsound floor", async () => {
   const out: string[] = [];
-  const code = await runPreflight({ repoPath: "/w/app" }, deps(okHost, out, "v18.19.0"));
+  const code = await runPreflight({ repoPath: "/w/app", nodeId: "node-under-test" }, deps(okHost, out, "v18.19.0"));
   assert.equal(code, 1);
 });
 
@@ -146,7 +146,7 @@ test("runPreflight: findings alone stay sound (exit 0) - a missing tool is a fin
   const out: string[] = [];
   const host: HostFacts = { ...okHost, tools: { ...okTools, docker: false } };
   // Supply a (reachable) hub so the only finding is the missing docker.
-  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1" }, deps(host, out));
+  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1", nodeId: "node-under-test" }, deps(host, out));
   assert.equal(code, 0);
   const text = out.join("\n");
   assert.match(text, /SOUND with 1 finding\./);
@@ -156,7 +156,7 @@ test("runPreflight: findings alone stay sound (exit 0) - a missing tool is a fin
 test("runPreflight: an unreachable hub is a finding, never an unsound floor (issue-less run)", async () => {
   const out: string[] = [];
   const d = { ...deps(okHost, out), probeHub: async () => ({ ok: false as const, reason: "unreachable" as const, detail: "ECONNREFUSED" }) };
-  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1" }, d);
+  const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1", nodeId: "node-under-test" }, d);
   assert.equal(code, 0, "hub down does not fail the floor");
   assert.match(out.join("\n"), /SOUND with/);
 });

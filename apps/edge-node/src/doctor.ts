@@ -187,6 +187,10 @@ export interface DoctorInputs {
   hubUrl?: string;
   token?: string;
   clientVersion?: string;
+  /** This machine's real node id, presented on the probe `hello` (DHK-1041). The hub claims a one-shot
+   *  enrolment token for whoever presents it, so doctor must check the token AS this node: probing under
+   *  a borrowed id spent the token on a phantom and left the node unable to enrol at all. */
+  nodeId: string;
 }
 
 /**
@@ -203,6 +207,7 @@ export async function runDoctor(inputs: DoctorInputs, deps: Partial<DoctorDeps> 
         ...(inputs.token ? { enrolToken: inputs.token } : {}),
         runtimes: statuses.filter((s) => s.available).map((s) => s.runtime),
         ...(inputs.clientVersion ? { clientVersion: inputs.clientVersion } : {}),
+        nodeId: inputs.nodeId,
       })
     : undefined;
 
