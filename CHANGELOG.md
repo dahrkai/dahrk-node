@@ -18,6 +18,23 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **Connecting a node from the web app now works at all.** `dahrk start --token` checks a token with the
+  hub before writing it to disk, and that check was made under a fixed throwaway identity rather than
+  this machine's own. Because a connect token is claimed by the first node that presents it, the check
+  itself claimed the token, and the node that started seconds later was refused as an impostor: the
+  install reported success, `dahrk status` showed the new tenant read straight off the disk it had just
+  written, and the node sat parked serving nothing while the setup page waited for it forever. Every
+  probe now runs as this node, so checking a token and using it are the same act.
+- **Re-enrolling a node that is already running takes effect.** `dahrk start --token <new>` wrote the new
+  token to disk but left the running daemon on the old one, because starting something already running is
+  deliberately a no-op. The node kept serving the previous tenant, and its next connection quietly wrote
+  the old token back over the new one, so the re-enrolment vanished with no error anywhere. Changing a
+  node's enrolment now restarts it. If a stage is in flight the restart is refused, as before, but it now
+  says plainly that the token is saved and the node is still on the previous one.
+- **A node that heals itself no longer breaks itself again.** A node whose token the hub rejected parks
+  and watches for a better one. On finding it, it reconnected correctly, then cached the *rejected* token
+  over the good one, so the next reboot parked forever on a token nothing could improve on. It now caches
+  the token the hub actually accepted.
 - **A running node now checks for a new release as often as it says it does.** The daemon woke on the
   same period as the "have we checked recently?" gate, but the timestamp it compares against is written
   when a check finishes, so every wake arrived a fraction of a second too early, did nothing, and left

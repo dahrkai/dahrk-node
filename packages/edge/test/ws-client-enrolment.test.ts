@@ -149,6 +149,39 @@ test("a parked node SELF-HEALS when a fresh token lands on disk - no restart", a
   });
 });
 
+test("a healed node reports the ACCEPTED token to onEnrolled, not the rejected one it booted with (DHK-1041)", async () => {
+  await withHub(async ({ url }) => {
+    const abort = new AbortController();
+    const cap = captureLog();
+    let onDisk = REVOKED_TOKEN;
+    const enrolled: Array<{ tenantId: string; enrolToken: string }> = [];
+    try {
+      await startEdgeNode({
+        hubUrl: url,
+        runtimes: ["claude-code"],
+        enrolToken: REVOKED_TOKEN,
+        refreshEnrolToken: () => onDisk,
+        parkPollMs: 20,
+        signal: abort.signal,
+        onEnrolled: ({ tenantId, enrolToken }) => void enrolled.push({ tenantId, enrolToken }),
+      });
+      await waitFor(() => markers(cap.lines, "EDGE_PARKED") === 1);
+      onDisk = GOOD_TOKEN;
+      await waitFor(() => enrolled.length === 1);
+
+      // The CLI persists whatever this reports. Reporting the boot-time token here wrote the REVOKED one
+      // straight back over the good token that had just healed the node, so the next reboot parked again
+      // on a token `refreshEnrolToken` could never improve on: a node that fixed itself, then broke
+      // itself, for good.
+      assert.equal(enrolled[0]?.enrolToken, GOOD_TOKEN, "it caches the token the hub accepted");
+      assert.equal(enrolled[0]?.tenantId, "t_node");
+    } finally {
+      abort.abort();
+      cap.restore();
+    }
+  });
+});
+
 test("without a token source (ephemeral / CI) a rejection is still fatal: exit 78, no park", async () => {
   await withHub(async ({ url, hellos }) => {
     const abort = new AbortController();

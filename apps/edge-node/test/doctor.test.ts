@@ -107,7 +107,7 @@ const okStatuses: RuntimeStatus[] = [
 test("runDoctor: happy path returns exit 0 and prints a green report", async () => {
   const lines: string[] = [];
   const code = await runDoctor(
-    { hubUrl: "ws://h:1", token: "sket_good" },
+    { hubUrl: "ws://h:1", token: "sket_good", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
       probeRuntimes: async () => okStatuses,
@@ -121,7 +121,7 @@ test("runDoctor: happy path returns exit 0 and prints a green report", async () 
 
 test("runDoctor: a failing check returns exit 1", async () => {
   const code = await runDoctor(
-    { hubUrl: "ws://h:1", token: "sket_bad" },
+    { hubUrl: "ws://h:1", token: "sket_bad", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
       probeRuntimes: async () => okStatuses,
@@ -135,7 +135,7 @@ test("runDoctor: a failing check returns exit 1", async () => {
 test("runDoctor: with no hub url it never probes and still fails on the missing hub", async () => {
   let probed = false;
   const code = await runDoctor(
-    { token: "sket_x" },
+    { token: "sket_x", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
       probeRuntimes: async () => okStatuses,
@@ -158,7 +158,7 @@ test("runDoctor: runtime detection asks no credential question, so one probe is 
   let probes = 0;
   const lines: string[] = [];
   await runDoctor(
-    { hubUrl: "ws://h:1", token: "sket_good" },
+    { hubUrl: "ws://h:1", token: "sket_good", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
       probeRuntimes: async () => {

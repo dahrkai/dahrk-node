@@ -121,8 +121,13 @@ export interface EdgeOptions {
    *  identity the hub assigned. The CLI uses it to cache the token (so the next bare `dahrk start`
    *  re-attaches without `--token`) and the name/tenant (so `dahrk status` can name the node without
    *  dialling). Gating on the welcome, rather than on connect, is what keeps a token the hub would
-   *  reject from ever reaching the disk. */
-  onEnrolled?: (welcome: { name: string; tenantId: string }) => void;
+   *  reject from ever reaching the disk.
+   *
+   *  `enrolToken` is the token the hub JUST accepted, which is not always the one this process booted
+   *  with: a parked node swaps in a fresh token from disk when it unparks (DHK-1041). Reporting the
+   *  boot-time token instead meant that the moment a parked node healed, it wrote the REJECTED token
+   *  back over the good one, and the next reboot parked forever on a token nothing could refresh. */
+  onEnrolled?: (welcome: { name: string; tenantId: string; enrolToken: string }) => void;
   /**
    * Apply a hub-driven self-update (DHK-1001/DHK-341). Called when the hub sends an `upgrade` frame to a
    * node whose operator opted into `portal` upgrades.
@@ -585,7 +590,9 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // The token is now known-good: let the caller cache it. Never fatal - failing to persist only
       // means the next boot needs `--token` again, which must not take down a healthy node.
       try {
-        opts.onEnrolled?.({ name: msg.name, tenantId: msg.tenantId });
+        // `enrolToken`, not `opts.enrolToken`: report what the hub accepted, which after an unpark is
+        // the fresh token off disk rather than the one this process started with.
+        if (enrolToken) opts.onEnrolled?.({ name: msg.name, tenantId: msg.tenantId, enrolToken });
       } catch (e) {
         log.warn({ err: e }, `EDGE_ENROL_PERSIST_FAILED ${(e as Error).message}`);
       }

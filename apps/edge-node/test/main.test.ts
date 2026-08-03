@@ -10,10 +10,20 @@ import {
   buildEdgeOptions,
   resolveNodeId,
   resolveRuntimes,
+  serviceActionFor,
   DEFAULT_HUB_URL,
 } from "../src/main.ts";
 
 const base: NodeJS.ProcessEnv = { DAHRK_HUB_URL: "ws://127.0.0.1:7071" };
+
+test("a re-enrolment restarts the daemon; an ordinary start does not (DHK-1041)", () => {
+  // `runNodeStart` no-ops on a healthy node, and the running daemon holds its token from its own boot, so
+  // writing a new token to disk alone changed nothing about what the node was actually serving.
+  assert.equal(serviceActionFor(true), "restart");
+  // The ordinary `dahrk start` / reboot path must keep the no-op: restarting a working node on every
+  // invocation would kill stages for nothing.
+  assert.equal(serviceActionFor(false), "start");
+});
 
 test("ambient edge: no enrolment env leaves the managed fields absent", () => {
   const opts = buildEdgeOptions({ ...base });

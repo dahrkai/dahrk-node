@@ -184,6 +184,9 @@ export interface PreflightInputs {
   hubUrl?: string;
   token?: string;
   clientVersion?: string;
+  /** This machine's real node id, presented on the probe `hello` (DHK-1041). See `DoctorInputs.nodeId`:
+   *  a probe under a borrowed id claims the operator's one-shot token for a node that does not exist. */
+  nodeId: string;
 }
 
 /** One stage's aggregated verdict, streamed as a `[n/N] <label>` line plus any finding bullets. */
@@ -241,6 +244,7 @@ export async function runPreflight(inputs: PreflightInputs, deps: Partial<Prefli
         ...(inputs.token ? { enrolToken: inputs.token } : {}),
         runtimes: ["claude-code"],
         ...(inputs.clientVersion ? { clientVersion: inputs.clientVersion } : {}),
+        nodeId: inputs.nodeId,
       })
     : undefined;
   const nodeChecks: CheckResult[] = [
