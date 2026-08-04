@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-04
+
 ### Fixed
 
 - **`dahrk status` called a switched-off node a crash-loop, and sent you to an empty log.** When the
@@ -1332,7 +1334,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...v0.3.1
