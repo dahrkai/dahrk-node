@@ -24,7 +24,7 @@
  * them.
  */
 import type { JobLedgerEntry, RuntimeStatus } from "@dahrk/edge";
-import { detectManager, parseServiceStatus, statusCommand, unitPath, type ServiceStatus } from "./service.js";
+import { detectManager, probeService, unitPath, type ServiceStatus } from "./service.js";
 import { readState, stateFile, type NodeState } from "./state.js";
 import { ago, arrow, dim, hint, hints, humanDuration, kv, symbol, verdict, type Level } from "./ui.js";
 import {
@@ -44,6 +44,17 @@ export type NodePresence =
   | { kind: "foreign"; pid: number }
   | { kind: "stopped" }
   | { kind: "not-installed" }
+  /**
+   * The unit is on disk and the SUPERVISOR is not running it: launchd has never been given the label, or it
+   * carries a `-w` disable; systemd has the unit disabled or masked. Nothing will start it, and nothing has.
+   *
+   * Distinct from `crashed` because the remedy is different and the crash-loop advice is actively wrong
+   * here: the process never ran, so `dahrk logs` shows an empty log and `dahrk diagnose` has nothing to
+   * diagnose. `dahrk start` is the fix - its `launchctl load -w` clears the disable and loads the job in one
+   * act. This is the state a portal-driven upgrade left nodes in before the restart was fixed, and for the
+   * whole of that outage `status` called it a crash-loop.
+   */
+  | { kind: "not-loaded"; disabled?: boolean }
   | { kind: "crashed" }
   | { kind: "no-supervisor" };
 
@@ -108,6 +119,13 @@ function presenceVerdict(f: StatusFacts): { level: Level; text: string } {
       return { level: "warn", text: "Node stopped" };
     case "not-installed":
       return { level: "warn", text: "Node not installed" };
+    case "not-loaded":
+      return {
+        level: "fail",
+        text: f.presence.disabled
+          ? "Node is installed but the supervisor has it DISABLED - nothing will start it"
+          : "Node is installed but the supervisor has never loaded it - it has not run",
+      };
     case "crashed":
       return { level: "fail", text: "Node is installed but NOT running - it is failing to start or crash-looping" };
     case "no-supervisor":
@@ -126,6 +144,10 @@ function presenceHints(f: StatusFacts): string[] {
       return [hints([["start", "dahrk start"]])];
     case "not-installed":
       return [hints([["start", "dahrk start"]])];
+    // Not `logs -f`, and not `diagnose`: this node never started, so there is nothing in either of them.
+    // `start` is the whole answer - it clears the disable flag and loads the job in one act.
+    case "not-loaded":
+      return [hints([["start", "dahrk start"], ["check", "dahrk doctor"]])];
     case "crashed":
       return [hints([["logs", "dahrk logs -f"], ["check", "dahrk doctor"], ["report", "dahrk diagnose"]])];
     case "no-supervisor":
@@ -273,7 +295,14 @@ function jobLine(j: JobLedgerEntry, now: number): string {
  *  parked, and it will serve nothing until a human re-enrols it. A health check that passes on that is
  *  worse than no health check, and it is what let this node sit dead for hours. */
 export function isUnhealthy(f: Pick<StatusFacts, "presence" | "connection">): boolean {
-  return f.presence.kind === "crashed" || isEnrolmentBlocked(f.connection);
+  // `not-loaded` counts: a node whose supervisor has been switched off is as down as a crash-looping one,
+  // and just as unattended. What keeps this from crying wolf over a deliberate `dahrk stop` is that
+  // `resolvePresence` tests the operator's recorded intent FIRST - a stopped node never reaches this kind.
+  return (
+    f.presence.kind === "crashed" ||
+    f.presence.kind === "not-loaded" ||
+    isEnrolmentBlocked(f.connection)
+  );
 }
 
 /** Injectable IO so the shell tests without a host, a supervisor, or a real state file. */
@@ -293,6 +322,9 @@ export interface StatusDeps {
    *  whoever supervises it, so this is what makes a foreground / pm2 / container node visible to `status` at
    *  all - asking only launchd is what made a perfectly healthy foreground node report as "not installed". */
   lockedPid: () => number | undefined;
+  /** This user's uid, which launchd's disable probe needs to name the domain (`gui/<uid>`). Injected only so
+   *  the probe's argv is deterministic under test; the default is `process.getuid?.()`. */
+  uid?: number;
   /** What the node is running, from `~/.dahrk/jobs.json`. */
   jobs: () => JobLedgerEntry[];
   /** The last connection marker in `node.jsonl`, if any, scoped to the live process when there is one. */
@@ -313,9 +345,17 @@ export function resolvePresence(
   if (lockedPid !== undefined) return { kind: "foreign", pid: lockedPid };
   if (!service) return { kind: "no-supervisor" };
   if (!service.installed) return { kind: "not-installed" };
-  // Installed, not running, and nobody asked for that: it is failing to start or crash-looping. `desired` is
-  // what disambiguates it from a node the operator deliberately stopped - it is why we record intent at all.
-  return desired === "stopped" ? { kind: "stopped" } : { kind: "crashed" };
+  // Intent first, and it has to be: `dahrk stop` IS an `unload -w` / a `disable`, so a deliberately stopped
+  // node has exactly the same shape at the supervisor as a broken one. `desired` is the only thing that
+  // tells them apart, and it is why we record intent at all.
+  if (desired === "stopped") return { kind: "stopped" };
+  // Nobody asked for it to be down, and the supervisor is not even holding it: nothing on this host will
+  // start it. A different fault from a crash-loop, and the one below cannot be diagnosed from a log.
+  if (!service.loaded) {
+    return { kind: "not-loaded", ...(service.disabled !== undefined ? { disabled: service.disabled } : {}) };
+  }
+  // Registered, wanted, and still not up: it is failing to start or crash-looping.
+  return { kind: "crashed" };
 }
 
 /** Gather every fact the report needs. The IO half, so `renderStatus` can stay pure and `start` / `stop` /
@@ -329,10 +369,12 @@ export async function gatherFacts(
   if (manager !== "unsupported") {
     const unit = unitPath(manager, deps.homeDir);
     const exists = deps.fileExists(unit);
-    // Only ask the supervisor when the unit is actually there: `launchctl list` on an unknown label is
-    // a non-zero exit we would otherwise have to special-case, and spawning at all is wasted work.
-    const probe = exists ? deps.capture(statusCommand(manager)) : { code: 1, stdout: "" };
-    service = parseServiceStatus(manager, exists, probe);
+    // `probeService` is the one place that knows how to ask this, shared with `doctor` and `restart` so the
+    // three cannot drift. It skips the supervisor entirely when there is no unit, and only pays for the
+    // second (disable) probe once the first has said the job is not loaded.
+    service = probeService(manager, exists, deps.capture, {
+      ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
+    });
   }
 
   const state = readState(stateFile(deps.env));

@@ -703,6 +703,9 @@ function statusDeps(env: NodeJS.ProcessEnv): StatusDeps {
       const held = parseLock(readFileOrUndefined(lockFile(env)));
       return held !== undefined && isAlive(held) ? held : undefined;
     },
+    // launchd's disable probe addresses a domain by uid (`gui/501`). Undefined off macOS, where nothing
+    // asks for it.
+    ...(process.getuid ? { uid: process.getuid() } : {}),
     // Best-effort by construction: a missing or unreadable ledger reads as "no jobs in flight", which shows
     // an idle node rather than failing the whole report over a file that only exists while work is running.
     jobs: () => fileJobLedger(jobLedgerFile(stateDir(env)), () => {}).all(),

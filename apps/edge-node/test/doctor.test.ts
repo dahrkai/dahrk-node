@@ -5,6 +5,7 @@ import {
   checkNode,
   checkRuntimes,
   checkHub,
+  checkService,
   checkToken,
   formatReport,
   runDoctor,
@@ -100,6 +101,59 @@ test("formatReport: a FAIL drives the summary; warnings alone still read as PASS
 
 // -- runDoctor orchestration (injected deps: no network, no host probing) ---
 
+/** A host whose supervisor has the node up. Injected into every `runDoctor` case that is not about the
+ *  service, so the doctor tests never touch the real host - the default gatherer would spawn `launchctl`,
+ *  and CI would then be reporting on whatever machine happened to run it. */
+const RUNNING_HERE = () => ({
+  presence: { kind: "running" as const, pid: 42 },
+  service: { installed: true, running: true, pid: 42, loaded: true },
+});
+
+test("checkService: absence is a pass, because doctor runs BEFORE the node exists", () => {
+  // A preflight that failed on a bare host would be telling every new operator that their machine is broken
+  // when the only thing wrong is that they have not run `dahrk start` yet.
+  assert.equal(checkService({ kind: "not-installed" }).status, "pass");
+  assert.equal(checkService({ kind: "stopped" }).status, "pass");
+  assert.equal(checkService({ kind: "running", pid: 42 }).status, "pass");
+  assert.equal(checkService({ kind: "foreign", pid: 99 }).status, "pass");
+  assert.equal(checkService({ kind: "no-supervisor" }).status, "warn");
+  // A crash-loop is `status`'s to shout about; doctor can legitimately catch a node inside its throttle.
+  assert.equal(checkService({ kind: "crashed" }, { installed: true, running: false, loaded: true }).status, "warn");
+});
+
+test("checkService: a switched-off supervisor is the one failure, and it names the fix", () => {
+  // The check doctor did not have. Every other check passed on the node this was written for - Node ran, the
+  // runtimes resolved, the hub answered, the token was valid - and the node was dead, because nothing was
+  // going to start it.
+  const off = checkService({ kind: "not-loaded", disabled: true });
+  assert.equal(off.status, "fail");
+  assert.match(off.detail ?? "", /DISABLED/);
+  assert.match(off.detail ?? "", /dahrk start/);
+
+  const never = checkService({ kind: "not-loaded" });
+  assert.equal(never.status, "fail");
+  assert.match(never.detail ?? "", /dahrk start/);
+});
+
+test("runDoctor: a disabled service fails the report on its own", async () => {
+  const lines: string[] = [];
+  const code = await runDoctor(
+    { hubUrl: "ws://h:1", token: "sket_good", nodeId: "node-under-test" },
+    {
+      nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      presence: () => ({
+        presence: { kind: "not-loaded", disabled: true },
+        service: { installed: true, running: false, loaded: false, disabled: true },
+      }),
+      probeRuntimes: async () => okStatuses,
+      probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a" }),
+      out: (l) => lines.push(l),
+    },
+  );
+  assert.equal(code, 1, "everything else was green and the node was still down");
+  assert.match(lines.join("\n"), /DISABLED/);
+});
+
 const okStatuses: RuntimeStatus[] = [
   { runtime: "claude-code", capable: true, credential: "ambient", available: true, detail: "ambient login on this host" },
 ];
@@ -110,6 +164,7 @@ test("runDoctor: happy path returns exit 0 and prints a green report", async () 
     { hubUrl: "ws://h:1", token: "sket_good", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      presence: RUNNING_HERE,
       probeRuntimes: async () => okStatuses,
       probeHub: async () => ({ ok: true, nodeId: "n", name: "x", tenantId: "t_a" }),
       out: (l) => lines.push(l),
@@ -124,6 +179,7 @@ test("runDoctor: a failing check returns exit 1", async () => {
     { hubUrl: "ws://h:1", token: "sket_bad", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      presence: RUNNING_HERE,
       probeRuntimes: async () => okStatuses,
       probeHub: async () => ({ ok: false, reason: "rejected", code: 4401, detail: "bad" }),
       out: () => {},
@@ -138,6 +194,7 @@ test("runDoctor: with no hub url it never probes and still fails on the missing 
     { token: "sket_x", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      presence: RUNNING_HERE,
       probeRuntimes: async () => okStatuses,
       probeHub: async () => {
         probed = true;
@@ -161,6 +218,7 @@ test("runDoctor: runtime detection asks no credential question, so one probe is 
     { hubUrl: "ws://h:1", token: "sket_good", nodeId: "node-under-test" },
     {
       nodeVersion: `v${MIN_NODE_MAJOR}.0.0`,
+      presence: RUNNING_HERE,
       probeRuntimes: async () => {
         probes += 1;
         return [{ runtime: "pi", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }];

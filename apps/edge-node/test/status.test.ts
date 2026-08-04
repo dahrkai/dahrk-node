@@ -36,7 +36,7 @@ const facts = (over: Partial<StatusFacts> = {}): StatusFacts => ({
   runtimes: [{ runtime: "claude-code", capable: true, credential: "brokered", available: true, detail: "brokered credentials from the hub" }],
   presence: { kind: "running", pid: 42 },
   jobs: [],
-  service: { installed: true, running: true, pid: 42 },
+  service: { installed: true, running: true, pid: 42, loaded: true },
   // Checked recently, and current: the boring happy case, so a test that cares about currency has to say so.
   update: { kind: "current", checkedAt: NOW - 60_000 },
   updateIntervalMs: 6 * 3600_000,
@@ -75,7 +75,7 @@ test("a token from the environment reads as enrolled-but-uncached, not as 'not e
 });
 
 test("a crash-loop is called out loudly, and points at the logs", () => {
-  const out = report({ presence: { kind: "crashed" }, service: { installed: true, running: false } });
+  const out = report({ presence: { kind: "crashed" }, service: { installed: true, running: false, loaded: true } });
   assert.match(out, /NOT running/);
   assert.match(out, /crash-looping/);
   assert.match(out, /dahrk logs -f/);
@@ -84,7 +84,7 @@ test("a crash-loop is called out loudly, and points at the logs", () => {
 test("a node the operator STOPPED is reported as stopped, not as a crash-loop", () => {
   // Same supervisor facts as the test above - installed, not running. Only the recorded intent differs,
   // which is the whole reason we record it: the supervisor cannot tell us why it is down.
-  const out = report({ presence: { kind: "stopped" }, service: { installed: true, running: false } });
+  const out = report({ presence: { kind: "stopped" }, service: { installed: true, running: false, loaded: false } });
   assert.match(out, /Node stopped/);
   assert.doesNotMatch(out, /crash-looping/);
 });
@@ -158,22 +158,53 @@ test("no service installed, and no runtimes, each explain the consequence", () =
 test("resolvePresence: a node held only by the pidfile is running, NOT 'not installed'", () => {
   // The bug this fixes: `status` asked launchd and nothing else, so a perfectly healthy
   // `dahrk start --foreground` (or pm2, or a container) reported as absent.
-  const p = resolvePresence({ installed: false, running: false }, 4821, undefined);
+  const p = resolvePresence({ installed: false, running: false, loaded: false }, 4821, undefined);
   assert.deepEqual(p, { kind: "foreign", pid: 4821 });
   assert.match(renderStatus(facts({ presence: p })).join("\n"), /running under another supervisor \(pid 4821\)/);
 });
 
 test("resolvePresence: the supervisor wins when it has the node up", () => {
-  assert.deepEqual(resolvePresence({ installed: true, running: true, pid: 7 }, 7, undefined), {
+  assert.deepEqual(resolvePresence({ installed: true, running: true, pid: 7, loaded: true }, 7, undefined), {
     kind: "running",
     pid: 7,
   });
 });
 
 test("resolvePresence: installed, down, nobody holding the lock - crashed unless it was stopped on purpose", () => {
-  const down = { installed: true, running: false };
+  // Loaded: the supervisor is holding this job and it still will not stay up.
+  const down = { installed: true, running: false, loaded: true };
   assert.deepEqual(resolvePresence(down, undefined, undefined), { kind: "crashed" });
   assert.deepEqual(resolvePresence(down, undefined, "stopped"), { kind: "stopped" });
+});
+
+test("resolvePresence: a SWITCHED-OFF supervisor is not a crash-loop", () => {
+  // The state a portal upgrade used to leave behind: the unit is on disk, nothing is loaded, and the
+  // operator never asked for any of it. Calling it a crash-loop sent them to a log that was empty, because
+  // the process had never run.
+  const off = { installed: true, running: false, loaded: false, disabled: true };
+  assert.deepEqual(resolvePresence(off, undefined, undefined), { kind: "not-loaded", disabled: true });
+  // Intent decides first, and it must: `dahrk stop` IS a disable, so a deliberately stopped node has
+  // exactly this shape and must never be reported as a fault.
+  assert.deepEqual(resolvePresence(off, undefined, "stopped"), { kind: "stopped" });
+  // Not loaded, but we could not find out whether that was deliberate: still broken, still not a crash-loop.
+  assert.deepEqual(resolvePresence({ installed: true, running: false, loaded: false }, undefined, undefined), {
+    kind: "not-loaded",
+  });
+});
+
+test("a switched-off node names the disable, offers `dahrk start`, and fails the health check", () => {
+  const out = report({
+    presence: { kind: "not-loaded", disabled: true },
+    service: { installed: true, running: false, loaded: false, disabled: true },
+  });
+  assert.match(out, /DISABLED/);
+  assert.match(out, /dahrk start/);
+  // The three commands that were offered before, all of which read an empty log or a log-shaped nothing.
+  assert.doesNotMatch(out, /crash-looping/);
+  assert.doesNotMatch(out, /dahrk logs -f/);
+  assert.doesNotMatch(out, /dahrk diagnose/);
+  // A node nobody switched off deliberately, which is down: `status` must exit non-zero for a health check.
+  assert.equal(isUnhealthy({ presence: { kind: "not-loaded", disabled: true } }), true);
 });
 
 // --- In-flight work ---------------------------------------------------------------------------
@@ -376,6 +407,36 @@ test("runStatus: installed but down exits 1, so it works as a health check in a 
     // launchd knows the label but the job is not up: a plist with no "PID" key.
     const d = deps({ stateDir: dir, capture: () => ({ code: 0, stdout: '\t"LastExitStatus" = 78;\n' }) });
     assert.equal(await runStatus({ clientVersion: "0.1.7", hubUrl: "wss://x" }, d), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runStatus: an agent the supervisor was told not to run is diagnosed as exactly that", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-status-"));
+  try {
+    const out: string[] = [];
+    const spawned: string[][] = [];
+    // The whole outage, at the seam: `launchctl list` does not know the label (it was unloaded with `-w`),
+    // and the disabled listing names us. Before this, `status` called it a crash-loop.
+    const d = deps({
+      stateDir: dir,
+      out: (l) => void out.push(l),
+      uid: 501,
+      capture: (argv) => {
+        spawned.push(argv);
+        return argv[1] === "list"
+          ? { code: 113, stdout: "" }
+          : { code: 0, stdout: 'disabled services = {\n\t"ai.dahrk.node" => disabled\n}' };
+      },
+    });
+
+    assert.equal(await runStatus({ clientVersion: "0.1.7", hubUrl: "wss://x" }, d), 1);
+    const text = out.join("\n");
+    assert.match(text, /DISABLED/);
+    assert.match(text, /dahrk start/);
+    assert.doesNotMatch(text, /crash-looping/);
+    assert.deepEqual(spawned[1], ["launchctl", "print-disabled", "gui/501"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

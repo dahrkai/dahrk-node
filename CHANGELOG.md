@@ -6,6 +6,27 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dahrk status` called a switched-off node a crash-loop, and sent you to an empty log.** When the
+  service manager has been told not to run the node - which is what an interrupted restart used to
+  leave behind, and what happens if the service is ever unloaded by hand - the node is not failing to
+  start, it is simply never being started. Status reported it as "failing to start or crash-looping"
+  and offered `dahrk logs`, `dahrk doctor` and `dahrk diagnose`, none of which have anything to show
+  for a process that never ran. It now says the service is disabled, and offers the one command that
+  fixes it, `dahrk start`. A node stopped deliberately with `dahrk stop` still reports as stopped. (#172)
+- **`dahrk doctor` never checked whether anything was going to run the node.** It checked the Node
+  version, the runtimes, the hub and the token, all of which pass happily on a host whose service is
+  switched off and whose node is therefore dead. Doctor now reports the service too. It stays quiet
+  about a node that is merely not installed yet, since running doctor before `dahrk start` is exactly
+  what it is for. (#172)
+- **A restart could still disable the service in one narrow case.** When a restart runs inside the
+  supervised node and the service manager cannot be asked to do it directly, the node used to fall
+  back to stopping and starting itself, which cannot work from there: the stop kills the process
+  before it reaches the start. It now refuses that fallback and says how to restart from a terminal,
+  leaving the node up on the old build rather than down on the new one. A restart's stop step also no
+  longer marks the service disabled, so even an interrupted one comes back at the next login. (#172)
+
 ## [0.3.3] - 2026-08-04
 
 ### Fixed

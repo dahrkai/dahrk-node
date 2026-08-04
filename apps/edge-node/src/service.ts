@@ -133,6 +133,19 @@ export interface ServicePlan {
    * process running the command was never the service in the first place.
    */
   restartCommands: ServiceCommand[];
+  /**
+   * The stop half of a RESTART, which is deliberately not the same command as `dahrk stop`.
+   *
+   * `stop` means "and stay stopped", so it needs launchd's `-w` and systemd's `disable`. A restart means the
+   * exact opposite, and borrowing `stopCommands` for it is what turned a self-unload into a permanent
+   * outage: the process died mid-command so the start half never ran, and the `-w` it had just written meant
+   * launchd would not bring the job back at the next login either.
+   *
+   * Without the flag, even a restart that kills the process running it leaves the agent ENABLED, so
+   * `RunAtLoad` and the next login restore the node by themselves. That is the difference between a bad
+   * minute and a node nobody can bring back without a terminal.
+   */
+  restartStopCommands: ServiceCommand[];
   uninstallCommands: ServiceCommand[];
   logHint: string;
 }
@@ -295,6 +308,8 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
           ],
         },
       ],
+      // No `-w`: a restart must never write the disable flag. See `restartStopCommands`.
+      restartStopCommands: [{ argv: ["launchctl", "unload", filePath], ignoreFailure: true }],
       uninstallCommands: [{ argv: ["launchctl", "unload", "-w", filePath], ignoreFailure: true }],
       logHint: "dahrk logs -f",
     };
@@ -322,6 +337,9 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
     // enabled throughout, and systemd owns the kill so the process running this command may be the one
     // being replaced.
     restartCommands: [{ argv: ["systemctl", "--user", "restart", SYSTEMD_UNIT] }],
+    // `stop`, not `disable --now`: a restart must leave the unit enabled, so a boot or a login brings the
+    // node back even if this process does not live to start it. See `restartStopCommands`.
+    restartStopCommands: [{ argv: ["systemctl", "--user", "stop", SYSTEMD_UNIT], ignoreFailure: true }],
     uninstallCommands: [
       { argv: ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], ignoreFailure: true },
       { argv: ["systemctl", "--user", "daemon-reload"], ignoreFailure: true },
@@ -355,38 +373,151 @@ export interface ServiceStatus {
   installed: boolean;
   running: boolean;
   pid?: number;
+  /**
+   * The supervisor has the job REGISTERED and will run it: launchd knows the label, systemd has the unit
+   * enabled. False means the unit is sitting on disk and NOTHING will start it - a different failure from a
+   * crash-loop, with a different remedy, and until now they were reported as the same thing.
+   *
+   * It is the state a portal-driven upgrade used to leave behind (`launchctl unload -w` run from inside the
+   * supervised process: the process died mid-command, the load never ran, and `-w` made it stick), and
+   * `status` called it a crash-loop and sent the operator to an empty log.
+   *
+   * Not optional, so every construction site has to answer it rather than silently omitting it.
+   */
+  loaded: boolean;
+  /** Positively switched off: launchd's `-w` override, a systemd unit that is `disabled` or `masked`.
+   *  `undefined` means we did not ask or could not tell, which must never be read back as "enabled". */
+  disabled?: boolean;
+  /** Why the supervisor thinks it is down, when it says: launchd's `LastExitStatus`, systemd's `Result`. */
+  lastExit?: string;
 }
 
 /** The query to ask the supervisor whether the unit is up. `launchctl list <label>` prints a plist
  *  containing `"PID" = N;` when running (and exits non-zero when the label is unknown); `systemctl
- *  --user show` prints `ActiveState=`/`MainPID=` lines. Pure: the caller runs it and feeds back stdout. */
+ *  --user show` prints `ActiveState=`/`MainPID=` lines. Pure: the caller runs it and feeds back stdout.
+ *
+ *  systemd is also asked for `UnitFileState` and `Result`, which is where its answers to "is this job
+ *  registered at all?" and "how did it last die?" live. launchd answers the first by exiting non-zero and
+ *  needs a second probe to name a disable; see {@link disabledCommand}. */
 export function statusCommand(manager: "launchd" | "systemd"): string[] {
   return manager === "launchd"
     ? ["launchctl", "list", LAUNCHD_LABEL]
-    : ["systemctl", "--user", "show", SYSTEMD_UNIT, "-p", "ActiveState", "-p", "MainPID"];
+    : [
+        "systemctl",
+        "--user",
+        "show",
+        SYSTEMD_UNIT,
+        "-p",
+        "ActiveState",
+        "-p",
+        "MainPID",
+        "-p",
+        "UnitFileState",
+        "-p",
+        "Result",
+      ];
+}
+
+/**
+ * Ask launchd which labels carry a sticky disable override (what `launchctl unload -w` / `disable` writes).
+ *
+ * Only worth asking once `launchctl list` has already said the label is not loaded: it turns "nothing is
+ * running this" into "somebody switched this off", which is the sentence an operator can act on. Gating it
+ * that way also keeps the healthy path at exactly one spawn.
+ *
+ * systemd has no counterpart - its answer rides in on `UnitFileState` from {@link statusCommand} - so this
+ * returns undefined there.
+ */
+export function disabledCommand(manager: "launchd" | "systemd", uid?: number): string[] | undefined {
+  if (manager !== "launchd") return undefined;
+  return ["launchctl", "print-disabled", `gui/${uid ?? process.getuid?.() ?? ""}`];
+}
+
+/** Parse `launchctl print-disabled`. It prints one `"<label>" => <state>` line per override; macOS has
+ *  spelled the state both `enabled`/`disabled` and `true`/`false` across versions, so accept either. A label
+ *  the listing does not mention carries no override (`false`). Output we cannot read at all yields
+ *  `undefined` - "we could not ask" is not the same claim as "it is enabled", and only one of them is safe
+ *  to print. */
+export function parseDisabled(stdout: string, label: string): boolean | undefined {
+  const m = new RegExp(`"${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*=>\\s*(\\w+)`).exec(stdout);
+  if (m) return m[1] === "disabled" || m[1] === "true";
+  // A listing we recognise that simply does not name our label means no override is set: launchd prints
+  // `disabled services = {` and then one `"label" => state` line per override, so either marker is enough
+  // to know we are reading a real answer. Anything else (empty output, an error we cannot parse) leaves us
+  // without one, and `undefined` is how we say so.
+  return /disabled services/.test(stdout) || /=>/.test(stdout) ? false : undefined;
 }
 
 /** Parse the supervisor's answer. `installed` is decided by the unit file (passed in), not by the
  *  supervisor: a unit written but never loaded is installed-but-not-running, which is what we want to
- *  say. A non-zero exit means the supervisor does not know the label at all -> not running. */
+ *  say. A non-zero exit means the supervisor does not know the label at all -> not loaded, not running. */
 export function parseServiceStatus(
   manager: "launchd" | "systemd",
   unitExists: boolean,
   probe: { code: number; stdout: string },
 ): ServiceStatus {
-  if (!unitExists) return { installed: false, running: false };
-  if (probe.code !== 0) return { installed: true, running: false };
+  if (!unitExists) return { installed: false, running: false, loaded: false };
+  // launchd exits non-zero for a label it has never been given; systemd's `show` still answers for a unit
+  // it knows nothing about, so its `loaded` is decided by `UnitFileState` below rather than by this.
+  if (probe.code !== 0) return { installed: true, running: false, loaded: false };
   if (manager === "launchd") {
     // A launchd job that is loaded but not currently up has no "PID" key (only LastExitStatus).
     const pid = Number(/"PID"\s*=\s*(\d+);/.exec(probe.stdout)?.[1]);
-    return pid > 0 ? { installed: true, running: true, pid } : { installed: true, running: false };
+    if (pid > 0) return { installed: true, running: true, pid, loaded: true };
+    const lastExit = /"LastExitStatus"\s*=\s*(\d+);/.exec(probe.stdout)?.[1];
+    return {
+      installed: true,
+      running: false,
+      loaded: true,
+      ...(lastExit !== undefined ? { lastExit } : {}),
+    };
   }
   const active = /^ActiveState=(.*)$/m.exec(probe.stdout)?.[1]?.trim();
   const pid = Number(/^MainPID=(\d+)$/m.exec(probe.stdout)?.[1]);
+  const unitFileState = /^UnitFileState=(.*)$/m.exec(probe.stdout)?.[1]?.trim();
+  const result = /^Result=(.*)$/m.exec(probe.stdout)?.[1]?.trim();
   const running = active === "active";
-  return running && pid > 0
-    ? { installed: true, running: true, pid }
-    : { installed: true, running };
+  // Only the two states that mean "systemd has been told not to run this" count as not-loaded. Everything
+  // else - `enabled`, `static`, `enabled-runtime`, an absent property because an older client asked a
+  // narrower question - degrades to today's behaviour rather than inventing an alarm.
+  const off = unitFileState === "disabled" || unitFileState === "masked";
+  return {
+    installed: true,
+    running,
+    ...(running && pid > 0 ? { pid } : {}),
+    loaded: !off,
+    ...(off ? { disabled: true } : {}),
+    ...(result && result !== "success" ? { lastExit: result } : {}),
+  };
+}
+
+/**
+ * Everything the supervisor will tell us about the job, from one place.
+ *
+ * `status`, `doctor` and `liveNodePid` all want the same fact and must not drift on how they get it. It
+ * takes a bare `capture` rather than a whole {@link ServiceDeps} so `doctor` can reuse it without growing a
+ * supervisor dep bundle of its own.
+ *
+ * The launchd disable probe is a SECOND spawn, so it is run only when the first has already said the job is
+ * not loaded - the healthy path costs exactly what it did before. `opts.disabled: false` opts out entirely,
+ * for callers that only want liveness.
+ */
+export function probeService(
+  manager: "launchd" | "systemd",
+  unitExists: boolean,
+  capture: (argv: string[]) => { code: number; stdout: string },
+  opts: { uid?: number; disabled?: boolean } = {},
+): ServiceStatus {
+  // No unit means nothing to ask about: spawning to be told so is wasted work, and `launchctl list` on an
+  // unknown label is a non-zero exit we would only have to special-case anyway.
+  if (!unitExists) return parseServiceStatus(manager, false, { code: 1, stdout: "" });
+  const status = parseServiceStatus(manager, true, capture(statusCommand(manager)));
+  if (status.loaded || opts.disabled === false) return status;
+  const argv = disabledCommand(manager, opts.uid);
+  if (!argv) return status;
+  const probe = capture(argv);
+  const disabled = probe.code === 0 ? parseDisabled(probe.stdout, LAUNCHD_LABEL) : undefined;
+  return disabled === undefined ? status : { ...status, disabled };
 }
 
 /** Injectable IO so the install/uninstall shells run without a real host or supervisor. */
@@ -421,6 +552,10 @@ export interface ServiceDeps {
   /** What the node is running right now, from its on-disk ledger (`~/.dahrk/jobs.json`). Drives the guard
    *  that stops `stop` / `restart` silently killing a stage mid-flight. */
   inFlightJobs: () => JobLedgerEntry[];
+  /** This process's environment, for the one question it is authoritative about: `DAHRK_SUPERVISED=1` says
+   *  we ARE the supervised job, because our own units set it and nothing else does. `restart` needs that to
+   *  know it must not try to stop itself. */
+  env: NodeJS.ProcessEnv;
   out: (line: string) => void;
 }
 
@@ -556,7 +691,9 @@ export function liveNodePid(d: ServiceDeps): number | undefined {
   if (manager !== "unsupported") {
     const unit = unitPath(manager, d.homeDir);
     if (d.fileExists(unit)) {
-      const status = parseServiceStatus(manager, true, d.capture(statusCommand(manager)));
+      // `disabled: false`: this is a liveness question, and the answer to it does not depend on whether a
+      // down job was switched off or merely died. One spawn, as before.
+      const status = probeService(manager, true, d.capture, { disabled: false });
       if (status.running && status.pid) return status.pid;
     }
   }
@@ -713,9 +850,23 @@ export async function runNodeRestart(
   // Being killed by `kickstart` is not a failure here. The supervisor starts a fresh process from the
   // new build on disk; this one simply does not live to return, which is why nothing after it may be
   // load-bearing.
-  if (d.fileExists(plan.filePath) && liveNodePid(d) !== undefined) {
+  // `DAHRK_SUPERVISED` is set by the units we write and by nothing else, so when it is set we ARE the job
+  // and kickstart is right BY CONSTRUCTION - whatever the probe says. That matters because `liveNodePid`
+  // can answer "nothing running" about us: the launchd probe races a job that is up, and the pidfile can be
+  // missing or stale. Trusting it here is what left a door open onto the stop/start path below, which from
+  // inside the supervised process is a suicide with a disable flag attached.
+  const supervised = d.env.DAHRK_SUPERVISED === "1";
+  if (d.fileExists(plan.filePath) && (supervised || liveNodePid(d) !== undefined)) {
     const code = runCommands(plan.restartCommands, d);
     if (code === 0) return { kind: "running", code: 0, already: false };
+    if (supervised) {
+      // No fallback from in here. See `SUPERVISED_RESTART_REFUSED`.
+      d.out(
+        hint("The supervisor refused to restart this node, and it cannot safely stop itself to try again."),
+      );
+      d.out(hint("Restart it from a terminal with `dahrk restart`, or reboot the host."));
+      return { kind: "error", code: SUPERVISED_RESTART_REFUSED };
+    }
     // The supervisor refused (an unloaded agent, a stale label). Fall through to the stop/start path,
     // which handles a registered-but-not-loaded service.
     d.out(hint("The supervisor could not restart the node directly; falling back to a stop and start."));
@@ -724,7 +875,9 @@ export async function runNodeRestart(
   // Stop, but say nothing: a restart's stop is a step, not an outcome. Best-effort, because a node that is
   // already down is a perfectly good starting point for a restart - `dahrk restart` on a stopped node should
   // start it, not refuse.
-  if (d.fileExists(plan.filePath)) runCommands(plan.stopCommands, d);
+  // `restartStopCommands`, never `stopCommands`: a restart must not write the disable flag, so that even a
+  // stop that takes this process with it leaves something willing to start the node again.
+  if (d.fileExists(plan.filePath)) runCommands(plan.restartStopCommands, d);
 
   // `alwaysLoad`: we have just unloaded it, and we are not going to ask the supervisor whether it agrees.
   return runNodeStart(inputs, deps, { alwaysLoad: true });
@@ -770,6 +923,17 @@ export const BUSY_NODE = 4;
  *  (an unsupported host, where we stopped nothing) because the service really is stopped - and distinct
  *  from 0 because the host is still running a node, which is the opposite of what was asked for. */
 export const STOP_FOREIGN_NODE = 3;
+
+/**
+ * A restart running INSIDE the supervised process asked its supervisor to kick the job, and the supervisor
+ * refused. We stop there and say so, rather than falling back to stopping and starting the service.
+ *
+ * The fallback cannot work from here and is not merely unlikely to: it stops the very job executing it, so
+ * the process dies mid-command and the start half provably never runs. That is how a portal Update click
+ * took a node down permanently. An honest failure the upgrade path can report to the hub - and which leaves
+ * the node running the old build, alive, and reachable - beats a self-inflicted outage every time.
+ */
+export const SUPERVISED_RESTART_REFUSED = 5;
 
 /**
  * Who, if anyone, is still running a node once the service has been stopped?
@@ -953,6 +1117,7 @@ const defaultDeps = (): ServiceDeps => ({
   // Snapshot the operator's PATH at install time so the daemon finds git + the runtime CLIs (Homebrew /
   // npm-global bins) that a supervisor's minimal PATH would otherwise hide.
   pathEnv: process.env.PATH,
+  env: process.env,
   mkdirp: (dir) => void mkdirSync(dir, { recursive: true }),
   // The unit holds no secret any more, but it stays owner-only: it names paths on this host, and there is
   // no reason for it to be world-readable. `writeFileSync`'s `mode` applies only when it CREATES the file,
