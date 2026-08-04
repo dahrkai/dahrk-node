@@ -22,8 +22,12 @@ import {
   UNIT_FILE_MODE,
   stableNodeBin,
   parseServiceStatus,
+  parseDisabled,
+  disabledCommand,
+  probeService,
   statusCommand,
   unitPath,
+  SUPERVISED_RESTART_REFUSED,
   type PlanInputs,
   type ServiceDeps,
 } from "../src/service.ts";
@@ -270,27 +274,74 @@ test("install: the unit carries the token, so it is written 0600 and never world
 
 test("parseServiceStatus: launchd reports the pid when up, and not-running when the job has no PID", () => {
   const up = { code: 0, stdout: '{\n\t"PID" = 79747;\n\t"Label" = "ai.dahrk.node";\n}' };
-  assert.deepEqual(parseServiceStatus("launchd", true, up), { installed: true, running: true, pid: 79747 });
+  assert.deepEqual(parseServiceStatus("launchd", true, up), {
+    installed: true,
+    running: true,
+    pid: 79747,
+    loaded: true,
+  });
+  // Loaded, so launchd is still holding it and will restart it: a crash-loop, not a switched-off job.
   const down = { code: 0, stdout: '{\n\t"LastExitStatus" = 78;\n}' };
-  assert.deepEqual(parseServiceStatus("launchd", true, down), { installed: true, running: false });
+  assert.deepEqual(parseServiceStatus("launchd", true, down), {
+    installed: true,
+    running: false,
+    loaded: true,
+    lastExit: "78",
+  });
 });
 
 test("parseServiceStatus: systemd is running only when ActiveState=active", () => {
+  const up = { code: 0, stdout: "ActiveState=active\nMainPID=4242\nUnitFileState=enabled\nResult=success\n" };
+  assert.deepEqual(parseServiceStatus("systemd", true, up), {
+    installed: true,
+    running: true,
+    pid: 4242,
+    loaded: true,
+  });
+  const failed = { code: 0, stdout: "ActiveState=failed\nMainPID=0\nUnitFileState=enabled\nResult=exit-code\n" };
+  assert.deepEqual(parseServiceStatus("systemd", true, failed), {
+    installed: true,
+    running: false,
+    loaded: true,
+    lastExit: "exit-code",
+  });
+});
+
+test("parseServiceStatus: an older probe's narrower output still parses as loaded", () => {
+  // `show -p` omits what it was not asked for, so a client that asked only for ActiveState/MainPID (or a
+  // systemd that does not know the property) must degrade to today's answer, not to a false alarm.
   const up = { code: 0, stdout: "ActiveState=active\nMainPID=4242\n" };
-  assert.deepEqual(parseServiceStatus("systemd", true, up), { installed: true, running: true, pid: 4242 });
-  const failed = { code: 0, stdout: "ActiveState=failed\nMainPID=0\n" };
-  assert.deepEqual(parseServiceStatus("systemd", true, failed), { installed: true, running: false });
+  assert.deepEqual(parseServiceStatus("systemd", true, up), {
+    installed: true,
+    running: true,
+    pid: 4242,
+    loaded: true,
+  });
+});
+
+test("parseServiceStatus: a systemd unit that is disabled or masked is not loaded", () => {
+  // Nothing will start this at the next boot. It is the systemd spelling of the launchd `-w` disable, and
+  // it must not read as a crash-loop.
+  for (const state of ["disabled", "masked"]) {
+    assert.deepEqual(
+      parseServiceStatus("systemd", true, { code: 0, stdout: `ActiveState=inactive\nMainPID=0\nUnitFileState=${state}\n` }),
+      { installed: true, running: false, loaded: false, disabled: true },
+    );
+  }
 });
 
 test("parseServiceStatus: a unit on disk the supervisor does not know is installed-but-down", () => {
   // The state worth surfacing: the file is there, so it LOOKS installed, but nothing is keeping it up.
+  // launchd exiting non-zero means it has never been given the label at all, which is `loaded: false`.
   assert.deepEqual(parseServiceStatus("launchd", true, { code: 113, stdout: "" }), {
     installed: true,
     running: false,
+    loaded: false,
   });
   assert.deepEqual(parseServiceStatus("launchd", false, { code: 113, stdout: "" }), {
     installed: false,
     running: false,
+    loaded: false,
   });
 });
 
@@ -298,7 +349,79 @@ test("unitPath / statusCommand: the paths and probes match what install actually
   assert.equal(unitPath("launchd", "/home/u"), "/home/u/Library/LaunchAgents/ai.dahrk.node.plist");
   assert.equal(unitPath("systemd", "/home/u"), "/home/u/.config/systemd/user/dahrk-node.service");
   assert.deepEqual(statusCommand("launchd"), ["launchctl", "list", LAUNCHD_LABEL]);
-  assert.deepEqual(statusCommand("systemd").slice(0, 3), ["systemctl", "--user", "show"]);
+  // systemd is asked for the registration state and the last result too: `UnitFileState` is the only place
+  // it says "this unit is switched off", and without it a disabled unit reads as a crash-loop.
+  assert.deepEqual(statusCommand("systemd"), [
+    "systemctl",
+    "--user",
+    "show",
+    "dahrk-node.service",
+    "-p",
+    "ActiveState",
+    "-p",
+    "MainPID",
+    "-p",
+    "UnitFileState",
+    "-p",
+    "Result",
+  ]);
+});
+
+test("parseDisabled: reads both spellings launchd has used, and says so when it cannot tell", () => {
+  const listing = (body: string) => `disabled services = {\n${body}\n}`;
+  assert.equal(parseDisabled(listing('\t"ai.dahrk.node" => disabled'), LAUNCHD_LABEL), true);
+  assert.equal(parseDisabled(listing('\t"ai.dahrk.node" => true'), LAUNCHD_LABEL), true);
+  assert.equal(parseDisabled(listing('\t"ai.dahrk.node" => enabled'), LAUNCHD_LABEL), false);
+  assert.equal(parseDisabled(listing('\t"ai.dahrk.node" => false'), LAUNCHD_LABEL), false);
+  // A real listing that simply does not name us: no override is set.
+  assert.equal(parseDisabled(listing('\t"com.example.other" => disabled'), LAUNCHD_LABEL), false);
+  // Nothing we can read is NOT an answer, and must never be reported as "enabled".
+  assert.equal(parseDisabled("", LAUNCHD_LABEL), undefined);
+});
+
+test("disabledCommand: launchd addresses the user's GUI domain; systemd needs no second probe", () => {
+  assert.deepEqual(disabledCommand("launchd", 501), ["launchctl", "print-disabled", "gui/501"]);
+  assert.equal(disabledCommand("systemd", 501), undefined);
+});
+
+test("probeService: the disable probe is only paid for when the job is not loaded", () => {
+  const spawns: string[][] = [];
+  const capture = (argv: string[]) => {
+    spawns.push(argv);
+    if (argv[1] === "list") return { code: 0, stdout: '{\n\t"PID" = 42;\n}' };
+    return { code: 0, stdout: 'disabled services = {\n\t"ai.dahrk.node" => disabled\n}' };
+  };
+  // Loaded and up: one spawn, and no claim about `disabled` we did not pay to learn.
+  const up = probeService("launchd", true, capture, { uid: 501 });
+  assert.deepEqual(up, { installed: true, running: true, pid: 42, loaded: true });
+  assert.equal(spawns.length, 1);
+
+  // Not loaded: worth the second spawn, because "switched off" is a different sentence from "not running".
+  spawns.length = 0;
+  const off = probeService("launchd", true, (argv) => {
+    spawns.push(argv);
+    return argv[1] === "list"
+      ? { code: 113, stdout: "" }
+      : { code: 0, stdout: 'disabled services = {\n\t"ai.dahrk.node" => disabled\n}' };
+  }, { uid: 501 });
+  assert.deepEqual(off, { installed: true, running: false, loaded: false, disabled: true });
+  assert.deepEqual(spawns[1], ["launchctl", "print-disabled", "gui/501"]);
+});
+
+test("probeService: no unit means no spawn at all, and `disabled:false` opts out of the second one", () => {
+  let spawns = 0;
+  const count = () => {
+    spawns++;
+    return { code: 113, stdout: "" };
+  };
+  assert.deepEqual(probeService("launchd", false, count), { installed: false, running: false, loaded: false });
+  assert.equal(spawns, 0);
+
+  spawns = 0;
+  // `liveNodePid`'s call: it only wants to know whether anything is up, and that answer does not depend on
+  // why a down job is down.
+  probeService("launchd", true, count, { disabled: false });
+  assert.equal(spawns, 1);
 });
 
 // --- The daemon reshuffle: `start` now means "ensure running", so the supervised process must run the
@@ -415,6 +538,9 @@ function startHarness(
     },
     capture: () => ({ code: 0, stdout: '\t"PID" = 4821;\n' }),
     inFlightJobs: () => [],
+    // An operator's terminal by default: `DAHRK_SUPERVISED` is set only by the units we write, so a test
+    // that wants to be the supervised job has to say so.
+    env: {},
     out: (l) => void lines.push(l),
     ...over,
   };
@@ -618,6 +744,71 @@ test("restarting a REGISTERED but not-running node still stops and starts it", a
   const verbs = h.ran.filter((c) => c[0] === "launchctl").map((c) => c[1]);
   assert.ok(verbs.includes("unload"), "it stops");
   assert.equal(verbs.at(-1), "load", "and the last thing it does is bring it back up");
+  // And not ONE of those unloads carries `-w`. A restart must never write the disable flag: if it does and
+  // the process dies before the load, launchd will not bring the node back at the next login either.
+  for (const cmd of h.ran.filter((c) => c[1] === "unload")) {
+    assert.ok(!cmd.includes("-w"), `a restart's unload must not disable the agent: ${cmd.join(" ")}`);
+  }
+});
+
+test("restartStopCommands are not stopCommands: a restart never writes the disable flag", async () => {
+  // `stop` means "and stay stopped" and needs the flag; a restart means the opposite. Sharing one command
+  // list between them is what turned a self-unload into a permanent outage.
+  const launchd = buildPlan(BASE);
+  assert.deepEqual(launchd.restartStopCommands[0]?.argv, [
+    "launchctl",
+    "unload",
+    `/Users/me/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`,
+  ]);
+  const systemd = buildPlan({ ...BASE, manager: "systemd" });
+  assert.deepEqual(systemd.restartStopCommands[0]?.argv, ["systemctl", "--user", "stop", SYSTEMD_UNIT]);
+});
+
+test("a SUPERVISED restart kickstarts even when the probe cannot see itself, and never unloads", async () => {
+  // The narrow door the kickstart fix left open. Inside the supervised process, `liveNodePid` can answer
+  // "nothing running" - the launchd probe races a job that is up, and the pidfile can be stale or missing.
+  // Trusting it sent the upgrade down the stop/start path, which from in here is a suicide with a disable
+  // flag attached. `DAHRK_SUPERVISED` is set by our own units and by nothing else, so it decides.
+  const h = startHarness({
+    onDisk: renderLaunchdPlist(BASE),
+    capture: () => ({ code: 0, stdout: "" }), // loaded, but the supervisor names no PID
+    env: { DAHRK_SUPERVISED: "1" },
+  });
+
+  const outcome = await runNodeRestart({ token: BASE.token }, h.deps);
+
+  assert.equal(outcome.kind, "running");
+  assert.deepEqual(
+    h.ran.filter((c) => c[0] === "launchctl").map((c) => c[1]),
+    ["kickstart"],
+    "one supervisor-side act, and no unload of the job we are running in",
+  );
+});
+
+test("a supervised restart whose kickstart fails refuses rather than stopping itself", async () => {
+  // The fallback is not merely unlikely to work from in here: it stops the very job executing it, so the
+  // start half provably never runs. Failing honestly leaves the node up on the old build, which the hub can
+  // see and settle; the alternative is a node nobody can reach.
+  const ran: string[][] = [];
+  const h = startHarness({
+    onDisk: renderLaunchdPlist(BASE),
+    capture: () => ({ code: 0, stdout: "" }),
+    env: { DAHRK_SUPERVISED: "1" },
+    run: (argv) => {
+      ran.push(argv);
+      return argv[1] === "kickstart" ? { code: 3, output: "Could not find service" } : { code: 0, output: "" };
+    },
+  });
+
+  const outcome = await runNodeRestart({ token: BASE.token }, h.deps);
+
+  assert.deepEqual(outcome, { kind: "error", code: SUPERVISED_RESTART_REFUSED });
+  assert.deepEqual(
+    ran.filter((c) => c[0] === "launchctl").map((c) => c[1]),
+    ["kickstart"],
+    "it tried the one safe thing and then stopped; nothing else was touched",
+  );
+  assert.match(h.lines.join("\n"), /dahrk restart/, "and it says how a human can finish the job");
 });
 
 test("a supervisor that refuses the kickstart falls back rather than leaving the node down", async () => {
