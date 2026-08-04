@@ -19,6 +19,33 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- **A test corpus for the confinement scanner, at the seam it already had.** `scanCommand` has always
+  been a function of `(command, roots, cwd)`, but its only coverage ran through `buildRules` +
+  `computeFsRoots` against a real `git init` worktree under `$HOME`, so every assertion about the
+  lexer cost a filesystem. `packages/edge/test/shell-scan.test.ts` drives the same function with a
+  hand-built `FsRoots` record: 118 cases across escapes, ordinary build traffic, fail-closed lexing
+  and `cd` cwd-threading, in ~10ms and with no git. Both shipped defects are pinned as regressions -
+  DHK-998 across all five no-path argv0s by all six separators, DHK-999 across paths, apostrophes,
+  backticks and `$(` in comments. No production code changed and no new exports: `scanCommand`'s
+  interface is untouched, so this is coverage bought at the existing seam rather than a new one.
+  One drift-guard keeps the synthetic fixture honest against `computeFsRoots` by asserting shape
+  only, and `test/fs-confine.test.ts` is left alone as the integration pact.
+
+  The corpus found a third defect of the same family, recorded as a `todo` test rather than fixed
+  here: an anchored path containing a space is not confined at all, because `looksLikePath` rejects
+  whitespace-bearing tokens as prose before it tests the anchor. Six live cases, filed as DHK-1019 -
+  making the anchor authoritative changes what the guard denies, so it wants its own change.
+
+### Changed
+
+- **`CONTEXT.md` points at the file the shared loop actually lives in.** The `RuntimeSession` entry
+  named `runner-shared.ts`, which was split into five concern-named modules and deleted; the loops
+  are `runInteractiveLoop` / `runBatchLoop` in `turn-loop.ts`, and the port is declared in
+  `runtime-session.ts`. `CONTEXT.md` is the navigation entry point, so a dangling filename there
+  costs every agent that starts from it.
+
 ## [0.3.1] - 2026-08-04
 
 ### Changed
