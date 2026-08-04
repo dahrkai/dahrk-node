@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-04
+
 ### Fixed
 
 - **An update triggered from the portal took the node down and kept it down.** The upgrade itself
@@ -15,14 +17,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   half, and on macOS the unload also marked the service disabled, so nothing brought it back at login
   either. The node stayed down until someone restarted it by hand, and the portal sat on "restarting"
   for a node that no longer existed. Restarts now ask the service manager to restart the node, which
-  it does by replacing the process itself. A restart from the terminal is unchanged.
+  it does by replacing the process itself. A restart from the terminal is unchanged. (#170)
 - **A stage that failed before it began was reported as a provider outage.** Anything that goes wrong
   on the way in to a stage - a credential the runtime cannot use, a worktree that will not prepare -
   was sent to the hub as a bare failure with no indication of whose fault it was. The hub fell back to
   reading the message, and a message mentioning a provider reads as that provider being down. Binding
   a node group to a subscription its runtime cannot speak to therefore showed up as an Anthropic
   outage, which is both wrong and unactionable. The node now says what kind of failure it was at the
-  point it happens, so a configuration gap is reported as one.
+  point it happens, so a configuration gap is reported as one. (#170)
 
 ## [0.3.2] - 2026-08-04
 
@@ -1309,7 +1311,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...v0.3.0
