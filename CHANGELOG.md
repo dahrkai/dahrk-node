@@ -6,13 +6,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-04
+
 ### Fixed
 
 - **Check stages could not run at all: every one crashed the moment it reached the node.** A check stage
   runs named commands in the worktree and takes the exit code as the verdict, so unlike an agent stage it
   has no runtime and no model configuration. The node nonetheless reached for that configuration when
   arming the watchdog that cancels a stage producing no output, and threw before a single check command
-  ran. Nothing about the check itself mattered; a repo declaring any check could not use one.
+  ran. Nothing about the check itself mattered; a repo declaring any check could not use one. (#166)
 - **A refused credential during an interactive stage put the runtime back into service instead of taking
   it out.** When a provider refuses the credential a node was handed, the node remembers and stops
   advertising that runtime, so it does not keep accepting work it has just proved it cannot do. On a
@@ -22,7 +24,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   therefore kept taking interactive work indefinitely. An interactive stage now reports a refused
   credential as a failure the agent is not answerable for, and no longer spends a second refused call
   trying to summarise on the session that just failed to authenticate. Stages that fail for ordinary
-  reasons are unaffected.
+  reasons are unaffected. (#166)
 - **`dahrk status` no longer reports a previous run's failure as the current state.** The node's log is
   appended to across restarts and nothing in it identified which run wrote a line, so status simply read
   the newest connection marker in the file. A node that had been rejected, fixed, restarted and welcomed
@@ -30,14 +32,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   enrolment token; it is serving no Jobs", printed underneath a node that was serving perfectly well, and
   exiting non-zero to match. Every log line now records its process, and status only believes the one that
   is running. A node that is up but has not finished connecting says so rather than borrowing the last
-  thing a dead process said.
+  thing a dead process said. (#165)
 - **`dahrk start` waits for the node to reach the hub before reporting on it.** It printed its status
   block the moment the supervisor said the unit was up, several seconds before the connection had been
   made, so the report described a node that had not connected yet. It now gives the node up to ten seconds
-  to settle, and says what it is waiting for.
+  to settle, and says what it is waiting for. (#165)
 - **`dahrk status` stopped reading the entire log to answer one question.** It read and parsed the whole
   of `node.jsonl`, which grows to megabytes on a node that has been up for a while. It now reads only the
-  most recent portion.
+  most recent portion. (#165)
 
 ## [0.3.0] - 2026-08-03
 
@@ -1283,7 +1285,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...v0.2.0
 [0.1.31]: https://github.com/dahrkai/dahrk-node/compare/v0.1.30...v0.1.31
