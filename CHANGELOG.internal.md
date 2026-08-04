@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-04
+
 ### Changed
 
 - **The credential latch now owns the refusal verdict, and the stage runner accepts an injected one.**
