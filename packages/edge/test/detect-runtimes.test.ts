@@ -12,11 +12,16 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { REFUSED_CREDENTIAL_SUMMARY } from "@dahrk/executor-worktree";
 import { detectRuntimes, probeRuntimeStatuses, type DetectOptions } from "../src/detect-runtimes.js";
 import { createCredentialLatch } from "../src/credential-latch.js";
 
 const CLAUDE_SDK = "@anthropic-ai/claude-agent-sdk";
 const PI_SDK = "@earendil-works/pi-coding-agent";
+
+/** A stage summary shaped as `runBatchLoop` writes one for a refusal. The latch owns the rule that
+ *  recognises it, so this suite feeds it real evidence rather than reaching for a setter. */
+const refusalSummary = `${REFUSED_CREDENTIAL_SUMMARY}: 401 OAuth access token has been revoked`;
 
 /** Both SDKs present - the normal shape of a correct install. */
 const bothCapable = (s: string) => s === CLAUDE_SDK || s === PI_SDK;
@@ -68,7 +73,7 @@ test("a refused brokered credential de-advertises the runtime, and the reason po
   const before = await probeRuntimeStatuses(opts);
   assert.equal(before.find((s) => s.runtime === "claude-code")?.available, true, "healthy to begin with");
 
-  latch.markRefused("claude-code");
+  latch.record({ runtime: "claude-code", status: "fail", summary: refusalSummary, isCheck: false });
   const after = await probeRuntimeStatuses(opts);
   const claude = after.find((s) => s.runtime === "claude-code");
   assert.equal(claude?.capable, true, "capability is unaffected: the SDK is still right there");
@@ -81,9 +86,9 @@ test("a refused brokered credential de-advertises the runtime, and the reason po
 
 test("a refused credential clears when a stage authenticates again, with no restart", async () => {
   const latch = createCredentialLatch();
-  latch.markRefused("claude-code");
+  latch.record({ runtime: "claude-code", status: "fail", summary: refusalSummary, isCheck: false });
   assert.deepEqual(await detectRuntimes(baseOpts({ latch })), ["pi"]);
 
-  latch.markAccepted("claude-code");
+  latch.record({ runtime: "claude-code", status: "ok", summary: "stage-1: ok", isCheck: false });
   assert.deepEqual(await detectRuntimes(baseOpts({ latch })), ["claude-code", "pi"], "recovered on re-probe");
 });

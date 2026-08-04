@@ -44,14 +44,13 @@ import {
   overlayComponents,
   resolveMirrorsDir,
   runRepoSetup,
-  REFUSED_CREDENTIAL_SUMMARY,
   type GitService,
   type PackCache,
   type CheckOutcome,
   type PreExecutionCapability,
   type ReapReport,
 } from "@dahrk/executor-worktree";
-import { credentialLatch } from "./credential-latch.js";
+import { credentialLatch, type CredentialLatch } from "./credential-latch.js";
 import { buildRules } from "./builtins.js";
 import { computeFsRoots } from "./fs-roots.js";
 import { createNodeLogger, type NodeLogger } from "./logger.js";
@@ -133,6 +132,10 @@ export interface StageRunnerDeps {
    *  a scratch dir under `<scratchRoot>/<runId>` with NO git clone. Git-service still owns the *worktree*
    *  layout; this is only the no-clone scratch base. Defaults to `<tmpdir>/dahrk/scratch`. */
   scratchRoot?: string;
+  /** This node's refused-credential memory, fed with every stage outcome. Defaults to the process-wide
+   *  latch the re-detect pass reads, so the two halves agree; injected in tests so a stage never
+   *  mutates process state that another test can observe. */
+  latch?: CredentialLatch;
 }
 
 /** How many recent runs' worktrees to keep on the edge, and/or how old they may get. */
@@ -504,6 +507,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
   const worktrees = new Map<string, WorkspaceRef>();
   /** Silent by default so an embedder (and every existing test) sees no new output. */
   const log = deps.logger ?? createNodeLogger({ level: "silent" });
+  /** Defaults to the process-wide latch, which is what the re-detect pass reads. */
+  const latch = deps.latch ?? credentialLatch;
   /** In-flight runners by jobId, so a `cancel` frame can abort the right one. */
   const active = new Map<string, Runner>();
   /** Per-job turn mailboxes for in-flight interactive stages (fed by relayed turns; M5b). */
@@ -771,19 +776,9 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           turnQueues.delete(jobId);
           // Feed this node's refused-credential latch (DHK-998), so a refused credential stops the
           // node advertising a runtime it cannot run instead of burning one run per attempt at $0.
-          // Keyed on the summary the runtime-error classifier writes, not on `failureClass` alone:
-          // `config` also covers gaps that say nothing about the INFERENCE credential (an unbound git
-          // credential, a repo no node serves), and latching on those would take a healthy runtime
-          // off the air. A check job has no runtime and cannot speak to any credential.
-          if (!isCheck && agentConfig) {
-            if (status === "fail" && summary.startsWith(REFUSED_CREDENTIAL_SUMMARY)) {
-              credentialLatch.markRefused(agentConfig.runtime);
-            } else if (status === "ok") {
-              // Authenticating at all clears the latch: this is what lets a plain `claude auth login`
-              // bring the node back with no restart, on the next stage that succeeds.
-              credentialLatch.markAccepted(agentConfig.runtime);
-            }
-          }
+          // Unconditional: which outcomes speak to a credential is the latch's judgement, not this
+          // function's, so there is no branch here to get wrong.
+          latch.record({ ...(agentConfig ? { runtime: agentConfig.runtime } : {}), status, summary, isCheck });
           // discard brokered MCP creds with the stage. A gateway that will not stop is holding a port
           // and, worse, live brokered credentials - never let that pass unremarked.
           await gateway?.stop().catch((e: unknown) => log.warn({ err: e, jobId }, "mcp gateway: stop failed"));
@@ -1152,8 +1147,13 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // env override, else 300s. Sanitised (clamp to a non-negative integer) exactly as killMs above;
         // interactive stages opt out with 0. Reading env has no side effects, so computing the source
         // unconditionally is equivalent to the old interactive-short-circuit.
+        //
+        // OPTIONAL CHAIN, not decoration (DHK-1017): a CHECK job has no `agentConfig` at all - the wire
+        // contract narrows it away - so an unconditional read threw `TypeError` here and killed every
+        // check stage before a single check command ran. The unconditional form was equivalent to the
+        // short-circuit it replaced for interactive stages, but that short-circuit also covered checks.
         const stallSource =
-          (agentConfig as { stallMs?: number }).stallMs ??
+          (agentConfig as { stallMs?: number } | undefined)?.stallMs ??
           Number(process.env.DAHRK_BATCH_STALL_MS ?? process.env.SKAKEL_BATCH_STALL_MS ?? 300_000);
         // A check stage streams nothing while a command runs (no per-token trace), so the output-idle
         // watchdog would kill any check slower than the 300s default - `pnpm test` on a real repo.

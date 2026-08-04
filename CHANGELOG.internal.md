@@ -19,6 +19,55 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- **The credential latch now owns the refusal verdict, and the stage runner accepts an injected one.**
+  The latch was a `Set` with a rename: the judgement it exists for - is this the provider refusing our
+  credential, or an ordinary failure - lived at the call site in `stage-runner.runJob`'s `finish`, as a
+  `startsWith` against a constant imported from `@dahrk/executor-worktree`, guarded by three
+  conditions, with no test anywhere in `packages/edge` reaching it. `CredentialLatch.record` now takes
+  the whole `CredentialEvidence` (runtime, status, summary, isCheck) and decides; the call site is one
+  unconditional line. `markRefused`/`markAccepted` are gone from the interface and `refused()` is
+  deleted (it had no callers, despite its doc claiming `dahrk doctor` used it), taking the interface
+  from four methods to two. `StageRunnerDeps.latch` mirrors `DetectOptions.latch`, defaulting to the
+  process-wide singleton so the two halves still agree, and the module comment that claimed the stage
+  runner already accepted an injected latch is now true rather than aspirational. No behaviour change.
+  (DHK-998)
+- `CONTEXT.md` gains **Credential latch** in the node-local language. ADR 0001 leans on the concept
+  (the refusal is "the single credential signal that survives") but the glossary never defined it.
+
+### Added
+
+- **Tests for all three links of the refused-credential chain**, which previously had none end to end.
+  `executor-worktree/test/shared-loop.test.ts` pins the summary SHAPE at its source - that the prefix
+  is at index 0, for every refusal vocabulary - so rewording `RUNTIME_ERROR_SUMMARY.config` reddens the
+  package that caused it instead of silently switching the latch off two packages away.
+  `edge/test/stage-runner.test.ts` proves the stage runner delivers the evidence, driven for both
+  runtimes. `edge/test/credential-latch.test.ts` covers the rule itself with no git repo or runner.
+  (DHK-998)
+### Fixed
+
+- **Every check stage crashed in `runJob` (DHK-1017).** `stage-runner.ts` read `agentConfig.stallMs`
+  unconditionally when arming the batch stall watchdog, but a check job has no `agentConfig` - the wire
+  contract narrows it away - so it threw `TypeError` before one check command ran. The unconditional
+  form was introduced by DHK-210 with a comment reasoning it "equivalent to the old
+  interactive-short-circuit"; equivalent for interactive stages, but that short-circuit also covered
+  checks. Fixed with an optional chain. It reached release because `packages/edge` had no check-job
+  test of any kind; there are now two, and the whole job kind is no longer untested.
+- **An interactive refusal reached the credential latch as an acceptance (DHK-1018).**
+  `runInteractiveLoop` caught a thrown turn, set `exited: "gate"` and left `status` at its initialised
+  `"ok"`, never calling `classifyRuntimeError`. `status: "ok"` is the latch's CLEAR branch, so a
+  refused credential on an interactive stage cleared a standing refusal instead of setting one -
+  DHK-1002 running backwards. The catch now classifies exactly as `runBatchLoop` does and settles
+  `fail` with the prefixed summary and `failureClass`, ahead of the exit-kind branches so the dead
+  session is never asked to summarise. Scoped deliberately to CLASSIFIED failures: an unclassified
+  interactive throw keeps its gate-exit recap, which leaves it reporting `ok` where the batch loop
+  reports `fail`. That asymmetry is pinned by a test and called out in DHK-1018 rather than changed
+  under a credential-latch fix.
+
+Both were found by the reproduction tests written for the latch work above, which are now flipped to
+assert the fixed behaviour.
+
 ## [0.3.0] - 2026-08-03
 
 ### Changed

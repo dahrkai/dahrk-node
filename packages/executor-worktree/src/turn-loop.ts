@@ -156,6 +156,9 @@ export async function runInteractiveLoop(
   let toolSummary: string | undefined;
   let artifact: { path: string; content: string } | undefined;
   let exited: "tool" | "gate" | "timeout" | "cancelled" = "gate";
+  /** A throw the agent is not answerable for, classified exactly as `runBatchLoop` does (DHK-1018).
+   *  Set only for a classified failure, and it overrides the exit kind when settling below. */
+  let runtimeFailure: { failureClass: FailureClass; summary: string } | undefined;
   let pending = humanIter.next();
   try {
     // Self-seed the opening turn: an interactive stage's trigger text rides in `issueContext`, not as a
@@ -207,13 +210,31 @@ export async function runInteractiveLoop(
       }
     }
   } catch (e) {
-    if (!cancelled()) emit({ type: "error", kind: "runtime_error", message: (e as Error).message });
+    const message = (e as Error).message;
+    if (!cancelled()) {
+      emit({ type: "error", kind: "runtime_error", message });
+      // Attribute the throw exactly as the batch loop does (DHK-1018). Without this an interactive
+      // stage reported `ok` for a refused credential, and the edge's credential latch reads `ok` as an
+      // ACCEPTANCE - so a dead credential CLEARED a standing refusal and put the runtime back on the
+      // air, which is the DHK-1002 failure running backwards. Only a CLASSIFIED failure settles here;
+      // an unclassified throw keeps its existing gate-exit behaviour, because a genuine agent-task
+      // failure mid-conversation is the agent's own verdict and its recap is still worth having.
+      const failureClass = classifyRuntimeError(message);
+      const prefix = failureClass ? RUNTIME_ERROR_SUMMARY[failureClass] : undefined;
+      if (failureClass && prefix) runtimeFailure = { failureClass, summary: `${prefix}: ${message}` };
+    }
     exited = cancelled() ? "cancelled" : "gate";
   }
 
   let status: JobStatus = "ok";
   let summary = "";
-  if (exited === "tool") {
+  if (runtimeFailure) {
+    // Before the exit-kind branches, and deliberately so: the gate branch would run the engine-owned
+    // summarisation turn on the very session that just failed to authenticate, which throws again (or
+    // bills a second refused call) to produce a recap of nothing.
+    status = "fail";
+    summary = runtimeFailure.summary;
+  } else if (exited === "tool") {
     summary = toolSummary ?? "(stage marked complete)";
   } else if (exited === "gate") {
     // Turns exhausted with no tool exit: one engine-owned summarisation turn on the warm session.
@@ -233,6 +254,7 @@ export async function runInteractiveLoop(
   return {
     status,
     summary,
+    ...(runtimeFailure ? { failureClass: runtimeFailure.failureClass } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(outArtifact ? { artifact: outArtifact } : {}),
@@ -315,9 +337,12 @@ export function classifyRuntimeError(message: string): FailureClass | undefined 
 }
 
 /** The summary prefix a refused-credential failure carries. Exported because it is a seam, not just
- *  prose: the edge's refused-credential latch keys on it to decide that THIS node's ambient login is
- *  dead (and so must stop advertising the runtime), which a bare `failureClass: "config"` cannot tell
- *  it - `config` also covers gaps that have nothing to do with the inference credential. */
+ *  prose: the edge's credential latch keys on it to decide that the brokered credential this node was
+ *  handed is dead (and so must stop advertising the runtime), which a bare `failureClass: "config"`
+ *  cannot tell it - `config` also covers gaps that have nothing to do with the inference credential.
+ *
+ *  A PREFIX, not a substring: the latch matches with `startsWith`, so anything prepended here silently
+ *  switches the latch off. `shared-loop.test.ts` pins that. */
 export const REFUSED_CREDENTIAL_SUMMARY = "provider refused the credential";
 
 /** The summary prefix for each class `classifyRuntimeError` attributes, so a stage result says WHAT

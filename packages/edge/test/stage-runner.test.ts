@@ -16,7 +16,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, Runtime, TraceEvent, TraceMeta } from "@dahrk/contracts";
-import { createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
+import { REFUSED_CREDENTIAL_SUMMARY, createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
 import {
   createStageRunner,
   resolveStageArtifact,
@@ -24,6 +24,7 @@ import {
   type BlobPutRequestArgs,
   type TraceSink,
 } from "../src/stage-runner.js";
+import { createCredentialLatch } from "../src/credential-latch.js";
 
 const RUNTIMES: Runtime[] = ["claude-code", "pi"];
 
@@ -1347,4 +1348,169 @@ test("the node MCP gateway starts for both brokered-MCP runtimes (claude-code an
   assert.equal(runtimeUsesMcpGateway("claude-code"), true);
   assert.equal(runtimeUsesMcpGateway("pi"), true);
   assert.equal(runtimeUsesMcpGateway("codex"), false);
+});
+
+// --- the refused-credential latch ------------------------------------------------------------------
+//
+// Link 2 of the chain (DHK-998): `runBatchLoop` writes the refusal-prefixed summary, the stage runner
+// carries it into `finish`, and the latch decides. The latch's own rule is covered exhaustively in
+// `credential-latch.test.ts` and the summary SHAPE is pinned at its source in the executor package's
+// `shared-loop.test.ts`. What is proven here is only the wiring between them - the part that stays
+// green while silently doing nothing if the evidence is assembled wrong.
+
+/** A runner that terminates a batch stage with a caller-chosen status and summary. */
+function makeSettlingRunner(status: "ok" | "fail", summary: string): (rt: Runtime) => Runner {
+  return (rt) => ({
+    runtime: rt,
+    async runBatch() {
+      return { status, summary } as Awaited<ReturnType<Runner["runBatch"]>>;
+    },
+    async runInteractive() {
+      return { status, summary };
+    },
+    async summarise() {
+      return summary;
+    },
+    async cancel() {},
+  });
+}
+
+/** Drive one batch Job through a real stage runner with an injected latch, and hand back the latch. */
+async function runJobWithLatch(opts: {
+  runtime: Runtime;
+  status: "ok" | "fail";
+  summary: string;
+  isCheck?: boolean;
+  interaction?: "batch" | "interactive";
+  latch?: ReturnType<typeof createCredentialLatch>;
+}): Promise<ReturnType<typeof createCredentialLatch>> {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-latch-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const latch = opts.latch ?? createCredentialLatch();
+
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+    makeRunner: makeSettlingRunner(opts.status, opts.summary),
+    makeCheckRunner: () => makeSettlingRunner(opts.status, opts.summary)("claude-code"),
+    rules: [],
+    sendProgress: () => undefined,
+    latch,
+  });
+
+  const job: JobRequest = {
+    tenantId: "t_default",
+    runId: `run-latch-${Math.round(performance.now() * 1000)}`,
+    stageId: "build",
+    jobId: `job-latch-${Math.round(performance.now() * 1000)}`,
+    awakeableId: "awk-latch",
+    executorType: "worktree",
+    // `kind` is load-bearing: `isCheckJob` requires it, so that a Job dispatched before check stages
+    // existed (no `kind`) is never misread as a check.
+    ...(opts.isCheck
+      ? { kind: "check" as const, checks: [{ name: "test", command: "true" }] }
+      : { agentConfig: { runtime: opts.runtime, interaction: opts.interaction ?? "batch", tools: ["shell"] } }),
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    timeout: 60,
+  } as JobRequest;
+
+  try {
+    await runner.runJob(job);
+    return latch;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+forBothRuntimes("a stage that fails on a refused credential latches the runtime", async (runtime) => {
+  // Without this wiring the node keeps advertising a runtime the provider has already refused, and
+  // burns one run per attempt at $0.00, each billed to the agent.
+  const latch = await runJobWithLatch({
+    runtime,
+    status: "fail",
+    summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401 OAuth access token has been revoked`,
+  });
+  assert.equal(latch.isRefused(runtime), true, "the stage runner fed the latch its evidence");
+});
+
+forBothRuntimes("an ordinary stage failure does not latch the runtime", async (runtime) => {
+  const latch = await runJobWithLatch({ runtime, status: "fail", summary: "build: fail" });
+  assert.equal(latch.isRefused(runtime), false, "a failed task says nothing about the credential");
+});
+
+forBothRuntimes("a later successful stage clears a standing refusal", async (runtime) => {
+  const latch = createCredentialLatch();
+  await runJobWithLatch({
+    runtime,
+    status: "fail",
+    summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401`,
+    latch,
+  });
+  assert.equal(latch.isRefused(runtime), true, "latched to begin with");
+
+  await runJobWithLatch({ runtime, status: "ok", summary: "build: ok", latch });
+  assert.equal(latch.isRefused(runtime), false, "a re-credentialled pool recovers with no restart");
+});
+
+test("a check stage runs to a result rather than throwing (DHK-1017) [claude-code]", async () => {
+  // Single-runtime: a check job has no runtime at all, so there is nothing to drive twice.
+  //
+  // Regression guard. `runJob` used to read `agentConfig.stallMs` unconditionally when arming the batch
+  // stall watchdog; a check job has NO `agentConfig` (the contract narrows it away - see `isCheckJob`),
+  // so every check stage dispatched to a node died with `TypeError` before one check command ran. It
+  // survived release because this suite had no check-job test at all.
+  const latch = await runJobWithLatch({
+    runtime: "claude-code",
+    status: "ok",
+    summary: "checks passed",
+    isCheck: true,
+  });
+  // Reaching here at all is the assertion that matters; the latch state below is the behaviour the
+  // crash was hiding.
+  assert.equal(latch.isRefused("claude-code"), false);
+});
+
+test("a passing check stage does not clear a standing refusal [claude-code]", async () => {
+  // A check runs no agent and holds no credential, so it cannot authenticate. If it looked like a
+  // success to the latch, one green check stage would put a runtime with a dead credential back on the
+  // air. Covered at the latch's own interface too; this proves the stage runner hands it the evidence
+  // that lets it tell the difference.
+  const latch = createCredentialLatch();
+  await runJobWithLatch({
+    runtime: "claude-code",
+    status: "fail",
+    summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401`,
+    latch,
+  });
+  assert.equal(latch.isRefused("claude-code"), true, "latched to begin with");
+
+  await runJobWithLatch({ runtime: "claude-code", status: "ok", summary: "checks passed", isCheck: true, latch });
+  assert.equal(latch.isRefused("claude-code"), true, "a passing check is not an authentication");
+});
+
+forBothRuntimes("an INTERACTIVE stage refused a credential latches too (DHK-1018)", async (runtime) => {
+  // The interactive loop used to report `ok` for a refused credential, which reaches the latch as an
+  // acceptance and CLEARS a standing refusal. Both interaction modes must produce the same verdict:
+  // the credential is a property of the node's pool, not of how the stage talks to a human.
+  const latch = await runJobWithLatch({
+    runtime,
+    interaction: "interactive",
+    status: "fail",
+    summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401 OAuth access token has been revoked`,
+  });
+  assert.equal(latch.isRefused(runtime), true);
+});
+
+forBothRuntimes("an interactive refusal does not clear an existing refusal (DHK-1018)", async (runtime) => {
+  const latch = createCredentialLatch();
+  await runJobWithLatch({ runtime, status: "fail", summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401`, latch });
+  await runJobWithLatch({
+    runtime,
+    interaction: "interactive",
+    status: "fail",
+    summary: `${REFUSED_CREDENTIAL_SUMMARY}: 401`,
+    latch,
+  });
+  assert.equal(latch.isRefused(runtime), true, "a second refusal is still a refusal, not a reset");
 });
