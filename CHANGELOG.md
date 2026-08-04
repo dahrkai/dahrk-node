@@ -6,6 +6,12 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-04
+
+Maintenance release: no change to how the client behaves. It adds test coverage for the shell
+confinement scanner, which decides what a stage's commands are allowed to touch in the worktree, and
+pins the two defects fixed in earlier releases as regressions. (#168)
+
 ## [0.3.1] - 2026-08-04
 
 ### Fixed
@@ -1285,7 +1291,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/dahrkai/dahrk-node/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dahrkai/dahrk-node/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dahrkai/dahrk-node/compare/v0.1.31...v0.2.0

@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-04
+
 ### Added
 
 - **A test corpus for the confinement scanner, at the seam it already had.** `scanCommand` has always
