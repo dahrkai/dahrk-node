@@ -595,12 +595,53 @@ test("restart NEVER says the node will stay stopped - that is stop's line, and i
   assert.doesNotMatch(out, /Node stopped/);
 });
 
-test("restart stops and then starts: the unit is unloaded and loaded again in that order", async () => {
+test("restarting a LIVE supervised node asks the supervisor, and never unloads the job it is running in", async () => {
+  // The bug this pins. A hub-driven upgrade runs INSIDE the supervised process, so unloading the job is
+  // suicide: `launchctl unload -w` killed the process mid-command, the load half never ran, and the `-w`
+  // left the agent disabled so nothing brought it back. Pressing Update in the portal took the node down
+  // and kept it down; its log ended at `UPGRADE_ACK:applying` with no error after it.
   const h = startHarness({ onDisk: renderLaunchdPlist(BASE) });
+  const outcome = await runNodeRestart({ token: BASE.token }, h.deps);
+  assert.equal(outcome.kind, "running");
+
+  const verbs = h.ran.filter((c) => c[0] === "launchctl").map((c) => c[1]);
+  assert.deepEqual(verbs, ["kickstart"], "one supervisor-side act, and emphatically not an unload");
+  assert.deepEqual(h.ran.at(-1)?.slice(0, 3), ["launchctl", "kickstart", "-k"]);
+});
+
+test("restarting a REGISTERED but not-running node still stops and starts it", async () => {
+  // `kickstart` needs a loaded job. With the node down there is nothing to kick, so the stop/start path
+  // is still the right one - `dahrk restart` on a stopped node starts it rather than refusing.
+  // No PID from the supervisor probe and no pidfile: nothing is running to be kicked.
+  const h = startHarness({ onDisk: renderLaunchdPlist(BASE), capture: () => ({ code: 0, stdout: "" }) });
   await runNodeRestart({ token: BASE.token }, h.deps);
   const verbs = h.ran.filter((c) => c[0] === "launchctl").map((c) => c[1]);
   assert.ok(verbs.includes("unload"), "it stops");
   assert.equal(verbs.at(-1), "load", "and the last thing it does is bring it back up");
+});
+
+test("a supervisor that refuses the kickstart falls back rather than leaving the node down", async () => {
+  // A stale label, an agent that was unloaded out from under us. The node must still come back.
+  const ran: string[][] = [];
+  const h = startHarness({
+    onDisk: renderLaunchdPlist(BASE),
+    run: (argv) => {
+      ran.push(argv);
+      return argv[1] === "kickstart" ? { code: 3, output: "Could not find service" } : { code: 0, output: "" };
+    },
+  });
+  const outcome = await runNodeRestart({ token: BASE.token }, h.deps);
+  assert.equal(outcome.kind, "running");
+  const verbs = ran.filter((c) => c[0] === "launchctl").map((c) => c[1]);
+  // kickstart, then the stop, then the load's own unload-first-then-load pair.
+  assert.deepEqual(verbs, ["kickstart", "unload", "unload", "load"], "tried the supervisor, then the long way");
+  assert.equal(verbs.at(-1), "load", "and it ends up running either way");
+});
+
+test("systemd restarts through the unit, keeping it enabled throughout", async () => {
+  // `disable --now` then `enable --now` has the same self-kill shape as launchd's unload/load.
+  const plan = buildPlan({ ...BASE, manager: "systemd" });
+  assert.deepEqual(plan.restartCommands[0]?.argv, ["systemctl", "--user", "restart", SYSTEMD_UNIT]);
 });
 
 test("restart on a node with a stage in flight REFUSES, and names what it would have killed", async () => {

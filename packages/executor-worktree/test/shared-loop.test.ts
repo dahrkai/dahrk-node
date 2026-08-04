@@ -386,6 +386,12 @@ test("classifyRuntimeError separates a refused credential from a transient", () 
     "403 Forbidden",
     "invalid api key",
     "Your credit balance is too low to access the API",
+    // Verbatim from the preflight runs of 2026-08-04: the pool was bound to a Copilot, then an OpenAI
+    // subscription, and `claude-code` cannot authenticate with either. The vendor is healthy and the
+    // credential is valid - only the operator can re-point the pool. The edge's OUTER job catch now
+    // asks this too, because `runtimeAuthEnv` throws before the loop is ever entered and the answer
+    // was being thrown away: the hub then read "Anthropic" in the message and billed an outage.
+    "no Anthropic credential in the brokered auth profile: claude-code cannot authenticate with a openai-codex subscription.",
   ]) {
     assert.equal(classifyRuntimeError(refused), "config", `\`${refused}\` should class config`);
   }

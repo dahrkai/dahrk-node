@@ -16,7 +16,7 @@ import { arch as osArch, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
 import type { EdgeToHub, HubToEdge, InstallChannel, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
-import { createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
+import { classifyRuntimeError, createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, HealthCounters } from "./health.js";
 import { announceableJobs, nullJobLedger, type JobLedger, type JobLedgerEntry } from "./job-ledger.js";
 import { ceilingFromEnv, LogShipper } from "./log-shipper.js";
@@ -796,10 +796,22 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         `JOB_DONE:${job.stageId} ${result.status}`,
       );
     } catch (e) {
+      // Classify HERE too, not only inside the turn loop. Everything that throws BEFORE the loop starts
+      // - resolving the brokered auth profile, preparing the worktree - lands in this catch, and it used
+      // to ship a bare summary with no `failureClass` at all. The hub then fell back to sniffing the
+      // string, and its `external` rule matches any mention of a vendor: "no Anthropic credential in the
+      // brokered auth profile" was billed as an ANTHROPIC OUTAGE rather than the operator config gap it
+      // is. `classifyRuntimeError` already knows that exact wording; it simply was never asked.
+      const failureClass = classifyRuntimeError((e as Error).message);
       const frame: EdgeToHub = {
         type: "result",
         awakeableId: job.awakeableId,
-        result: { jobId: job.jobId, status: "fail", summary: `edge error: ${(e as Error).message}` },
+        result: {
+          jobId: job.jobId,
+          status: "fail",
+          summary: `edge error: ${(e as Error).message}`,
+          ...(failureClass ? { failureClass } : {}),
+        },
       };
       rememberResult(job.jobId, frame);
       send(frame);
