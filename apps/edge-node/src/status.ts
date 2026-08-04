@@ -169,10 +169,18 @@ export function renderStatus(f: StatusFacts): string[] {
   lines.push(kv("Client", `${f.clientVersion}${currency(f)}`));
 
   // The hub we WOULD dial, plus the last thing we actually know about that connection. Never "connected":
-  // see the module note. A node that has never connected has no marker, and says nothing rather than lying.
+  // see the module note.
+  //
+  // No marker now means one of two different things, and conflating them is what made this line lie. A node
+  // that has never connected genuinely has nothing to say. A node that is UP but has not yet logged a
+  // connection under its own pid is mid-handshake - which every `dahrk start` passes through, and which
+  // used to be papered over with the previous process's last marker.
+  const running = f.presence.kind === "running" || f.presence.kind === "foreign";
   const conn = f.connection
     ? `  ${dim(`(${f.connection.event} ${ago(f.now - f.connection.at)}${f.connection.detail ? `, ${f.connection.detail}` : ""})`)}`
-    : "";
+    : running
+      ? `  ${dim("(connecting…)")}`
+      : "";
   lines.push(kv("Hub", `${f.hubUrl}${conn}`));
 
   // Runtimes: a node with none connects but serves no Jobs, which looks like a hub problem and is not.
@@ -287,8 +295,8 @@ export interface StatusDeps {
   lockedPid: () => number | undefined;
   /** What the node is running, from `~/.dahrk/jobs.json`. */
   jobs: () => JobLedgerEntry[];
-  /** The last connection marker in `node.jsonl`, if any. */
-  connection: () => ConnectionFact | undefined;
+  /** The last connection marker in `node.jsonl`, if any, scoped to the live process when there is one. */
+  connection: (livePid?: number) => ConnectionFact | undefined;
   now: () => number;
   out: (line: string) => void;
 }
@@ -343,7 +351,9 @@ export async function gatherFacts(
   const update = checkSuppressed(deps.env)
     ? undefined
     : cachedUpdate(state, inputs.clientVersion, deps.binPath);
-  const connection = deps.connection();
+  // Scoped to the live process for the same reason the job ledger is, one line above: a marker written by a
+  // node that has since died describes that node, not this one.
+  const connection = deps.connection(livePid);
 
   return {
     clientVersion: inputs.clientVersion,
@@ -391,13 +401,31 @@ export function isEnrolmentBlocked(connection: ConnectionFact | undefined): bool
   return connection !== undefined && BLOCKED_EVENTS.has(connection.event);
 }
 
-/** Find the most recent connection marker in a parsed log. Pure, so it tests without a log file. */
+/**
+ * Find the most recent connection marker in a parsed log. Pure, so it tests without a log file.
+ *
+ * `pid` is the process that is running RIGHT NOW, and passing it is what keeps this honest. `node.jsonl`
+ * is appended to across process lifetimes and is never rotated at boot, so the newest marker in the file
+ * is not necessarily a fact about the node as it currently stands: after the enrolment incident, a node
+ * that had been re-enrolled and welcomed minutes ago still had a three-hour-old `EDGE_PARKED` from a
+ * dead process sitting in its log, and `status` reported that as the current state - a healthy node
+ * described as serving no Jobs, with a non-zero exit to match.
+ *
+ * Records with no `pid` are ignored whenever `pid` is given: they were written by a client older than
+ * this field, so they cannot be attributed to any process and must not be trusted as current. The cost
+ * is that a freshly upgraded node reports nothing until it next connects, which is the truth.
+ *
+ * With no `pid` (the node is not running), every marker counts: the last thing that happened IS the
+ * useful fact then, and the presence line already says the node is down.
+ */
 export function lastConnection(
-  records: Array<{ msg?: unknown; time?: unknown }>,
+  records: Array<{ msg?: unknown; time?: unknown; pid?: unknown }>,
+  opts: { pid?: number } = {},
 ): ConnectionFact | undefined {
   for (let i = records.length - 1; i >= 0; i--) {
     const r = records[i];
     if (typeof r?.msg !== "string") continue;
+    if (opts.pid !== undefined && r.pid !== opts.pid) continue;
     const marker = CONNECTION_MARKERS.find((m) => r.msg === m.prefix || (r.msg as string).startsWith(`${m.prefix}:`));
     if (!marker) continue;
     const at = typeof r.time === "string" ? Date.parse(r.time) : typeof r.time === "number" ? r.time : NaN;

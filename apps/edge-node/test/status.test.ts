@@ -225,6 +225,73 @@ test("lastConnection: a REJECTED node reads as rejected, not as the EDGE_CONNECT
   assert.deepEqual(c, { event: "rejected", at: Date.parse(at), detail: "4401" });
 });
 
+// ---------------------------------------------------------------------------
+// Markers belong to a PROCESS. `node.jsonl` is appended to across restarts and never rotated at boot,
+// so the newest line in it is not automatically a fact about the node as it stands now.
+// ---------------------------------------------------------------------------
+
+test("lastConnection: a dead process's rejection never outranks the live process's welcome", () => {
+  // The exact shape of the incident. A node was rejected, the bug behind that was fixed, the node
+  // re-enrolled and was welcomed - and `status` still read the OLD process's park and reported a healthy
+  // node as serving no Jobs, with a non-zero exit to match.
+  const welcomed = "2026-08-03T21:38:00Z";
+  const c = lastConnection(
+    [
+      { msg: "EDGE_REJECTED:4401 invalid or expired enrolment token", time: "2026-08-03T18:39:50Z", pid: 100 },
+      { msg: "EDGE_PARKED:enrolment rejected", time: "2026-08-03T18:39:50Z", pid: 100 },
+      { msg: "EDGE_CONNECTED", time: "2026-08-03T21:37:59Z", pid: 200 },
+      { msg: "EDGE_WELCOMED:node-a", time: welcomed, pid: 200 },
+    ],
+    { pid: 200 },
+  );
+  assert.deepEqual(c, { event: "welcomed", at: Date.parse(welcomed) });
+});
+
+test("lastConnection: the live process's own rejection still wins - this must not over-correct", () => {
+  const at = "2026-08-03T21:38:02Z";
+  const c = lastConnection(
+    [
+      { msg: "EDGE_WELCOMED:node-a", time: "2026-08-03T18:00:00Z", pid: 100 },
+      { msg: "EDGE_CONNECTED", time: "2026-08-03T21:38:01Z", pid: 200 },
+      { msg: "EDGE_REJECTED:4401 invalid or expired enrolment token", time: at, pid: 200 },
+    ],
+    { pid: 200 },
+  );
+  assert.deepEqual(c, { event: "rejected", at: Date.parse(at), detail: "4401" });
+});
+
+test("lastConnection: records with no pid are unattributable, so a live node ignores them", () => {
+  // Written by a client older than the pid field. They cannot be tied to any process, and treating them
+  // as current is precisely the mistake being fixed - so a freshly upgraded node reports nothing until it
+  // next connects, which is the truth.
+  const c = lastConnection(
+    [{ msg: "EDGE_PARKED:enrolment rejected", time: "2026-08-03T18:39:50Z" }],
+    { pid: 200 },
+  );
+  assert.equal(c, undefined);
+});
+
+test("lastConnection: with the node DOWN, every marker counts again", () => {
+  // No live process to scope to, so the last thing that happened is the useful fact - and the presence
+  // line already says the node is not running.
+  const at = "2026-08-03T18:39:50Z";
+  const c = lastConnection([{ msg: "EDGE_PARKED:enrolment rejected", time: at, pid: 100 }]);
+  assert.deepEqual(c, { event: "parked", at: Date.parse(at) });
+});
+
+test("a running node with nothing to report yet says so, and is not called unhealthy", () => {
+  // Every `dahrk start` passes through this instant. It used to be papered over with whatever the previous
+  // process last said, which is where the stale rejection came from.
+  const f = facts({ presence: { kind: "running", pid: 200 } });
+  assert.match(renderStatus(f).join("\n"), /connecting/);
+  assert.equal(isUnhealthy(f), false);
+});
+
+test("a node that has NEVER connected still says nothing rather than 'connecting'", () => {
+  const f = facts({ presence: { kind: "stopped" } });
+  assert.doesNotMatch(renderStatus(f).join("\n"), /connecting/);
+});
+
 test("a parked node is UNHEALTHY, and status says what to do about it", () => {
   const connection = { event: "parked", at: NOW - 60_000 };
   assert.equal(isUnhealthy({ presence: { kind: "running", pid: 1 }, connection }), true);
