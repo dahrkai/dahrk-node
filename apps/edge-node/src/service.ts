@@ -99,6 +99,9 @@ export interface PlanInputs {
   homeDir: string;
   /** Directory launchd writes stdout/stderr logs to (systemd uses the journal). */
   logDir: string;
+  /** The running user's uid, for launchd's `gui/<uid>/<label>` service target (a LaunchAgent lives in
+   *  the GUI domain). Only the restart command needs it; defaults to the current process's uid. */
+  uid?: number;
 }
 
 /** A rendered service registration: where the file goes, what it contains, the commands to load / stop /
@@ -114,6 +117,22 @@ export interface ServicePlan {
    *  the next login unless unloaded with `-w`, and a systemd unit that is merely `stop`ped comes back at
    *  the next boot because it is still enabled. Otherwise `dahrk stop` would silently un-stop itself. */
   stopCommands: ServiceCommand[];
+  /**
+   * Ask the SUPERVISOR to restart the job, rather than stopping it ourselves and starting it again.
+   *
+   * The distinction is the whole of DHK-1001's worst failure. A hub-driven upgrade runs inside the
+   * supervised node process, and its restart step ran `stopCommands` - `launchctl unload -w` - which
+   * unloads the very job executing it. The process was killed mid-command, the start half never ran,
+   * and `-w` left the agent DISABLED so launchd would not bring it back either. The node went down on
+   * an Update click and stayed down; the portal sat on "restarting" for ever. The node's own log ends
+   * exactly there: `UPGRADE_ACK:applying`, then nothing.
+   *
+   * `launchctl kickstart -k` and `systemctl restart` hand the job to the supervisor: it kills the old
+   * process and starts a fresh one from the new build on disk. Being killed by it is then the expected
+   * path rather than the end of the story, and it is equally correct from a terminal, where the
+   * process running the command was never the service in the first place.
+   */
+  restartCommands: ServiceCommand[];
   uninstallCommands: ServiceCommand[];
   logHint: string;
 }
@@ -263,6 +282,19 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
         { argv: ["launchctl", "load", "-w", filePath] },
       ],
       stopCommands: [{ argv: ["launchctl", "unload", "-w", filePath], ignoreFailure: true }],
+      // `kickstart -k`: kill the running instance and start it again, in one supervisor-side act. The
+      // service-target syntax needs the GUI domain of the running user, which is where a LaunchAgent
+      // lives. Never `unload` here - see `restartCommands` above for what that cost.
+      restartCommands: [
+        {
+          argv: [
+            "launchctl",
+            "kickstart",
+            "-k",
+            `gui/${inputs.uid ?? process.getuid?.() ?? ""}/${LAUNCHD_LABEL}`,
+          ],
+        },
+      ],
       uninstallCommands: [{ argv: ["launchctl", "unload", "-w", filePath], ignoreFailure: true }],
       logHint: "dahrk logs -f",
     };
@@ -286,6 +318,10 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
     stopCommands: [
       { argv: ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], ignoreFailure: true },
     ],
+    // `restart`, not `disable --now` then `enable --now`: same reason as launchd. The unit stays
+    // enabled throughout, and systemd owns the kill so the process running this command may be the one
+    // being replaced.
+    restartCommands: [{ argv: ["systemctl", "--user", "restart", SYSTEMD_UNIT] }],
     uninstallCommands: [
       { argv: ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], ignoreFailure: true },
       { argv: ["systemctl", "--user", "daemon-reload"], ignoreFailure: true },
@@ -666,6 +702,24 @@ export async function runNodeRestart(
     homeDir: d.homeDir,
     logDir: d.logDir,
   });
+
+  // A REGISTERED and RUNNING node is restarted by its supervisor, in one command, and this path must be
+  // preferred wherever it applies. The alternative below - unload, then load - cannot work when the
+  // caller IS the supervised process, which is exactly the case for a hub-driven upgrade: the unload
+  // kills the process mid-command, the load never runs, and launchd's `-w` leaves the agent disabled so
+  // nothing brings it back. An Update click took the node down permanently and the portal waited out
+  // its deadline on a node that no longer existed.
+  //
+  // Being killed by `kickstart` is not a failure here. The supervisor starts a fresh process from the
+  // new build on disk; this one simply does not live to return, which is why nothing after it may be
+  // load-bearing.
+  if (d.fileExists(plan.filePath) && liveNodePid(d) !== undefined) {
+    const code = runCommands(plan.restartCommands, d);
+    if (code === 0) return { kind: "running", code: 0, already: false };
+    // The supervisor refused (an unloaded agent, a stale label). Fall through to the stop/start path,
+    // which handles a registered-but-not-loaded service.
+    d.out(hint("The supervisor could not restart the node directly; falling back to a stop and start."));
+  }
 
   // Stop, but say nothing: a restart's stop is a step, not an outcome. Best-effort, because a node that is
   // already down is a perfectly good starting point for a restart - `dahrk restart` on a stopped node should

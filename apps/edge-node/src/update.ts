@@ -324,6 +324,11 @@ export function planRemoteUpgrade(target: string, deps: Partial<UpdateDeps> = {}
         throw new Error(`upgrade command failed (exit ${code}): ${cmd.display}`);
       }
       d.saveResult({ updateCheckedAt: new Date(d.now()).toISOString(), updateLatest: target });
+      // Marked BEFORE the call, because it is the last thing this process is guaranteed to record: the
+      // restart is handed to the supervisor, which kills this process to start a fresh one. Without the
+      // marker the log simply stopped after `UPGRADE_ACK:applying`, which reads identically to a crash
+      // and gives an operator nothing to tell the two apart.
+      d.out("UPGRADE_RESTARTING");
       // Unconditional, and never a prompt. A node that does not restart is still running the old build,
       // which is the whole failure this path exists to avoid.
       const restartCode = await d.restart();

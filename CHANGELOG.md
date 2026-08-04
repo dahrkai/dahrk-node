@@ -6,6 +6,24 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **An update triggered from the portal took the node down and kept it down.** The upgrade itself
+  worked: the new build was installed, and then the node had to restart to run it. It did that by
+  unloading its own service and loading it again, which cannot work when the thing being unloaded is
+  the process doing the unloading. The node was killed halfway through, so it never got to the second
+  half, and on macOS the unload also marked the service disabled, so nothing brought it back at login
+  either. The node stayed down until someone restarted it by hand, and the portal sat on "restarting"
+  for a node that no longer existed. Restarts now ask the service manager to restart the node, which
+  it does by replacing the process itself. A restart from the terminal is unchanged.
+- **A stage that failed before it began was reported as a provider outage.** Anything that goes wrong
+  on the way in to a stage - a credential the runtime cannot use, a worktree that will not prepare -
+  was sent to the hub as a bare failure with no indication of whose fault it was. The hub fell back to
+  reading the message, and a message mentioning a provider reads as that provider being down. Binding
+  a node group to a subscription its runtime cannot speak to therefore showed up as an Anthropic
+  outage, which is both wrong and unactionable. The node now says what kind of failure it was at the
+  point it happens, so a configuration gap is reported as one.
+
 ## [0.3.2] - 2026-08-04
 
 Maintenance release: no change to how the client behaves. It adds test coverage for the shell

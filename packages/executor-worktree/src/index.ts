@@ -82,8 +82,14 @@ export type { CheckOutcome } from "./check-runner.js";
 export type { PreExecutionCapability } from "./runtime-session.js";
 
 /** The summary prefix a refused-credential stage failure carries, so the edge's latch can recognise
- *  one without re-deriving the classification. */
-export { REFUSED_CREDENTIAL_SUMMARY } from "./turn-loop.js";
+ *  one without re-deriving the classification.
+ *
+ *  `classifyRuntimeError` rides out with it because the edge's outer job catch needs the same reading:
+ *  a throw from BEFORE the turn loop (resolving the brokered auth profile, preparing the worktree) is
+ *  every bit as much a config gap as one from inside it, and shipping it unclassified left the hub to
+ *  guess from the string - which is how a missing Anthropic credential came to be reported as an
+ *  Anthropic outage. */
+export { REFUSED_CREDENTIAL_SUMMARY, classifyRuntimeError } from "./turn-loop.js";
 
 /** The real runner adapters (M4): thin wrappers over the Claude Agent SDK and Pi. */
 export { createClaudeRunner, buildBrokeredMcpServers } from "./claude-adapter.js";
