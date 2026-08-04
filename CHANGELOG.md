@@ -8,6 +8,21 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **Check stages could not run at all: every one crashed the moment it reached the node.** A check stage
+  runs named commands in the worktree and takes the exit code as the verdict, so unlike an agent stage it
+  has no runtime and no model configuration. The node nonetheless reached for that configuration when
+  arming the watchdog that cancels a stage producing no output, and threw before a single check command
+  ran. Nothing about the check itself mattered; a repo declaring any check could not use one.
+- **A refused credential during an interactive stage put the runtime back into service instead of taking
+  it out.** When a provider refuses the credential a node was handed, the node remembers and stops
+  advertising that runtime, so it does not keep accepting work it has just proved it cannot do. On a
+  batch stage that worked. On an interactive stage the refusal was recorded in the trace but the stage
+  still reported success, and a successful stage is exactly the signal that says the credential is
+  healthy again, so a refusal cleared the record rather than creating one. A node with a dead credential
+  therefore kept taking interactive work indefinitely. An interactive stage now reports a refused
+  credential as a failure the agent is not answerable for, and no longer spends a second refused call
+  trying to summarise on the session that just failed to authenticate. Stages that fail for ordinary
+  reasons are unaffected.
 - **`dahrk status` no longer reports a previous run's failure as the current state.** The node's log is
   appended to across restarts and nothing in it identified which run wrote a line, so status simply read
   the newest connection marker in the file. A node that had been rejected, fixed, restarted and welcomed

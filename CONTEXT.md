@@ -182,6 +182,16 @@ API key is the stored secret forwarded, because a third-party key has nothing to
 _Avoid_: Ambient credentials, credential mode, brokered node (there is no other kind; see
 `docs/adr/0001-a-node-reads-no-host-credentials.md`).
 
+**Credential latch**:
+This node's memory of a runtime whose brokered credential the provider has **refused**, so it stops
+advertising a runtime it cannot actually run. A latch rather than a probe: "is this credential still
+good" has no cheap honest answer that does not involve spending it, so detection does not poll - it
+remembers what a failed stage already proved. It is fed **evidence** (a finished stage's runtime,
+status and summary) and owns the judgement of what counts as a refusal; a later successful stage
+clears it, so a re-credentialled pool recovers with no restart. Per-process, so `dahrk doctor` cannot
+observe the running node's latch.
+_Avoid_: Credential cache, health check, probe (it is evidence, not inference).
+
 **Mirror cache**:
 The edge-local bare-repo cache (`~/.dahrk/mirrors/<repoId>`) the node fetches into before creating a
 worktree, so repeated runs against a repo do not re-clone.

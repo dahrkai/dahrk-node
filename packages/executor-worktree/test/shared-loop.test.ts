@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { ElicitQuestion, HumanTurn, RunnerContext } from "@dahrk/contracts";
-import { runInteractiveLoop, runBatchLoop, classifyRuntimeError } from "../src/turn-loop.js";
+import { runInteractiveLoop, runBatchLoop, classifyRuntimeError, REFUSED_CREDENTIAL_SUMMARY } from "../src/turn-loop.js";
 import { ManagedMailbox } from "../src/mailbox.js";
 import type {
   EmittableEvent,
@@ -396,4 +396,120 @@ test("classifyRuntimeError separates a refused credential from a transient", () 
     "external",
     "throttling a valid credential stays external",
   );
+});
+
+// --- the refused-credential summary shape ----------------------------------------------------------
+//
+// Link 1 of the refused-credential chain (DHK-998). The edge's latch decides a runtime is dead by
+// matching this summary's PREFIX, so the shape is a cross-package seam, not prose. Pinned here at the
+// source: reword `RUNTIME_ERROR_SUMMARY.config` or narrow `classifyRuntimeError` and this reddens in
+// the package that caused it, rather than silently switching the latch off two packages away.
+
+test("batch: a refused credential settles fail with a summary the edge's latch can recognise (DHK-998)", async () => {
+  const events: EmittableEvent[] = [];
+  const session = new ThrowingRuntimeSession("401 OAuth access token has been revoked");
+  const result = await runBatchLoop(session, ctx(), makeHooks(events), { cancelled: () => false });
+
+  assert.equal(result.status, "fail");
+  assert.equal(result.failureClass, "config", "a refused credential is not the agent's fault");
+  assert.ok(
+    result.summary?.startsWith(REFUSED_CREDENTIAL_SUMMARY),
+    `the summary must START with the exported prefix so the latch's startsWith matches: got ${result.summary}`,
+  );
+  assert.match(result.summary ?? "", /revoked/i, "and still carries the provider's own words");
+});
+
+test("batch: the refusal prefix is a prefix, not a substring, for every refusal vocabulary (DHK-998)", async () => {
+  // The latch uses startsWith. A classifier that produced "stage failed: provider refused..." would
+  // satisfy a substring check and silently never latch.
+  for (const message of ["401 OAuth access token has been revoked", "credit balance is too low", "billing hard limit reached"]) {
+    const result = await runBatchLoop(new ThrowingRuntimeSession(message), ctx(), makeHooks(), {
+      cancelled: () => false,
+    });
+    assert.equal(result.failureClass, "config", `classified: ${message}`);
+    assert.equal(
+      result.summary?.indexOf(REFUSED_CREDENTIAL_SUMMARY),
+      0,
+      `the prefix must be at index 0 for: ${message}`,
+    );
+  }
+});
+
+test("interactive: a refused credential settles fail with the prefix, so the latch latches (DHK-1018)", async () => {
+  // The interactive loop used to catch the throw, set `exited = "gate"` and leave `status` at its
+  // initialised "ok", never calling `classifyRuntimeError`. Fed to the edge's credential latch, "ok" is
+  // the ACCEPTANCE branch - so a refused credential CLEARED a standing refusal and put the runtime back
+  // on the air, the DHK-1002 failure running backwards.
+  const events: EmittableEvent[] = [];
+  const { value } = opts();
+  const session = new ThrowingRuntimeSession("401 OAuth access token has been revoked");
+  const result = await runInteractive(session, fastCtx(), emptyTurns(), value, events);
+
+  assert.ok(
+    events.some((e) => e.type === "error" && e.kind === "runtime_error"),
+    "the throw is still reported in the trace",
+  );
+  assert.equal(result.status, "fail", "a refused credential is not a successful stage");
+  assert.equal(result.failureClass, "config", "and is not the agent's fault");
+  assert.ok(
+    result.summary.startsWith(REFUSED_CREDENTIAL_SUMMARY),
+    `the summary must carry the prefix the edge latch matches: got ${result.summary}`,
+  );
+});
+
+test("interactive: a refused credential is never asked to summarise on the dead session (DHK-1018)", async () => {
+  // The gate branch runs the engine-owned summarisation turn on the warm session. After a refusal that
+  // session cannot authenticate, so summarising either throws again or bills a second refused call to
+  // produce a recap of nothing. A classified failure must settle before that branch.
+  let summariseCalls = 0;
+  class RefusingThenCountingSession extends ThrowingRuntimeSession {
+    override async summariseTurn(): Promise<string> {
+      summariseCalls++;
+      return "(should never be reached)";
+    }
+  }
+  const { value } = opts();
+  const result = await runInteractive(
+    new RefusingThenCountingSession("credit balance is too low"),
+    fastCtx(),
+    emptyTurns(),
+    value,
+  );
+
+  assert.equal(result.status, "fail");
+  assert.equal(summariseCalls, 0, "no summarisation turn is attempted on a session that cannot authenticate");
+});
+
+test("interactive: an UNCLASSIFIED throw keeps its gate-exit recap (DHK-1018 scope line)", async () => {
+  // Deliberately unchanged. A genuine agent-task failure mid-conversation is the agent's own verdict,
+  // and its recap is worth having; only failures the agent is not answerable for settle `fail` here.
+  // Note this leaves an interactive throw reporting `ok` where the batch loop would report `fail` - a
+  // known asymmetry, called out in the ticket rather than fixed under a credential-latch change.
+  const { value } = opts();
+  const result = await runInteractive(
+    new ThrowingRuntimeSession("assertion failed: expected 3 tests to pass"),
+    fastCtx(),
+    emptyTurns(),
+    value,
+  );
+
+  assert.equal(result.status, "ok", "unchanged: an unclassified throw still exits via the gate branch");
+  assert.equal(result.failureClass, undefined, "and carries no attribution");
+});
+
+test("interactive: a cancel-driven throw is never classified as a runtime failure (DHK-1018)", async () => {
+  // Mirrors the batch loop's guard: a throw caused by our own abort must not be reported as the
+  // provider refusing anything, or cancelling a stage would de-advertise a healthy runtime.
+  const { controller, value } = opts();
+  controller.abort();
+  const cancelledOpts = { ...value, cancelled: () => true };
+  const result = await runInteractive(
+    new ThrowingRuntimeSession("401 OAuth access token has been revoked"),
+    fastCtx(),
+    emptyTurns(),
+    cancelledOpts as typeof value,
+  );
+
+  assert.equal(result.failureClass, undefined, "a cancel-driven throw carries no failure class");
+  assert.ok(!result.summary.startsWith(REFUSED_CREDENTIAL_SUMMARY), "and no refusal prefix");
 });
