@@ -19,6 +19,35 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-04
+
+### Fixed
+
+- **One seam now answers "does the supervisor have this job, and is it switched off?"** `status`, `doctor`
+  and `liveNodePid` all read it through `probeService` (`service.ts`), so they cannot drift on how the
+  question is asked. `ServiceStatus` gained `loaded` (non-optional on purpose - every construction site is
+  a compile error rather than a silent omission), `disabled` and `lastExit`; systemd's probe now also asks
+  for `UnitFileState` and `Result`. launchd needs a second spawn (`launchctl print-disabled`) to name a
+  disable, so it is run only once `launchctl list` has already said the job is not loaded - the healthy
+  path costs exactly one probe, and there is a spawn-count test pinning that. (#172)
+- **`resolvePresence` tests intent BEFORE loadedness, and the order is load-bearing.** `dahrk stop` is
+  itself an `unload -w` / `disable`, so a deliberately stopped node has byte-identical supervisor facts to
+  a node broken by an interrupted restart. `desired` is the only thing that separates them, and reversing
+  those two branches would make every stopped node fail `isUnhealthy` and page someone. Pinned by a test
+  that runs the same `ServiceStatus` through both intents. (#172)
+- **The supervised-restart refusal is the seam no unit test can really prove.** `runNodeRestart` now trusts
+  `DAHRK_SUPERVISED=1` over `liveNodePid()` (which can answer "nothing running" about the supervised
+  process itself: the launchd probe races a live job, and the pidfile can be stale), and refuses the
+  stop/start fallback from in there with `SUPERVISED_RESTART_REFUSED = 5` rather than killing the process
+  that would have restarted it. Tests drive a fake supervisor only. **Confirming the honest-failure path
+  end to end needs a real supervised node whose kickstart is made to fail.** The disable-flag half was
+  verified for real: `launchctl unload -w`, then `status` / `doctor` on the resulting host. (#172)
+- **Cross-repo follow-up, deliberately not fixed here.** During the outage the portal held `RESTARTING`
+  and left the node's borrowed `active=false` well past `UPGRADE_DEADLINE_MS` (300s), so a node that had
+  gone away stayed both "restarting" and disabled in the UI. That is hub-side
+  (`dahrk-harness/packages/hub/src/node-upgrade.ts`, the `restarting` case and `restoreActive`) and wants
+  its own issue. The node-side fixes here make such a node diagnosable from its own host in the meantime. (#172)
+
 ## [0.3.3] - 2026-08-04
 
 ### Fixed
