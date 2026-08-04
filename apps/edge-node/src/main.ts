@@ -26,7 +26,7 @@
  * `DAHRK_TENANT_ID` still act as explicit overrides.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, join } from "node:path";
@@ -72,7 +72,7 @@ import {
   STOP_FOREIGN_NODE,
 } from "./service.js";
 import { fetchLatestVersion, planRemoteUpgrade, runUpdate, type UpdateDeps } from "./update.js";
-import { confirm, hint, isInteractive, kv, out as uiOut, stripAnsi, verdict } from "./ui.js";
+import { confirm, dim, hint, isInteractive, kv, out as uiOut, stripAnsi, verdict } from "./ui.js";
 import {
   BACKGROUND_FETCH_TIMEOUT_MS,
   CHECK_TICKS_PER_INTERVAL,
@@ -298,6 +298,13 @@ async function start(flags: StartFlags): Promise<number> {
   }
   if (outcome.kind === "running") {
     setDesired(env, "running");
+    // Give the node a moment to actually reach the hub before reporting on it. `start` returns as soon as
+    // the SUPERVISOR says the unit is up, which is several seconds before the socket has finished its
+    // handshake, so the status block was being rendered against a node that had not yet connected - and
+    // the honest answer at that instant ("connecting…") is not the answer anybody ran `dahrk start` to
+    // get. Bounded, and never fatal: past the timeout we print what we know and the operator can look
+    // again. Skipped when it was already up, because then there is nothing new to wait for.
+    if (!outcome.already) await settleConnection(env);
     // Whether we started it or found it already up, the useful answer is the same, and it is the one the
     // operator would have got by typing `dahrk status` next. So just give it to them.
     await printStatus(env);
@@ -310,6 +317,37 @@ async function start(flags: StartFlags): Promise<number> {
   uiOut("");
   uiOut(hint("Use `dahrk start --foreground` (or DAHRK_FOREGROUND=1) to ask for this explicitly."));
   return startForeground(env, flags);
+}
+
+/** How long `dahrk start` will wait for the freshly-started node to say something about its connection,
+ *  and how often it looks. Ten seconds is well clear of a normal handshake and short enough that a node
+ *  which is never going to connect does not hold the terminal hostage. */
+const SETTLE_TIMEOUT_MS = 10_000;
+const SETTLE_POLL_MS = 250;
+
+/**
+ * Wait for the node we just started to log a connection outcome under its own pid, so the status block that
+ * follows describes a settled node rather than one still dialling.
+ *
+ * Resolves as soon as ANY connection marker appears, including a rejection: a node that has just been
+ * refused is exactly as settled as one that has been welcomed, and is the more urgent thing to report.
+ * Returns regardless once the timeout is up - this only ever decides how good the report is, never whether
+ * the node is running, so it must not be able to fail the command.
+ */
+async function settleConnection(env: NodeJS.ProcessEnv): Promise<void> {
+  const deps = statusDeps(env);
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+  let announced = false;
+  for (;;) {
+    const pid = deps.lockedPid();
+    if (pid !== undefined && deps.connection(pid) !== undefined) return;
+    if (Date.now() >= deadline) return;
+    if (!announced) {
+      announced = true;
+      uiOut(dim("  waiting for the node to reach the hub…"));
+    }
+    await new Promise((r) => setTimeout(r, SETTLE_POLL_MS));
+  }
 }
 
 /** The connection / identity inputs the service commands bake into the unit, resolved once from the env
@@ -449,7 +487,17 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
   // which is the operator's ceiling and outranks anything the hub asks for.
   const shipper = new LogShipper({ ceiling: ceilingFromEnv(env) });
 
-  const logger = createNodeLoggerFromEnv(env, logDir(env), { nodeId, clientVersion: CLIENT_VERSION }, shipperStream(shipper));
+  // `pid` is what lets a reader tell one RUN of the node from the next. `node.jsonl` is appended to
+  // across process lifetimes and never rotated at boot, and `nodeId` is stable across restarts, so
+  // without this a dead process's last words are indistinguishable from the live one's: `dahrk status`
+  // read a three-hour-old `EDGE_PARKED` from a since-fixed run and reported the healthy node it was
+  // looking at as serving nothing.
+  const logger = createNodeLoggerFromEnv(
+    env,
+    logDir(env),
+    { nodeId, clientVersion: CLIENT_VERSION, pid: process.pid },
+    shipperStream(shipper),
+  );
 
   // The net under every best-effort `.catch()` seam in the node. Before this, one stray rejection from any
   // background path killed the process and printed a single line with no stack.
@@ -658,13 +706,44 @@ function statusDeps(env: NodeJS.ProcessEnv): StatusDeps {
     // Best-effort by construction: a missing or unreadable ledger reads as "no jobs in flight", which shows
     // an idle node rather than failing the whole report over a file that only exists while work is running.
     jobs: () => fileJobLedger(jobLedgerFile(stateDir(env)), () => {}).all(),
-    connection: () => {
-      const raw = readFileOrUndefined(jsonlLogFile(env));
-      return raw ? lastConnection(parseRecords(raw)) : undefined;
+    connection: (livePid) => {
+      const raw = readTailOrUndefined(jsonlLogFile(env), STATUS_LOG_TAIL_BYTES);
+      return raw ? lastConnection(parseRecords(raw), livePid !== undefined ? { pid: livePid } : {}) : undefined;
     },
     now: () => Date.now(),
     out: uiOut,
   };
+}
+
+/** How much of `node.jsonl` `status` reads. Thousands of records, and far more than the handful of markers
+ *  it is looking for, but bounded: the whole file was being read and JSON-parsed on every `dahrk status`,
+ *  and on a node that has been up for a while that is megabytes to answer one question. Rotation caps the
+ *  file at 10 MB, so "read it all" was never going to stay cheap. */
+const STATUS_LOG_TAIL_BYTES = 256 * 1024;
+
+/**
+ * Read the last `maxBytes` of a file as text, or undefined if it is not there / not readable.
+ *
+ * A byte-offset read lands mid-line whenever the file is larger than the window, so the first line is
+ * dropped: half a JSON record is not a record, and `parseRecords` would silently discard it anyway. A file
+ * smaller than the window is returned whole, first line intact.
+ */
+export function readTailOrUndefined(path: string, maxBytes: number): string | undefined {
+  let fd: number | undefined;
+  try {
+    const size = statSync(path).size;
+    if (size <= maxBytes) return readFileSync(path, "utf8");
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(maxBytes);
+    readSync(fd, buf, 0, maxBytes, size - maxBytes);
+    const text = buf.toString("utf8");
+    const firstBreak = text.indexOf("\n");
+    return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** Read a file, or undefined if it is not there / not readable. The node's log and pidfile are both

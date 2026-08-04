@@ -11,10 +11,48 @@ import {
   resolveNodeId,
   resolveRuntimes,
   serviceActionFor,
+  readTailOrUndefined,
   DEFAULT_HUB_URL,
 } from "../src/main.ts";
 
 const base: NodeJS.ProcessEnv = { DAHRK_HUB_URL: "ws://127.0.0.1:7071" };
+
+test("readTailOrUndefined: a file inside the window comes back whole, first line intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-tail-"));
+  try {
+    const file = join(dir, "small.jsonl");
+    writeFileSync(file, "first\nsecond\nthird\n");
+    assert.equal(readTailOrUndefined(file, 1024), "first\nsecond\nthird\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTailOrUndefined: an oversized file is cut to the tail, and the half-line is dropped", () => {
+  // A byte-offset read lands mid-record whenever the file is bigger than the window. Half a JSON object is
+  // not a record, so the leading fragment goes rather than reaching the parser.
+  const dir = mkdtempSync(join(tmpdir(), "dahrk-tail-"));
+  try {
+    const file = join(dir, "big.jsonl");
+    const line = `${"x".repeat(99)}\n`;
+    writeFileSync(file, line.repeat(50) + '{"msg":"EDGE_WELCOMED","pid":7}\n');
+    const tail = readTailOrUndefined(file, 250);
+    assert.ok(tail !== undefined);
+    assert.ok(tail.endsWith('{"msg":"EDGE_WELCOMED","pid":7}\n'), "the newest records survive");
+    assert.ok(tail.length < 250, "it is a tail, not the whole file");
+    // The property that matters: nothing half-parsed reaches the caller. Every line is whole, so the
+    // leading fragment the byte offset landed in must have been dropped rather than passed on.
+    for (const l of tail.split("\n").filter((s) => s !== "")) {
+      assert.ok(l === "x".repeat(99) || l === '{"msg":"EDGE_WELCOMED","pid":7}', `whole line: ${l.slice(0, 20)}…`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTailOrUndefined: a missing file is a state to report, not an error", () => {
+  assert.equal(readTailOrUndefined(join(tmpdir(), "dahrk-does-not-exist.jsonl"), 1024), undefined);
+});
 
 test("a re-enrolment restarts the daemon; an ordinary start does not (DHK-1041)", () => {
   // `runNodeStart` no-ops on a healthy node, and the running daemon holds its token from its own boot, so

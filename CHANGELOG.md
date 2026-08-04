@@ -6,6 +6,24 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dahrk status` no longer reports a previous run's failure as the current state.** The node's log is
+  appended to across restarts and nothing in it identified which run wrote a line, so status simply read
+  the newest connection marker in the file. A node that had been rejected, fixed, restarted and welcomed
+  minutes ago was still described by the rejection from hours earlier: "the hub rejected this node's
+  enrolment token; it is serving no Jobs", printed underneath a node that was serving perfectly well, and
+  exiting non-zero to match. Every log line now records its process, and status only believes the one that
+  is running. A node that is up but has not finished connecting says so rather than borrowing the last
+  thing a dead process said.
+- **`dahrk start` waits for the node to reach the hub before reporting on it.** It printed its status
+  block the moment the supervisor said the unit was up, several seconds before the connection had been
+  made, so the report described a node that had not connected yet. It now gives the node up to ten seconds
+  to settle, and says what it is waiting for.
+- **`dahrk status` stopped reading the entire log to answer one question.** It read and parsed the whole
+  of `node.jsonl`, which grows to megabytes on a node that has been up for a while. It now reads only the
+  most recent portion.
+
 ## [0.3.0] - 2026-08-03
 
 ### Added
