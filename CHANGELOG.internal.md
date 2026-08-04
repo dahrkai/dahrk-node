@@ -19,6 +19,26 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-04
+
+### Fixed
+
+- **The upgrade restart is the one thing in this release no test can prove.** `planRemoteUpgrade().apply()`
+  runs inside the supervised process, so the old route (`launchctl unload -w` then load) killed the
+  process executing it and left the agent disabled. Restart now delegates to the supervisor
+  (`launchctl kickstart -k`, `systemctl restart`), which replaces the process; the stop/start route stays
+  for a registered-but-stopped node and as the fallback when the supervisor refuses, and
+  `UPGRADE_RESTARTING` is written before either, because it is the last line the process is guaranteed
+  to reach. Unit tests cover the command selection only. **Confirming the node comes back by itself
+  needs a real press of Update against a supervised macOS node** - worth doing before anyone trusts the
+  portal's Update button again. (#170)
+- **`classifyRuntimeError` was always able to classify the pre-turn failures; it was never asked.** The
+  outer job catch in `ws-client.ts` shipped a bare `fail`, so the hub fell back to sniffing the summary,
+  and its `external` rule matches any mention of a vendor - a missing credential for the bound
+  subscription was therefore billed as an Anthropic outage. Both seams now classify, and an unrecognised
+  error still carries no class on purpose, so the hub's heuristic applies rather than a guessed label.
+  Harness-side counterpart: `dahrkai/dahrk-harness#611`. (#170)
+
 ## [0.3.2] - 2026-08-04
 
 ### Added
