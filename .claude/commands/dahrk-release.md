@@ -40,18 +40,22 @@ Two changelogs: `CHANGELOG.md` is **public** (ships in the GitHub release; no tr
 
 1. List every PR merged since the last tag: `git log --oneline v<last>..origin/main`, and map commits
    to PRs. For each, `gh pr view <n>` for the title and body — and when the body is thin or absent,
-   `gh pr diff <n>` to see what actually changed. A one-line title is not enough to write a good note;
-   the substance comes from the diff.
+   `gh pr diff <n>` to see what actually changed. You read the diff to settle two questions only:
+   **is this user-visible**, and **which heading does it go under**. It is not source material for a
+   paragraph; the note itself is one sentence either way.
 2. Read the `[Unreleased]` section of **both** files. Cross-check: **does every PR have a note in the
    right place?** A user-facing change belongs in `CHANGELOG.md`; an internal-only one (refactor,
    tooling, deps) belongs in `CHANGELOG.internal.md`. A PR with no note anywhere is the failure this
    phase exists to catch (it is how #22/#23/#24 shipped undocumented, and how #31 nearly did).
 3. **Write the corrected `[Unreleased]` sections directly.** Do not ask first — the user reviews them
-   in the PR. Public notes: written for people running the client, British English, no em dashes, PR
-   ref `(#N)`, no tracker keys, under the right `### Added` / `### Changed` / `### Fixed` heading.
-   Internal notes: whatever helps contributors, tracker keys fine.
-4. Verify the public file with `node scripts/lint-changelog.mjs` (it rejects `DHK-`/`SKA-`/`LABS-`/
-   `TEST-`/`HAR-`/`SL-` keys). The internal file is exempt — that is the point of it.
+   in the PR. Public notes: **one sentence per bullet, 25 words maximum**, present tense, no bold
+   lead-in, no mechanism or root cause (that goes in the internal file). Written for people running
+   the client, British English, no em dashes, PR ref `(#N)`, no tracker keys, under the right
+   `### Added` / `### Changed` / `### Fixed` heading. Internal notes: whatever helps contributors, at
+   whatever length, tracker keys fine.
+4. Verify the public file with `node scripts/lint-changelog.mjs`. It rejects `DHK-`/`SKA-`/`LABS-`/
+   `TEST-`/`HAR-`/`SL-` keys **and** any entry over 25 words. The internal file is exempt from both —
+   that is the point of it.
 
 **Leave the edits uncommitted.** Do not commit, do not branch, do not open a PR for them. Phase 5's
 `pnpm release` carries them onto the release branch and folds them into the same commit as the version
