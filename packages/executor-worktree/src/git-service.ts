@@ -92,8 +92,43 @@ export const DEFAULT_MERGE_RESOLVE_RULES: MergeResolveRule[] = [
   { path: "CHANGELOG.internal.md", strategy: "union" },
 ];
 
+/**
+ * The commit author + committer identity applied to every commit this service writes. Mirrors
+ * `CommitIdentity` in `@dahrk/contracts` (the shape the hub puts on `PushJob.identity`) but is
+ * declared locally so the git plumbing does not depend on the wire contract, and so every field is
+ * optional: a caller that sets only the author gets the author echoed onto the committer.
+ */
+export interface CommitIdentityOverride {
+  authorName?: string;
+  authorEmail?: string;
+  committerName?: string;
+  committerEmail?: string;
+}
+
+/**
+ * Per-push overrides of who a commit is by and what vouches for it (DHK-60 identity, and signing).
+ * Shared by the three operations that write commits, so the deliver push, the backup push, and boot
+ * reconciliation all stamp and sign the same way. Both fields are optional and fall back to what
+ * {@link createGitService} was constructed with, so a caller that passes neither behaves as before.
+ */
+export interface CommitAttributionOpts {
+  /** Who the commit is by; per-field fallback to the service default. */
+  identity?: CommitIdentityOverride;
+  /**
+   * OpenSSH **private** key text used to SSH-sign every commit written by this operation. Absent (and
+   * no service default) = commits are written unsigned, exactly as before.
+   *
+   * The key is the Dahrk bot's own signing key, registered on its GitHub account, which is what makes
+   * GitHub render the commit `Verified`. It arrives per push from the hub broker rather than living on
+   * the node, so it is handled like the git token: written to a 0600 file in a temp dir OUTSIDE the
+   * worktree, passed to git only as a config path, and removed when the operation ends. It must never
+   * be written into the worktree, where the stage agent could read it.
+   */
+  signingKey?: string;
+}
+
 /** Options for {@link GitService.commitAndPush}. */
-export interface CommitPushOpts {
+export interface CommitPushOpts extends CommitAttributionOpts {
   /** The commit message (composed deterministically by the hub from stage summaries). */
   message: string;
   /** The branch to push HEAD to on the real remote. */
@@ -159,7 +194,7 @@ export interface FetchProbeResult {
 export const FETCH_PROBE_TIMEOUT_SECONDS = 60;
 
 /** Options for {@link GitService.backupPush}: a merge-free push of the run's HEAD to a disposable ref. */
-export interface BackupPushOpts {
+export interface BackupPushOpts extends CommitAttributionOpts {
   /** Commit message for any pending (uncommitted) work captured before the backup push. */
   message: string;
   /** The disposable WIP ref to force-update with HEAD (e.g. `dahrk/wip/<runId>`). */
@@ -193,7 +228,7 @@ export type InterruptedWorktree = Pick<WorkspaceRef, "worktreePath" | "gitUrl">;
 
 /** Options for {@link GitService.reconcileInterrupted}: preserve an interrupted stage's uncommitted
  *  tail, then reset the worktree to its last commit. */
-export interface ReconcileInterruptedOpts {
+export interface ReconcileInterruptedOpts extends CommitAttributionOpts {
   /** Commit message for the preserved tail. */
   message: string;
   /** The disposable WIP ref the tail is pinned to, locally and (best-effort) on the remote. */
@@ -288,10 +323,19 @@ export interface GitServiceOptions {
   worktreesDir?: string;
   /** Where per-repo bare mirrors are cached; one subdirectory per repoId. */
   mirrorsDir?: string;
-  /** Author/committer name for harness-made commits. Env: DAHRK_GIT_AUTHOR_NAME. */
+  /** Author name for harness-made commits, and the committer name when none is given separately.
+   *  Env: DAHRK_GIT_AUTHOR_NAME. */
   authorName?: string;
-  /** Author/committer email for harness-made commits. Env: DAHRK_GIT_AUTHOR_EMAIL. */
+  /** Author email for harness-made commits, and the committer email when none is given separately.
+   *  Env: DAHRK_GIT_AUTHOR_EMAIL. */
   authorEmail?: string;
+  /** Committer name; defaults to `authorName`. Env: DAHRK_GIT_COMMITTER_NAME. */
+  committerName?: string;
+  /** Committer email; defaults to `authorEmail`. Env: DAHRK_GIT_COMMITTER_EMAIL. */
+  committerEmail?: string;
+  /** Fallback OpenSSH private key text for SSH-signing commits when a push carries none. Absent =
+   *  unsigned. Env: DAHRK_GIT_SIGNING_KEY. See {@link CommitAttributionOpts.signingKey}. */
+  signingKey?: string;
   /**
    * Whether a run is currently executing a stage on this node, keyed by runId. Consulted before evicting
    * a worktree that still claims the branch a new run wants: a live holder is a routing bug and must
@@ -320,11 +364,11 @@ export function sanitizeBranchName(name: string): string {
 
 /**
  * Resolve the absolute worktree base a git service uses: an explicit override, else
- * `DAHRK_WORKTREES_DIR`/`SKAKEL_WORKTREES_DIR`, else `~/.dahrk/worktrees`. Exported so the client can
+ * `DAHRK_WORKTREES_DIR`, else `~/.dahrk/worktrees`. Exported so the client can
  * advertise the exact same base to the hub on `hello` (single source of truth with `createGitService`).
  */
 export function resolveWorktreesDir(override?: string): string {
-  return override ?? process.env.DAHRK_WORKTREES_DIR ?? process.env.SKAKEL_WORKTREES_DIR ?? join(homedir(), ".dahrk", "worktrees");
+  return override ?? process.env.DAHRK_WORKTREES_DIR ?? join(homedir(), ".dahrk", "worktrees");
 }
 
 /**
@@ -333,7 +377,7 @@ export function resolveWorktreesDir(override?: string): string {
  * and a second copy of this fallback chain would silently drift.
  */
 export function resolveMirrorsDir(override?: string): string {
-  return override ?? process.env.DAHRK_MIRRORS_DIR ?? process.env.SKAKEL_MIRRORS_DIR ?? join(homedir(), ".dahrk", "mirrors");
+  return override ?? process.env.DAHRK_MIRRORS_DIR ?? join(homedir(), ".dahrk", "mirrors");
 }
 
 export function createGitService(opts: GitServiceOptions = {}): GitService {
@@ -341,6 +385,17 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
   const mirrorsDir = resolveMirrorsDir(opts.mirrorsDir);
   const authorName = opts.authorName ?? process.env.DAHRK_GIT_AUTHOR_NAME ?? "Dahrk";
   const authorEmail = opts.authorEmail ?? process.env.DAHRK_GIT_AUTHOR_EMAIL ?? "noreply@dahrk.ai";
+  // The committer falls back to the author, so the single-identity callers that predate the split
+  // (and the `DAHRK_GIT_AUTHOR_*` env pair) keep stamping one identity onto both roles.
+  const committerName = opts.committerName ?? process.env.DAHRK_GIT_COMMITTER_NAME ?? authorName;
+  const committerEmail = opts.committerEmail ?? process.env.DAHRK_GIT_COMMITTER_EMAIL ?? authorEmail;
+  const defaultIdentity: Required<CommitIdentityOverride> = {
+    authorName,
+    authorEmail,
+    committerName,
+    committerEmail,
+  };
+  const defaultSigningKey = opts.signingKey ?? process.env.DAHRK_GIT_SIGNING_KEY;
   const isBusy = opts.isBusy;
   const log = opts.logger ?? noopLogger;
 
@@ -398,23 +453,27 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
    * Shared by the deliver push and the merge-free backup push. Untracks scratch if a prior commit
    * captured it, then `add -A` the rest; a commit is written only when the worktree is dirty (so a
    * no-op push commits nothing). Returns the resulting HEAD sha and whether a commit was made.
+   *
+   * `attribution` stamps and signs the commit; it owns its own key file, so this resolves and tears one
+   * down per call rather than borrowing the caller's.
    */
-  const commitPending = (worktreePath: string, message: string): { headSha: string; dirty: boolean } => {
+  const commitPending = (
+    worktreePath: string,
+    message: string,
+    attribution: CommitAttributionOpts = {},
+  ): { headSha: string; dirty: boolean } => {
     excludeScratchLocally(worktreePath);
     git(worktreePath, ["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", SCRATCH_DIR]);
     git(worktreePath, ["add", "-A", "--", "."]);
     // Commit only when something is actually staged (`diff --cached --quiet` exits non-zero iff so).
     const dirty = !gitOk(worktreePath, ["diff", "--cached", "--quiet"]);
     if (dirty) {
-      git(worktreePath, [
-        "-c",
-        `user.name=${authorName}`,
-        "-c",
-        `user.email=${authorEmail}`,
-        "commit",
-        "-m",
-        message,
-      ]);
+      const { args, env, cleanup } = resolveAttribution(attribution);
+      try {
+        git(worktreePath, [...args, "commit", "-m", message], { ...process.env, ...env });
+      } finally {
+        cleanup();
+      }
     }
     return { headSha: git(worktreePath, ["rev-parse", "HEAD"]).trim(), dirty };
   };
@@ -500,6 +559,58 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     writeFileSync(script, '#!/bin/sh\nprintf "%s" "$DAHRK_GIT_TOKEN"\n', { mode: 0o700 });
     return {
       env: { ...process.env, GIT_ASKPASS: script, DAHRK_GIT_TOKEN: token, GIT_TERMINAL_PROMPT: "0" },
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  };
+
+  /**
+   * Resolve who a commit-writing operation commits as, and what signs it. Returns the pieces the three
+   * commit sites need plus a `cleanup` that removes the key file, so a caller wraps its whole operation
+   * in `try/finally` exactly as it already does for {@link setupAuth}.
+   *
+   * Identity resolves per field against the service defaults, and the committer falls back to the
+   * caller's own author before the default committer, so a partial override reads the way it looks.
+   *
+   * Signing is off unless a key is in play. When there is one it is written to a 0600 file in its own
+   * temp dir - the same shape as the askpass helper, and for the same reason: outside the worktree,
+   * never on git's command line, gone when the operation ends. `user.signingkey` may point at a
+   * PRIVATE key file; git derives the public half itself, so no `.pub` sidecar or ssh-agent is needed.
+   * (`gpg.ssh.allowedSignersFile` is only consulted when VERIFYING, which the node never does.)
+   */
+  const resolveAttribution = (
+    o: CommitAttributionOpts = {},
+  ): { args: string[]; env: NodeJS.ProcessEnv; cleanup: () => void } => {
+    const id = {
+      authorName: o.identity?.authorName ?? defaultIdentity.authorName,
+      authorEmail: o.identity?.authorEmail ?? defaultIdentity.authorEmail,
+      committerName: o.identity?.committerName ?? o.identity?.authorName ?? defaultIdentity.committerName,
+      committerEmail: o.identity?.committerEmail ?? o.identity?.authorEmail ?? defaultIdentity.committerEmail,
+    };
+    // The env pair carries the author/committer SPLIT (git config has no committer.* keys); the `-c`
+    // pair is what git falls back to and keeps the identity visible in argv. Env wins where they
+    // overlap, so the two can never disagree about the author.
+    const args = ["-c", `user.name=${id.authorName}`, "-c", `user.email=${id.authorEmail}`];
+    const env: NodeJS.ProcessEnv = {
+      GIT_AUTHOR_NAME: id.authorName,
+      GIT_AUTHOR_EMAIL: id.authorEmail,
+      GIT_COMMITTER_NAME: id.committerName,
+      GIT_COMMITTER_EMAIL: id.committerEmail,
+    };
+
+    const key = o.signingKey ?? defaultSigningKey;
+    // No key: sign NOTHING, and say so explicitly. Left implicit, a host with `commit.gpgsign = true`
+    // in its global config signs the commit with whatever key that config names - the host user's own.
+    // The result is a commit attributed to Dahrk but vouched for by a human, which GitHub rejects as
+    // `unknown_key` and which quietly borrows a host credential the node is never meant to touch.
+    if (!key) return { args: [...args, "-c", "commit.gpgsign=false"], env, cleanup: () => {} };
+
+    const dir = mkdtempSync(join(tmpdir(), "dahrk-sign-"));
+    const keyPath = join(dir, "signing_key");
+    // Trailing newline: ssh-keygen rejects a private key whose final line is unterminated.
+    writeFileSync(keyPath, key.endsWith("\n") ? key : `${key}\n`, { mode: 0o600 });
+    return {
+      args: [...args, "-c", "gpg.format=ssh", "-c", `user.signingkey=${keyPath}`, "-c", "commit.gpgsign=true"],
+      env,
       cleanup: () => rmSync(dir, { recursive: true, force: true }),
     };
   };
@@ -872,8 +983,13 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       // The engine-owned scratch dir (state.json, traces, issue.md) lives in the worktree so stages
       // can read/write it, but it is RUNTIME state and must never enter the PR. `commitPending` untracks
       // it (so continuation drops it), stages everything else, and commits only if the worktree is dirty.
-      const { headSha: committedSha, dirty } = commitPending(worktreePath, opts.message);
+      const { headSha: committedSha, dirty } = commitPending(worktreePath, opts.message, opts);
       let headSha = committedSha;
+      // The push-time base merge can write up to two more commits (the merge itself, and the commit
+      // that completes a deterministically pre-resolved conflict). They must be stamped and signed
+      // exactly like the one above, so resolve the attribution ONCE here and tear its key file down in
+      // the same `finally` as the askpass helper.
+      const attribution = resolveAttribution(opts);
       // How far the branch is ahead of its base, for a human-readable "N commits" in Linear. Freshest
       // form first: `FETCH_HEAD` is the base we just fetched above, then the remote-tracking ref. A bare
       // name (`main`) is LAST because it resolves to a local head, which under the old `--mirror` layout
@@ -960,14 +1076,11 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
             footprint = deriveFootprint(numstatEntries, { cap: CHANGED_PATHS_CAP });
           }
           try {
-            // A non-fast-forward merge writes a commit, so pass the same committer identity as the
-            // commit. Enable rerere so a recorded human resolution auto-applies (and is re-recorded)
-            // for these hunks - the first rung of the DHK-553 deterministic pre-resolve below.
+            // A non-fast-forward merge writes a commit, so pass the same identity and signing config
+            // as the commit. Enable rerere so a recorded human resolution auto-applies (and is
+            // re-recorded) for these hunks - the first rung of the DHK-553 pre-resolve below.
             git(worktreePath, [
-              "-c",
-              `user.name=${authorName}`,
-              "-c",
-              `user.email=${authorEmail}`,
+              ...attribution.args,
               "-c",
               "rerere.enabled=true",
               "-c",
@@ -975,7 +1088,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
               "merge",
               "--no-edit",
               "FETCH_HEAD",
-            ], authEnv);
+            ], { ...(authEnv ?? process.env), ...attribution.env });
             integration = "clean";
             headSha = git(worktreePath, ["rev-parse", "HEAD"]).trim();
           } catch (mergeErr) {
@@ -997,14 +1110,10 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
               const conflictFiles = unmergedPaths(worktreePath);
               if (conflictFiles.length === 0) {
                 // Every conflict cleared deterministically: complete the merge and fall through to push.
-                git(worktreePath, [
-                  "-c",
-                  `user.name=${authorName}`,
-                  "-c",
-                  `user.email=${authorEmail}`,
-                  "commit",
-                  "--no-edit",
-                ]);
+                git(worktreePath, [...attribution.args, "commit", "--no-edit"], {
+                  ...process.env,
+                  ...attribution.env,
+                });
                 integration = "clean";
                 headSha = git(worktreePath, ["rev-parse", "HEAD"]).trim();
               } else {
@@ -1029,6 +1138,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
         pushed = true;
       } finally {
         cleanup();
+        attribution.cleanup();
       }
       return { headSha, pushed, nothingToCommit: !dirty, commitsAhead, ...(integration ? { integration } : {}), ...(footprint ? { footprint } : {}) };
     },
@@ -1040,7 +1150,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       }
       const wipRef = sanitizeBranchName(opts.branch);
       // Commit any pending work so the WIP ref captures the FULL run state, not just the last commit.
-      const { headSha, dirty } = commitPending(worktreePath, opts.message);
+      const { headSha, dirty } = commitPending(worktreePath, opts.message, opts);
       // Force-push HEAD directly to the disposable WIP ref on the REAL remote (never `origin`, which for
       // a mirror-backed worktree may be the local mirror). Deliberately NO base fetch/merge and NO PR:
       // the ref only has to preserve this run's committed HEAD before the worktree is reaped, so the
@@ -1068,7 +1178,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
 
       // Commit whatever the killed agent left behind. Nothing staged means the tree was clean when the
       // process died (the agent was thinking, not writing): there is no tail, no reset, nothing to do.
-      const { headSha: tailSha, dirty } = commitPending(worktreePath, opts.message);
+      const { headSha: tailSha, dirty } = commitPending(worktreePath, opts.message, opts);
       if (!dirty) return { dirty: false, headSha, pushed: false };
 
       // Pin the tail LOCALLY before anything can fail. After the reset below, this ref is the only thing

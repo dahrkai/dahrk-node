@@ -10,8 +10,8 @@ Naming conventions for this repo (summary; the source of truth is `dahrk-hq`):
 
 - **Entity model.** Product and agent = **Dahrk** / **@Dahrk**, a product of **Skakel Labs**. Product
   repos live under `github.com/dahrkai`.
-- **Naming conventions.** npm `@dahrk/<x>` (one scope). Env vars `DAHRK_<AREA>_<NAME>` (legacy
-  `SKAKEL_*` read as an alias during migration). Dotdir `.dahrk/`. Binary `dahrk-node`. Architecture
+- **Naming conventions.** npm `@dahrk/<x>` (one scope). Env vars `DAHRK_<AREA>_<NAME>`; there is no
+  `SKAKEL_*` alias, and no `~/.skakel`. Dotdir `.dahrk/`. Binary `dahrk-node`. Architecture
   words (Hub, Edge, Node, Engine, Run, Stage, Workflow, Broker) are concepts; do not brand them.
 - **Domains.** `dahrk.ai` is canonical (docs at `dahrk.ai/docs`). The hub endpoint this client dials
   is **`api.dahrk.ai`**: use the `api` surface name in client config (`DAHRK_API_URL`,

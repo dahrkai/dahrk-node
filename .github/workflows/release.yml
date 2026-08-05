@@ -18,6 +18,10 @@ name: Release
 #   TAP_PUSH_TOKEN  - a PAT with `repo` scope on github.com/dahrkai/homebrew-tap. Optional: if unset,
 #                     the tap-bump step is skipped (e.g. before the tap repo exists). See
 #                     packaging/homebrew/README.md.
+#   DAHRK_SIGNING_KEY - the bot's OpenSSH *private* signing key, whose public half is registered as a
+#                     signing key on the `dahrk-ai` GitHub account. Used to SSH-sign the Homebrew tap
+#                     commit (and, in tag-release.yml, the release tag) so they show as verified.
+#                     Optional: if unset, those commits go out unsigned exactly as before.
 #   RELEASE_PAT     - used by tag-release.yml (not this workflow) to push the tag so this workflow fires;
 #                     a tag pushed by the default GITHUB_TOKEN would not re-trigger it. See
 #                     tag-release.yml. Optional: if unset, push the tag manually.
@@ -121,6 +125,7 @@ jobs:
         continue-on-error: true
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          DAHRK_SIGNING_KEY: ${{ secrets.DAHRK_SIGNING_KEY }}
         run: |
           set -uo pipefail
           TARBALL="https://registry.npmjs.org/dahrk-node/-/dahrk-node-${VERSION}.tgz"
@@ -143,8 +148,23 @@ jobs:
           sed -i -E "s|url \".*\"|url \"${TARBALL}\"|" "$FORMULA"
           sed -i -E "s|sha256 \".*\"|sha256 \"${SHA}\"|" "$FORMULA"
           cd tap
-          git config user.name "dahrk-release"
-          git config user.email "release@dahrk.ai"
+          # One bot identity everywhere (`Dahrk <noreply@dahrk.ai>`), not a third one just for releases:
+          # GitHub only marks a signature verified when the commit email is a verified address on the
+          # account owning the signing key, so a release-only identity could never be verified.
+          git config user.name "Dahrk"
+          git config user.email "noreply@dahrk.ai"
+          # SSH-sign with the bot's own key when it is available. Written 0600 outside the checkout and
+          # removed in a trap, so it never lands in the tree or in a log. Absent secret = unsigned, as
+          # before; the tap bump is non-fatal and must not start failing over a missing key.
+          if [ -n "${DAHRK_SIGNING_KEY:-}" ]; then
+            KEY_FILE="$(mktemp)"
+            trap 'rm -f "$KEY_FILE"' EXIT
+            printf '%s\n' "$DAHRK_SIGNING_KEY" > "$KEY_FILE"
+            chmod 600 "$KEY_FILE"
+            git config gpg.format ssh
+            git config user.signingkey "$KEY_FILE"
+            git config commit.gpgsign true
+          fi
           if git diff --quiet; then
             echo "formula already at ${VERSION}, nothing to push"
           else

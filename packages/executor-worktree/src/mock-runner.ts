@@ -32,10 +32,10 @@ export function createMockRunner(runtime: Runner["runtime"]): Runner {
       ];
       for (const event of events) onTrace(event);
       // Optional delay so tests can SIGKILL the edge mid-stage (crash recovery).
-      const delayMs = Number(process.env.DAHRK_MOCK_DELAY_MS ?? process.env.SKAKEL_MOCK_DELAY_MS ?? 0);
+      const delayMs = Number(process.env.DAHRK_MOCK_DELAY_MS ?? 0);
       if (delayMs > 0) await sleep(delayMs);
       // Optional deterministic per-stage cost so the offline harness can drive cost_budget (M6).
-      const costUsd = Number(process.env.DAHRK_MOCK_COST_USD ?? process.env.SKAKEL_MOCK_COST_USD ?? 0);
+      const costUsd = Number(process.env.DAHRK_MOCK_COST_USD ?? 0);
       return { status: cancelled ? "fail" : "ok", ...(costUsd > 0 ? { costUsd } : {}) };
     },
 

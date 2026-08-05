@@ -21,8 +21,7 @@
  * `dahrk update` self-updates the client in place to the latest published release.
  *
  * Everything remains overridable for power users and the managed profile: `--token` / `--name` /
- * `--hub-url` flags win over the matching `DAHRK_*` env vars (the legacy `SKAKEL_*` names are still
- * accepted as aliases), and `DAHRK_RUNTIMES`, `DAHRK_NODE_ID`,
+ * `--hub-url` flags win over the matching `DAHRK_*` env vars, and `DAHRK_RUNTIMES`, `DAHRK_NODE_ID`,
  * `DAHRK_TENANT_ID` still act as explicit overrides.
  */
 import { execFileSync } from "node:child_process";
@@ -89,7 +88,6 @@ import { lastConnection, runStatus, type StatusDeps } from "./status.js";
 import {
   crashDir,
   jsonlLogFile,
-  legacyStateDir,
   lockFile,
   logDir,
   logFiles,
@@ -128,21 +126,15 @@ export interface ResolvedBoot {
 }
 
 /** Resolve this node's stable id. An explicit `DAHRK_NODE_ID` wins (the managed profile
- *  pins one); otherwise read `~/.dahrk/node.json` (falling back to the legacy `~/.skakel/node.json`
- *  so a pre-rename node keeps its id), minting and persisting a fresh UUID on first boot so the id
- *  survives restarts. A disk failure logs and falls back to an in-memory UUID. `ephemeral` skips all
- *  disk I/O and mints a throwaway id for this run (CI / one-shot nodes), unless an explicit
+ *  pins one); otherwise read `~/.dahrk/node.json`, minting and persisting a fresh UUID on first boot
+ *  so the id survives restarts. A disk failure logs and falls back to an in-memory UUID. `ephemeral`
+ *  skips all disk I/O and mints a throwaway id for this run (CI / one-shot nodes), unless an explicit
  *  `DAHRK_NODE_ID` still pins one. */
 export function resolveNodeId(env: NodeJS.ProcessEnv, opts: { ephemeral?: boolean } = {}): string {
   if (env.DAHRK_NODE_ID) return env.DAHRK_NODE_ID;
   if (opts.ephemeral) return randomUUID();
   const existing = readState(stateFile(env)).nodeId;
   if (existing) return existing;
-  const legacy = legacyStateDir(env);
-  if (legacy) {
-    const legacyId = readState(join(legacy, "node.json")).nodeId;
-    if (legacyId) return legacyId;
-  }
   const nodeId = randomUUID();
   writeState(env, { nodeId });
   return nodeId;
@@ -219,24 +211,9 @@ export function buildEdgeOptions(env: NodeJS.ProcessEnv, resolved?: ResolvedBoot
   };
 }
 
-/** Populate each `DAHRK_*` var from its legacy `SKAKEL_*` alias when the new name is unset, so the
- *  pre-rename env still configures the node. Backward-compat shim; the `SKAKEL_*` fallback is dropped
- *  once deployments have migrated. */
-function applyEnvAliases(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...env };
-  for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith("SKAKEL_") && value !== undefined) {
-      const dahrkKey = `DAHRK_${key.slice("SKAKEL_".length)}`;
-      merged[dahrkKey] ??= value;
-    }
-  }
-  return merged;
-}
-
-/** Overlay the parsed CLI flags onto a copy of the env; a flag wins over the matching env var. The
- *  legacy `SKAKEL_*` aliases are folded in first so a flag still beats them. */
+/** Overlay the parsed CLI flags onto a copy of the env; a flag wins over the matching env var. */
 function envWithFlags(env: NodeJS.ProcessEnv, flags: StartFlags): NodeJS.ProcessEnv {
-  const merged = applyEnvAliases(env);
+  const merged: NodeJS.ProcessEnv = { ...env };
   if (flags.token) merged.DAHRK_ENROL_TOKEN = flags.token;
   if (flags.name) merged.DAHRK_NODE_NAME = flags.name;
   if (flags.hubUrl) merged.DAHRK_HUB_URL = flags.hubUrl;
@@ -572,7 +549,7 @@ async function startForeground(env: NodeJS.ProcessEnv, flags: StartFlags): Promi
     },
     // The hub-driven upgrade (DHK-1001). The wire client owns the ack and its ordering; everything that
     // needs a package manager or the supervisor lives here, which is why this is a callback at all.
-    onUpgrade: async ({ target }) => planRemoteUpgrade(target, updateStateDeps(env)),
+    onUpgrade: async ({ target }) => planRemoteUpgrade(target),
     // How a rejected node heals. Reads `node.json` DIRECTLY rather than going through
     // `resolveEnrolToken`, and that is the whole point: the disk is where re-enrolment writes, so it is
     // the only place a *newer* token can appear. (Deliberately narrower than boot-time resolution, which
@@ -597,16 +574,6 @@ async function stop(env: NodeJS.ProcessEnv, force: boolean): Promise<number> {
   return code;
 }
 
-/** Point `dahrk update`'s cache write at the SAME state file everything else uses.
- *
- *  `update.ts` defaults to `process.env`, which is very nearly right - but `status` reads through the
- *  alias-applied env (`applyEnvAliases`), so a node still configured with the legacy `SKAKEL_STATE_DIR`
- *  would have `update` writing its answer to one file and `status` reading from another, and the cache would
- *  appear never to update at all. Resolve it once, here, where the aliases have already been folded in. */
-const updateStateDeps = (env: NodeJS.ProcessEnv): Partial<UpdateDeps> => ({
-  saveResult: (patch) => writeState(env, patch),
-});
-
 /** The IO the update check runs on: the clock, the registry, and the state file it caches into. */
 function updateCheckDeps(env: NodeJS.ProcessEnv): UpdateCheckDeps {
   return {
@@ -629,7 +596,7 @@ async function offerUpdate(env: NodeJS.ProcessEnv): Promise<void> {
   uiOut(renderUpdateNotice(available));
   if (!isInteractive()) return;
   if (!(await confirm("Update now?"))) return;
-  const code = await runUpdate({ currentVersion: CLIENT_VERSION, check: false }, updateStateDeps(env));
+  const code = await runUpdate({ currentVersion: CLIENT_VERSION, check: false });
   if (code !== 0) uiOut(hint("Update failed; starting the node on the current version anyway."));
 }
 
@@ -781,7 +748,7 @@ async function runWorkflow(flags: RunFlags): Promise<number> {
     console.error(`Available workflows: ${KNOWN_WORKFLOWS.join(", ")}`);
     return 2;
   }
-  const env = applyEnvAliases(process.env);
+  const env = process.env;
   // Defaulted, for the same reason `doctor` is: an unset DAHRK_HUB_URL is the NORMAL case, not a misconfig.
   const hubUrl = flags.hubUrl ?? env.DAHRK_HUB_URL ?? DEFAULT_HUB_URL;
   const token = flags.token ?? resolveEnrolToken(env);
@@ -805,7 +772,7 @@ async function runWorkflow(flags: RunFlags): Promise<number> {
  * node is not yet enrolled; is an idempotent no-op on a repo that is already registered.
  */
 async function runRepoAdd(flags: RepoAddFlags): Promise<number> {
-  const env = applyEnvAliases(process.env);
+  const env = process.env;
   if (flags.hubUrl) env.DAHRK_HUB_URL = flags.hubUrl;
   if (flags.token) env.DAHRK_ENROL_TOKEN = flags.token;
 
@@ -934,9 +901,8 @@ async function main(): Promise<void> {
         process.exitCode = await runServiceUninstall();
         break;
       }
-      // Install bakes the resolved connection/identity into the unit: flags win over the env vars
-      // (legacy SKAKEL_* aliases folded in first).
-      const env = applyEnvAliases(process.env);
+      // Install bakes the resolved connection/identity into the unit: flags win over the env vars.
+      const env = process.env;
       // Falls back to the cached token, so `dahrk start --token X` followed by `dahrk service install`
       // does not make the operator paste the token a second time.
       const token = parsed.flags.token ?? resolveEnrolToken(env);
@@ -950,22 +916,20 @@ async function main(): Promise<void> {
       break;
     }
     case "update":
-      // Self-update is issue-less and hub-less: no flag overlay, just current vs latest. The env is still
-      // resolved, because whatever it learns is written into the state file `status` reads.
-      process.exitCode = await runUpdate(
-        {
-          currentVersion: CLIENT_VERSION,
-          check: parsed.flags.check,
-          verbose: parsed.flags.verbose,
-        },
-        updateStateDeps(applyEnvAliases(process.env)),
-      );
+      // Self-update is issue-less and hub-less: no flag overlay, just current vs latest. `update.ts`
+      // caches what it learns into the same state file `status` reads, off `process.env` - the one env
+      // every command now resolves the state dir from.
+      process.exitCode = await runUpdate({
+        currentVersion: CLIENT_VERSION,
+        check: parsed.flags.check,
+        verbose: parsed.flags.verbose,
+      });
       break;
     case "start":
       process.exitCode = await start(parsed.flags);
       break;
     case "stop":
-      process.exitCode = await stop(applyEnvAliases(process.env), parsed.force);
+      process.exitCode = await stop(process.env, parsed.force);
       break;
     case "restart":
       // One act, not `stop` followed by `start`: see `restart` above for why that composition was wrong in
@@ -973,12 +937,12 @@ async function main(): Promise<void> {
       process.exitCode = await restart(parsed.flags, parsed.force);
       break;
     case "logs": {
-      const env = applyEnvAliases(process.env);
+      const env = process.env;
       process.exitCode = await runLogs(parsed.flags, defaultLogsDeps(logFiles(env), jsonlLogFile(env)));
       break;
     }
     case "diagnose": {
-      const env = applyEnvAliases(process.env);
+      const env = process.env;
       // Run the doctor into a buffer rather than the terminal: its verdict belongs IN the bundle, so the
       // bundle answers "was the host even sane?" without us having to ask for a second paste.
       const doctorLines: string[] = [];
@@ -1040,7 +1004,7 @@ if (invokedAsEntrypoint) {
     // a node that will not start is exactly when you need one.
     if (!enrolmentRejected) {
       if (err instanceof Error && err.stack) console.error(err.stack);
-      const env = applyEnvAliases(process.env);
+      const env = process.env;
       writeCrashRecord(crashDir(env), {
         at: new Date().toISOString(),
         kind: "uncaughtException",

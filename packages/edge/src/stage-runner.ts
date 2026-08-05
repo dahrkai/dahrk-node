@@ -1225,7 +1225,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // short-circuit it replaced for interactive stages, but that short-circuit also covered checks.
         const stallSource =
           (agentConfig as { stallMs?: number } | undefined)?.stallMs ??
-          Number(process.env.DAHRK_BATCH_STALL_MS ?? process.env.SKAKEL_BATCH_STALL_MS ?? 300_000);
+          Number(process.env.DAHRK_BATCH_STALL_MS ?? 300_000);
         // A check stage streams nothing while a command runs (no per-token trace), so the output-idle
         // watchdog would kill any check slower than the 300s default - `pnpm test` on a real repo.
         // Its bounds are the per-check `timeoutSeconds` and the stage's own `timeout_seconds`.
@@ -1371,6 +1371,22 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
       try {
         const mode: PushMode = job.mode ?? "deliver";
 
+        // Who the commit is by, and what signs it - both decided by the hub, both applied at every
+        // commit site the push touches. `identity` carries the repo's dev-cycle override (DHK-60);
+        // until this was threaded, the node silently ignored it and stamped its own hardcoded default
+        // on every commit, so a repo that configured an author in the portal never got one.
+        //
+        // `signingKey` is the Dahrk bot's own SSH signing key, brokered per push exactly like the git
+        // token: it is read off the frame rather than held on the node, and `GitService` writes it to a
+        // temp file outside the worktree for the life of the operation. Absent = commits go out
+        // unsigned (and explicitly so - the node must never fall through to a host signing key).
+        // Read defensively: a hub older than the field simply sends nothing.
+        const signingKey = (job as PushJob & { signingKey?: string }).signingKey;
+        const attribution = {
+          ...(job.identity ? { identity: job.identity } : {}),
+          ...(signingKey ? { signingKey } : {}),
+        };
+
         // Work-preservation push (DHK-264): the hub dispatches `mode:"backup"` after a `deliver` push
         // hit a base-advanced conflict, to save the run's committed HEAD on a durable `dahrk/wip/<runId>`
         // ref before the worktree is reaped. It MUST use the run's sticky worktree (which still holds the
@@ -1392,6 +1408,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
               message: job.message,
               branch: job.branch,
               ...(job.workspaceRef.credentialToken ? { credentialToken: job.workspaceRef.credentialToken } : {}),
+              ...attribution,
             });
             return resolveBackupOutcome(r, { jobId, branch: job.branch });
           } catch (e) {
@@ -1423,6 +1440,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             branch: job.branch,
             base: job.base,
             ...(job.workspaceRef.credentialToken ? { credentialToken: job.workspaceRef.credentialToken } : {}),
+            ...attribution,
           });
           // The node never opens the pull request. It used to, whenever the hub judged the run ambient
           // and set `openPr`: the edge shelled out to the host's `gh` CLI, so PR authorship depended on

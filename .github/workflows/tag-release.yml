@@ -4,7 +4,10 @@ name: Tag release
 # release.yml to publish. Cut releases with `pnpm release <version>` (see README "Releasing") — this
 # workflow is the automatic second half.
 #
-# Required secret:
+# Required secrets:
+#   DAHRK_SIGNING_KEY - the bot's OpenSSH *private* signing key (public half registered as a signing key
+#                 on the `dahrk-ai` GitHub account). Present: the tag is annotated and SSH-signed, so it
+#                 shows as verified. Absent: a plain lightweight tag, exactly as before.
 #   RELEASE_PAT - a PAT with `repo` scope (or a fine-grained PAT with Contents: read/write on this
 #                 repo). The tag MUST be pushed with a PAT, not the default GITHUB_TOKEN: GitHub does
 #                 not re-trigger tag-driven workflows for tags pushed by GITHUB_TOKEN, so release.yml
@@ -41,6 +44,8 @@ jobs:
 
       - name: Create and push tag
         if: env.skip != 'true'
+        env:
+          DAHRK_SIGNING_KEY: ${{ secrets.DAHRK_SIGNING_KEY }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./apps/edge-node/package.json').version")
@@ -49,8 +54,25 @@ jobs:
             echo "::notice::tag ${TAG} already exists — nothing to do"
             exit 0
           fi
-          git config user.name "dahrk-release"
-          git config user.email "release@dahrk.ai"
-          git tag "${TAG}"
+          # The same bot identity every other Dahrk commit uses, so the signature below can verify: a
+          # signature only counts as verified when the email is a verified address on the account that
+          # owns the key, and `release@dahrk.ai` never was one.
+          git config user.name "Dahrk"
+          git config user.email "noreply@dahrk.ai"
+          # With the key present the tag is ANNOTATED and signed - a lightweight tag is just a ref and
+          # cannot carry a signature. Without it, the tag stays lightweight exactly as before, so a repo
+          # with no secret set behaves identically. Nothing downstream assumes one or the other:
+          # `release.mjs` already dereferences with `^{commit}`.
+          if [ -n "${DAHRK_SIGNING_KEY:-}" ]; then
+            KEY_FILE="$(mktemp)"
+            trap 'rm -f "$KEY_FILE"' EXIT
+            printf '%s\n' "$DAHRK_SIGNING_KEY" > "$KEY_FILE"
+            chmod 600 "$KEY_FILE"
+            git config gpg.format ssh
+            git config user.signingkey "$KEY_FILE"
+            git tag -s "${TAG}" -m "dahrk ${VERSION}"
+          else
+            git tag "${TAG}"
+          fi
           git push origin "${TAG}"
           echo "::notice::pushed ${TAG} — release.yml will publish"

@@ -258,9 +258,6 @@ env var.
 | `DAHRK_FS_EXTRA_ROOTS` / `DAHRK_FS_EXTRA_READ_ROOTS` | Colon-separated extra paths a stage may write / read, for a toolchain that lives somewhere we did not anticipate. |
 | `DAHRK_SANDBOX` | Set `1` to additionally run Claude stages inside the SDK's OS-level sandbox (seatbelt/bubblewrap). Off by default while its behaviour is being proven. |
 
-> The legacy `SKAKEL_*` names are still accepted as aliases for every `DAHRK_*` variable during the
-> rename transition. See [`.env.example`](.env.example).
-
 ## What a stage may touch
 
 A node runs agent stages on your machine, so the boundary matters. A stage is confined to the run's

@@ -88,12 +88,6 @@ export function stateDir(env: NodeJS.ProcessEnv): string {
   return env.DAHRK_STATE_DIR ?? join(homedir(), ".dahrk");
 }
 
-/** Legacy state dir from before the Dahrk rename; read (never written) so an existing node keeps its
- *  id across the upgrade. Only consulted when DAHRK_STATE_DIR is not set. */
-export function legacyStateDir(env: NodeJS.ProcessEnv): string | undefined {
-  return env.DAHRK_STATE_DIR ? undefined : join(homedir(), ".skakel");
-}
-
 export function stateFile(env: NodeJS.ProcessEnv): string {
   return join(stateDir(env), "node.json");
 }

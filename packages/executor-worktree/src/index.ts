@@ -121,7 +121,7 @@ export type { PiAuthHint, ProviderHint, ApiKeyProviderHint, OAuthProviderHint } 
  * telemetry-only, so this is accepted.
  */
 export function makeRunner(runtime: Runner["runtime"]): Runner {
-  if ((process.env.DAHRK_RUNNER ?? process.env.SKAKEL_RUNNER ?? "real") === "mock") return createMockRunner(runtime);
+  if ((process.env.DAHRK_RUNNER ?? "real") === "mock") return createMockRunner(runtime);
   if (runtime === "pi") return piContainerIsolationRequired() ? createIsolatedPiRunner() : createPiRunner();
   if (runtime === "claude-code") return createClaudeRunner();
   // Anything else - `codex`, still in the wire enum pending its harness-side removal (DHK-510), or a
@@ -136,5 +136,5 @@ export function makeRunner(runtime: Runner["runtime"]): Runner {
 
 /** Whether Pi stages must run container-isolated; a managed node sets `DAHRK_PI_ISOLATION=container`. */
 function piContainerIsolationRequired(): boolean {
-  return (process.env.DAHRK_PI_ISOLATION ?? process.env.SKAKEL_PI_ISOLATION) === "container";
+  return process.env.DAHRK_PI_ISOLATION === "container";
 }

@@ -24,6 +24,76 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Removed
+
+- **Skakel is gone from the env surface.** The `SKAKEL_*` aliases were supported two different ways,
+  and the two did not cover the same callers. `main.ts` folded every `SKAKEL_FOO` into `DAHRK_FOO` on
+  a *copy* of the env (`applyEnvAliases`), which only reached code handed that copy; anything reading
+  `process.env` directly needed its own hand-written `?? process.env.SKAKEL_*`, and thirteen sites had
+  one. Modules with neither - `doctor.ts` (`lockFile(process.env)`, `stateFile(process.env)`) and
+  `preflight.ts` - fell through the gap: a node configured with `SKAKEL_STATE_DIR` ran out of one
+  directory while `dahrk doctor` probed `~/.dahrk`, reporting on a node that was not there.
+
+  Deleting the aliases closes the gap rather than patching it. With no `SKAKEL_*` name in existence,
+  reading raw `process.env` is correct by construction, so `applyEnvAliases` and its nine call sites
+  are gone, `envWithFlags` is just the flag overlay it claims to be, and `updateStateDeps` in
+  `main.ts` - which existed *solely* to route `dahrk update`'s cache write through the alias-applied
+  env - is deleted along with its three uses; `update.ts`'s own default is now identical.
+
+  Also removed: `legacyStateDir` and the `~/.skakel/node.json` identity fallback in `resolveNodeId`.
+  A pre-rename node that never upgraded re-mints its nodeId and needs re-enrolling.
+
+  Sites cleared: `git-service.ts` (worktrees/mirrors dirs), `turn-loop.ts` (idle, first-reply,
+  coalesce, max-turns), `mock-runner.ts`, `pi-container.ts`, `index.ts` (runner, Pi isolation),
+  `stage-runner.ts` (batch stall), `spike/run.ts`, `ecosystem.config.cjs`, `.env.example`, `README.md`
+  and two test files.
+
+### Fixed
+
+- `preflight.ts` derived the state dir with its own inline `env.DAHRK_STATE_DIR ?? join(homedir(),
+  ".dahrk")` and never imported `state.ts` - a second copy of the fallback chain, which is precisely
+  the drift `state.ts` hoisted `logDir` to stop when `service.ts` and `status.ts` disagreed about
+  where the logs lived. It now calls `stateDir(env)`.
+
+### Added
+
+- Commit signing. `GitService` takes a `signingKey` (OpenSSH private key text) per push and applies
+  `-c gpg.format=ssh -c user.signingkey=<path> -c commit.gpgsign=true` at all three commit sites: the
+  main commit in `commitPending`, the push-time base merge, and the commit that completes a
+  deterministically pre-resolved conflict. The key is materialised exactly like the askpass token -
+  0600, in its own `mkdtemp` dir outside the worktree, removed in the operation's `finally` - so the
+  stage agent can never read it and it never reaches git's argv or any config file. `user.signingkey`
+  points at the private key; git derives the public half, so there is no `.pub` sidecar and no agent.
+
+  The key is the Dahrk bot's own, registered on the `dahrk-ai` GitHub account, which is what makes
+  GitHub render the commit `Verified`. It is brokered per push rather than held on the node, matching
+  the git token, and arrives on `PushJob.signingKey`. `stage-runner` reads it defensively so a hub
+  older than the field just sends nothing and commits go out unsigned.
+
+### Fixed
+
+- The node no longer inherits the host's `commit.gpgsign`. With no key configured it now passes
+  `-c commit.gpgsign=false` explicitly. Left implicit, a node on a host whose global git config sets
+  `commit.gpgsign = true` signed Dahrk's commit with the *host user's* key: attributed to Dahrk,
+  vouched for by a human, and rejected by GitHub as `verification.reason: "unknown_key"`. That is the
+  literal cause of the unverified commits on `dahrkai/dahrk-node` (e.g. `8647309`), and it also meant
+  the node was quietly borrowing a host credential it is never meant to touch.
+
+- Release CI commits and tags as `Dahrk <noreply@dahrk.ai>`, not a third `dahrk-release
+  <release@dahrk.ai>` identity, and SSH-signs both from a new optional `DAHRK_SIGNING_KEY` secret. The
+  release identity could never have verified: GitHub only marks a signature verified when the commit
+  email is a *verified address on the account owning the key*, and `release@dahrk.ai` is not one. The
+  tag becomes annotated when the secret is present (a lightweight tag is a bare ref and cannot carry a
+  signature) and stays lightweight when it is not, so a repo without the secret is unaffected;
+  `release.mjs` already dereferences tags with `^{commit}`.
+
+- `PushJob.identity` is now honoured. The hub has computed a per-repo `CommitIdentity` since DHK-60 and
+  put it on the push frame, but `stage-runner` passed only `message`/`branch`/`base`/`credentialToken`,
+  so it was dropped on the floor and every commit used the node's hardcoded `Dahrk <noreply@dahrk.ai>`.
+  Author and committer are now separate throughout (`GIT_AUTHOR_*` / `GIT_COMMITTER_*` env, since git
+  config has no `committer.*` keys); a partial override echoes the author onto the committer rather
+  than falling back to the service default, so it cannot read as somebody else.
+
 ## [0.3.7] - 2026-08-05
 
 ### Changed

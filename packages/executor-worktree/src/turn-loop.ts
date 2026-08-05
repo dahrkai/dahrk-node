@@ -35,8 +35,8 @@ import type {
  * timed out label-triggered interviews before anyone could answer (run-152a526f).
  */
 export function interactiveIdleWindows(ctx: RunnerContext): { firstReplyMs: number; idleMs: number } {
-  const idleMs = ctx.config.idleMs ?? Number(process.env.DAHRK_INTERACTIVE_IDLE_MS ?? process.env.SKAKEL_INTERACTIVE_IDLE_MS ?? 120_000);
-  const firstReplyMs = ctx.config.firstReplyMs ?? Number(process.env.DAHRK_INTERACTIVE_FIRST_REPLY_MS ?? process.env.SKAKEL_INTERACTIVE_FIRST_REPLY_MS ?? 600_000);
+  const idleMs = ctx.config.idleMs ?? Number(process.env.DAHRK_INTERACTIVE_IDLE_MS ?? 120_000);
+  const firstReplyMs = ctx.config.firstReplyMs ?? Number(process.env.DAHRK_INTERACTIVE_FIRST_REPLY_MS ?? 600_000);
   return { firstReplyMs: Math.max(firstReplyMs, idleMs), idleMs };
 }
 
@@ -90,7 +90,7 @@ export function raceNextTurn<T>(
  * interactive loop below so every runtime (both Pi back-ends and Claude) debounces identically - the
  * single copy now that Claude drives this loop too (DHK-594).
  */
-export const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? process.env.SKAKEL_COALESCE_MS ?? 40);
+export const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? 40);
 
 /**
  * The hard turn ceiling both runtimes honour (DHK-970): the backstop against an agent stuck in a
@@ -101,7 +101,7 @@ export const COALESCE_MS = Number(process.env.DAHRK_COALESCE_MS ?? process.env.S
  * constant) so a stage can be bounded via the env and a test can shrink it.
  */
 export function maxTurnCeiling(): number {
-  return Number(process.env.DAHRK_MAX_TURNS ?? process.env.SKAKEL_MAX_TURNS ?? 64);
+  return Number(process.env.DAHRK_MAX_TURNS ?? 64);
 }
 
 /** The loop-owned lifecycle levers the interactive settle needs: the cancel signal, a live `cancelled`
