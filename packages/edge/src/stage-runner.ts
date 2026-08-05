@@ -47,6 +47,7 @@ import {
   type GitService,
   type PackCache,
   type CheckOutcome,
+  type CheckProbes,
   type PreExecutionCapability,
   type ReapReport,
 } from "@dahrk/executor-worktree";
@@ -100,7 +101,11 @@ export interface StageRunnerDeps {
   /** Builds the deterministic check runner. Injectable so a test can substitute one; defaults to the
    *  real `createCheckRunner`. Separate from `makeRunner` because that switches on a vendor agent
    *  runtime and has no access to the Job's resolved checks. */
-  makeCheckRunner?: (checks: readonly ResolvedCheck[], onOutcomes?: (o: CheckOutcome[]) => void) => Runner;
+  makeCheckRunner?: (
+    checks: readonly ResolvedCheck[],
+    onOutcomes?: (o: CheckOutcome[]) => void,
+    probes?: CheckProbes,
+  ) => Runner;
   /** The node's logger. Absent (tests, embedders) = a silent logger, so the runner stays quiet by
    *  default. Used to surface the best-effort paths below, which used to fail invisibly. */
   logger?: NodeLogger;
@@ -1051,9 +1056,24 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // one place the two paths genuinely diverge.
         let checkOutcomes: CheckOutcome[] = [];
         const runner = isCheck
-          ? (deps.makeCheckRunner ?? createCheckRunner)(job.checks, (o) => {
-              checkOutcomes = o;
-            })
+          ? (deps.makeCheckRunner ?? createCheckRunner)(
+              job.checks,
+              (o) => {
+                checkOutcomes = o;
+              },
+              // Node-native probes: checks the node performs itself because they need the repo's git
+              // credential, which a `sh -c` check env deliberately does not carry (see `CheckProbe`).
+              // Bound to THIS job's worktree and token, so the probe authenticates exactly as a real
+              // fetch would.
+              {
+                "git-fetch": async () =>
+                  await deps.gitService.fetchProbe(ref, {
+                    ...(job.workspaceRef?.credentialToken
+                      ? { credentialToken: job.workspaceRef.credentialToken }
+                      : {}),
+                  }),
+              },
+            )
           : deps.makeRunner(runtime!);
         active.set(jobId, runner);
         const ctx: PolicyAwareRunnerContext = {

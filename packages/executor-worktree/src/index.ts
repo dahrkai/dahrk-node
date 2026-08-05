@@ -27,6 +27,7 @@ export {
   parseOwnerRepo,
   resolveWorktreesDir,
   resolveMirrorsDir,
+  FETCH_PROBE_TIMEOUT_SECONDS,
 } from "./git-service.js";
 /** Restart-safe collection of run worktrees (DHK-371). See `worktree-reaper.ts`. */
 export { createWorktreeReaper } from "./worktree-reaper.js";
@@ -40,6 +41,8 @@ export type {
   CommitPushResult,
   BackupPushOpts,
   BackupPushResult,
+  FetchProbeOpts,
+  FetchProbeResult,
 } from "./git-service.js";
 
 /** The pure footprint core: parse `git diff --numstat` and derive the blast-radius numbers (DHK-615). */
@@ -75,7 +78,7 @@ export { createMockRunner } from "./mock-runner.js";
 
 // The deterministic quality gate: named commands in the worktree, exit code as the verdict.
 export { createCheckRunner, summariseChecks, renderCheckNote, safeStageSegment } from "./check-runner.js";
-export type { CheckOutcome } from "./check-runner.js";
+export type { CheckOutcome, CheckProbes, ProbeOutcome } from "./check-runner.js";
 
 /** Whether a runner's session pre-blocks tool calls, so the edge can tell a blocked deny from a
  *  confinement escape by capability rather than runtime name (DHK-983). */
