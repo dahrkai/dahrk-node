@@ -1514,3 +1514,95 @@ forBothRuntimes("an interactive refusal does not clear an existing refusal (DHK-
   });
   assert.equal(latch.isRefused(runtime), true, "a second refusal is still a refusal, not a reset");
 });
+
+// The `runtime-detect` probe (replacing `command -v claude`). Driven through a real stage runner so
+// the probe TABLE wiring is proven too, not just the predicate: the previous defect was never in the
+// predicate, it was in what the hub asked and what the node answered drifting apart.
+async function captureRuntimeProbe(
+  probeRuntimes: Runtime[] | undefined,
+  statuses: Array<{ runtime: Runtime; capable: boolean; detail: string }>,
+): Promise<{ ok: boolean; output: string; exitCode: number | null }> {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-rt-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+
+  let probes: Record<string, (c: unknown) => Promise<{ ok: boolean; output: string; exitCode: number | null }>> = {};
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+    makeRunner: makeSettlingRunner("ok", "ok"),
+    makeCheckRunner: (_checks, _onOutcomes, p) => {
+      probes = (p ?? {}) as typeof probes;
+      return makeSettlingRunner("ok", "checks: ok")("claude-code");
+    },
+    // Injected, so the test never has to add or remove a package from node_modules to make a runtime
+    // look present or absent.
+    probeRuntimes: async () =>
+      statuses.map((s) => ({ ...s, credential: "brokered" as const, available: s.capable })),
+    rules: [],
+    sendProgress: () => undefined,
+  });
+
+  const check = { name: "agent-runtime", command: "true", probe: "runtime-detect" as const, ...(probeRuntimes ? { probeRuntimes } : {}) };
+  const job = {
+    tenantId: "t_default",
+    runId: "run-rt-1",
+    stageId: "checks",
+    jobId: "job-rt-1",
+    awakeableId: "awk-rt",
+    executorType: "worktree",
+    kind: "check" as const,
+    checks: [check],
+    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    timeout: 60,
+  } as unknown as JobRequest;
+
+  try {
+    await runner.runJob(job);
+    const handler = probes["runtime-detect"];
+    assert.ok(handler, "the stage runner offers a runtime-detect probe");
+    return await handler(check);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("runtime-detect passes when every asserted runtime is executable here", async () => {
+  const r = await captureRuntimeProbe(["pi"], [
+    { runtime: "claude-code", capable: true, detail: "brokered credentials from the hub" },
+    { runtime: "pi", capable: true, detail: "brokered credentials from the hub" },
+  ]);
+  assert.equal(r.ok, true);
+  assert.equal(r.exitCode, 0);
+  assert.match(r.output, /pi: executable/);
+  // Only what was asserted is reported, so an openai-codex tenant's report never mentions Claude.
+  assert.doesNotMatch(r.output, /claude-code/);
+});
+
+test("runtime-detect fails naming the runtime that cannot run, and why", async () => {
+  const r = await captureRuntimeProbe(["claude-code"], [
+    { runtime: "claude-code", capable: false, detail: "cannot run here: @anthropic-ai/claude-agent-sdk is not installed (reinstall dahrk-node)" },
+    { runtime: "pi", capable: true, detail: "brokered credentials from the hub" },
+  ]);
+  assert.equal(r.ok, false);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.output, /claude-code: NOT executable/);
+  assert.match(r.output, /reinstall dahrk-node/, "the operator is told the fix is a reinstall, not a login");
+});
+
+// How a tenant with nothing to assert emits a check that passes, rather than every caller carrying a
+// special case. An unbound tenant must not be told its node is broken.
+test("runtime-detect passes when nothing is asserted", async () => {
+  for (const wanted of [[] as Runtime[], undefined]) {
+    const r = await captureRuntimeProbe(wanted, [{ runtime: "pi", capable: false, detail: "absent" }]);
+    assert.equal(r.ok, true, `empty assertion passes (${JSON.stringify(wanted)})`);
+  }
+});
+
+// A newer hub can name a runtime this build has never heard of. "Absent from my own detection" is the
+// honest answer; silently passing would advertise a capability that does not exist.
+test("runtime-detect treats a runtime it does not know as missing", async () => {
+  const r = await captureRuntimeProbe(["mystery" as Runtime], [{ runtime: "pi", capable: true, detail: "ok" }]);
+  assert.equal(r.ok, false);
+  assert.match(r.output, /does not know this runtime/);
+});
