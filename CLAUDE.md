@@ -34,12 +34,41 @@ dependency bump, or a type-only change under `src/` all need a note just as much
 
 Add the entry under the `[Unreleased]` heading of exactly one of:
 
-- **`CHANGELOG.md`** for a change a self-hoster would notice (behaviour, flag, fix). Match the
-  surrounding entries: British English, no em dashes, under `### Added` / `### Changed` / `### Fixed`.
-  **Never** put an internal tracker key (`DHK-…`) in this file - `pnpm lint:changelog` rejects it.
+- **`CHANGELOG.md`** for a change a self-hoster would notice (behaviour, flag, fix). British English,
+  no em dashes, under `### Added` / `### Changed` / `### Fixed`. **Never** put an internal tracker key
+  (`DHK-…`) in this file - `pnpm lint:changelog` rejects it.
 - **`CHANGELOG.internal.md`** for anything else: refactor, dependency plumbing, test, tooling,
   comment-only edit. Tracker keys are welcome here. This always satisfies the gate, so when in doubt
   it is the right answer - an internal note beats no note.
+
+### A public note is one sentence
+
+**One sentence per bullet, 25 words maximum.** `pnpm lint:changelog` fails the build above 25, so
+this is a hard limit, not a preference. Write the new behaviour in the present tense and stop:
+
+- **No bold lead-in.** A bolded claim reads as a headline, and a headline invites the paragraph that
+  used to follow it. Just write the sentence.
+- **Leave out the mechanism.** Not what used to happen, not the root cause, not why it was wrong, not
+  how it was fixed. A reader who wants that follows `(#N)` to the pull request.
+- **One bullet per distinct change.** Do not merge two unrelated fixes to stay under the limit, and
+  do not split one fix into three to sound busier.
+- **If it will not fit, you are explaining.** A user-visible change can always be stated in a
+  sentence; 25 words is generous for one. Length is the symptom, explanation is the cause.
+
+The detail is not lost - it belongs in `CHANGELOG.internal.md`, which is never published. Put the
+mechanism, the root cause and the before/after narrative there, at whatever length is useful.
+
+Before, as this file used to be written (105 words):
+
+> - **The `repo-fetch` health check could never pass on a node using brokered credentials.** It ran a
+>   bare `git fetch` as an ordinary check command, and a check command deliberately does not carry the
+>   repo's git credential: the node holds that token only for the life of its own git operations. So
+>   the fetch fell through to a password prompt and, with no terminal attached, died as `could not
+>   read Password... Device not configured` on every run. […] (#174)
+
+After (13 words):
+
+> - The `repo-fetch` health check now passes on nodes using brokered credentials. (#174)
 
 Public entries cite the GitHub PR as `(#N)`. **If you do not know the PR number, leave the reference
 out** rather than inventing one; the release audit backfills it. (Your commit is created before the

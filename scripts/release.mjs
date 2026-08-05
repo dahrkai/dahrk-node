@@ -292,6 +292,9 @@ async function draftSection(unreleasedFallback) {
         'and why it matters to them, not the commit mechanics. ' +
         'Lead with the most notable change, then group the rest under ### Added / ### Changed / ' +
         '### Fixed (omit empty groups). One bullet per change. ' +
+        // A hard limit, not a preference: scripts/lint-changelog.mjs fails the build over 25 words.
+        'ONE SENTENCE per bullet, 25 words maximum. No bold lead-in. State the new behaviour in the ' +
+        'present tense; never explain the cause, the mechanism, or what used to happen. ' +
         'Where a commit subject carries a GitHub reference like "(#7)", keep that "(#N)" reference on ' +
         'the bullet. NEVER include internal tracker keys (e.g. DHK-284, SKA-…, LABS-…, TEST-…, HAR-…, ' +
         'SL-…), internal run IDs (run-…), branch names, or commit trailers (Co-authored-by, etc.). ' +

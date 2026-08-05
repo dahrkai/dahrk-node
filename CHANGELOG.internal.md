@@ -12,6 +12,11 @@ Rules of thumb:
   referencing the GitHub PR as `(#N)`, never a tracker key.
 - **Internal-only change** (refactor, test, CI, dependency plumbing) → here. Tracker keys are welcome.
 - A change can appear in both: the public line for users, the internal line with the `DHK-…` link.
+- **The mechanism belongs here, always.** A public note is one sentence under 25 words stating the
+  new behaviour, and `pnpm lint:changelog` enforces that. So the root cause, what used to happen, why
+  it was wrong and how it was fixed have nowhere else to go: write them here, at whatever length is
+  useful. Pairing a one-line public note with a full internal one is the normal shape, not a
+  duplication.
 
 `pnpm release <version>` rolls the `[Unreleased]` section of **both** files into a dated `[version]`
 section, so the two histories stay aligned. The public file is sanitised (keys stripped) at release;
