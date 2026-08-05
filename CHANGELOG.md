@@ -6,17 +6,19 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-05
+
 ### Fixed
 
 - **The `repo-fetch` health check could never pass on a node using brokered credentials.** It ran a
   bare `git fetch` as an ordinary check command, and a check command deliberately does not carry the
   repo's git credential: the node holds that token only for the life of its own git operations. So the
   fetch fell through to a password prompt and, with no terminal attached, died as `could not read
-  Password ... Device not configured` on every run. Because `repo-fetch` is a required probe, the
+  Password... Device not configured` on every run. Because `repo-fetch` is a required probe, the
   health check's verdict was pinned to "pass with findings" for good, and onboarding could not
   complete. The node now performs this probe itself, through the git service that already holds the
   credential, so it tests what it claims to. The credential still never enters the environment of any
-  check command.
+  check command. (#174)
 
 ## [0.3.4] - 2026-08-04
 
@@ -1346,7 +1348,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/dahrkai/dahrk-node/compare/v0.3.1...v0.3.2
