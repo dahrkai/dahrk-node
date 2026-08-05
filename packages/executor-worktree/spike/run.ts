@@ -33,7 +33,7 @@ const validateEvent = ajv.compile({ $ref: "https://dahrk.ai/schemas/trace.schema
 
 const want = (name: string): boolean => {
   // Claude Code is primary: the default set is Claude batch + interactive. Codex is opt-in.
-  const list = (process.env.DAHRK_LIVE_RUNTIMES ?? process.env.SKAKEL_LIVE_RUNTIMES ?? "claude,interactive").split(",").map((s) => s.trim());
+  const list = (process.env.DAHRK_LIVE_RUNTIMES ?? "claude,interactive").split(",").map((s) => s.trim());
   return list.includes(name);
 };
 
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     const ws = makeWorktree();
     const config: AgentConfig = {
       runtime: "claude-code",
-      model: process.env.DAHRK_LIVE_MODEL ?? process.env.SKAKEL_LIVE_MODEL ?? "haiku",
+      model: process.env.DAHRK_LIVE_MODEL ?? "haiku",
       prompt: "Create a file scratch-note.txt containing the single word DONE, then reply with one short sentence confirming it.",
       interaction: "batch",
     };
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
       const ws = makeWorktree();
       const config: AgentConfig = {
         runtime: "claude-code",
-        model: process.env.DAHRK_LIVE_MODEL ?? process.env.SKAKEL_LIVE_MODEL ?? "haiku",
+        model: process.env.DAHRK_LIVE_MODEL ?? "haiku",
         prompt:
           "You are an interactive planning stage. Converse in one short sentence per turn. " +
           "When the human says the plan is agreed, call dahrk_stage_complete with a one-sentence summary.",

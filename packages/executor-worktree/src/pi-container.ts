@@ -36,7 +36,7 @@ import { createPiRunner, resolveStageModelId } from "./pi-adapter.js";
 import type { PiSessionFactory, PiSessionLike } from "./pi-adapter.js";
 import type { PreExecutionCapability } from "./runtime-session.js";
 
-const DEFAULT_IMAGE = process.env.DAHRK_PI_IMAGE ?? process.env.SKAKEL_PI_IMAGE ?? "dahrk/pi:latest";
+const DEFAULT_IMAGE = process.env.DAHRK_PI_IMAGE ?? "dahrk/pi:latest";
 
 let _seq = 0;
 

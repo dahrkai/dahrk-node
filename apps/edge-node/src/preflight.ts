@@ -29,6 +29,7 @@ import { join } from "node:path";
 import type { HubProbeResult } from "@dahrk/edge";
 import { probeHub as realProbeHub } from "@dahrk/edge";
 import { checkHub, checkNode, checkToken, type CheckResult } from "./doctor.js";
+import { stateDir } from "./state.js";
 import { dim, out as uiOut, symbol } from "./ui.js";
 
 /** The public web surface that renders a full run report; the CLI prints a deep link to it. */
@@ -331,9 +332,10 @@ function writable(dir: string): boolean {
 
 /** The worktree root the node clones into: `DAHRK_WORKTREES_DIR` or `~/.dahrk/worktrees`. Its *parent*
  *  being writable is what matters (the node mkdirs the root on demand), so probe the nearest existing
- *  ancestor. */
+ *  ancestor. The state dir comes from `state.ts` rather than a second copy of the fallback chain: that
+ *  copy is exactly how `service.ts` and `status.ts` once disagreed about where the logs lived. */
 function worktreeRoot(env: NodeJS.ProcessEnv): string {
-  return env.DAHRK_WORKTREES_DIR ?? join(env.DAHRK_STATE_DIR ?? join(homedir(), ".dahrk"), "worktrees");
+  return env.DAHRK_WORKTREES_DIR ?? join(stateDir(env), "worktrees");
 }
 
 function nearestExisting(dir: string): string {

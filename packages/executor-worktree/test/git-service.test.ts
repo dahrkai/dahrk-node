@@ -99,10 +99,9 @@ test("parseOwnerRepo handles SSH and HTTPS git URLs and rejects non-URLs", () =>
 });
 
 test("resolveWorktreesDir single-sources the base the service exposes for hello advertisement", () => {
-  const saved = { d: process.env.DAHRK_WORKTREES_DIR, s: process.env.SKAKEL_WORKTREES_DIR };
+  const saved = { d: process.env.DAHRK_WORKTREES_DIR };
   try {
     delete process.env.DAHRK_WORKTREES_DIR;
-    delete process.env.SKAKEL_WORKTREES_DIR;
     // Explicit override wins and is exactly what the service exposes (what the client advertises).
     assert.equal(resolveWorktreesDir("/custom/wt"), "/custom/wt");
     assert.equal(createGitService({ worktreesDir: "/custom/wt", mirrorsDir: "/tmp/none" }).worktreesDir, "/custom/wt");
@@ -115,8 +114,6 @@ test("resolveWorktreesDir single-sources the base the service exposes for hello 
   } finally {
     if (saved.d === undefined) delete process.env.DAHRK_WORKTREES_DIR;
     else process.env.DAHRK_WORKTREES_DIR = saved.d;
-    if (saved.s === undefined) delete process.env.SKAKEL_WORKTREES_DIR;
-    else process.env.SKAKEL_WORKTREES_DIR = saved.s;
   }
 });
 
@@ -181,6 +178,158 @@ test("commitAndPush commits the worktree and pushes the per-issue branch to the 
     // A push with no changes commits nothing but still reports cleanly.
     const r3 = await svc.commitAndPush(ref2, { message: "noop", branch });
     assert.equal(r3.nothingToCommit, true);
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("commitAndPush SSH-signs the commit with a per-push signing key, and verifies against it", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const keyDir = mkdtempSync(join(tmpdir(), "dahrk-key-"));
+  const keyPath = join(keyDir, "id_ed25519");
+  execFileSync("ssh-keygen", ["-t", "ed25519", "-f", keyPath, "-N", "", "-C", "test@dahrk.test", "-q"]);
+  const signingKey = readFileSync(keyPath, "utf-8");
+  const publicKey = readFileSync(`${keyPath}.pub`, "utf-8").trim();
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  const branch = "dahrk/issue-TEST-signed";
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-signed",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-signed-1",
+      branch,
+    });
+    writeFileSync(join(ref.worktreePath, "hello.txt"), "signed\n");
+    const r = await svc.commitAndPush(ref, { message: "signed commit", branch, signingKey });
+    assert.equal(r.pushed, true);
+
+    // The pushed commit carries an SSH signature (`%G?` is `U` here, not `G`, only because the fixture
+    // has no allowed-signers file; the presence of the gpgsig header is the claim under test).
+    const raw = git(remote, ["cat-file", "commit", branch]);
+    assert.match(raw, /^gpgsig -----BEGIN SSH SIGNATURE-----/m, "the commit carries an SSH signature");
+
+    // ...and it verifies against the key we handed in, which is what makes GitHub render `Verified`
+    // once that key is registered on the bot account. Point git at an allowed-signers file naming the
+    // committer email and check the real verification path, not just the header's presence.
+    const allowedSigners = join(keyDir, "allowed_signers");
+    writeFileSync(allowedSigners, `noreply@dahrk.ai ${publicKey}\n`);
+    const verified = execFileSync(
+      "git",
+      ["-c", "gpg.format=ssh", "-c", `gpg.ssh.allowedSignersFile=${allowedSigners}`,
+       "show", "-s", "--format=%G?", branch],
+      { cwd: remote, encoding: "utf-8" },
+    ).trim();
+    assert.equal(verified, "G", "the signature verifies against the supplied key");
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+    rmSync(keyDir, { recursive: true, force: true });
+  }
+});
+
+test("no signing key configured leaves the commit unsigned, even on a host that signs by default", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  const branch = "dahrk/issue-TEST-unsigned";
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-unsigned",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-unsigned-1",
+      branch,
+    });
+    writeFileSync(join(ref.worktreePath, "hello.txt"), "unsigned\n");
+    await svc.commitAndPush(ref, { message: "unsigned commit", branch });
+    // The host running this test may well have `commit.gpgsign = true` globally (Marc's machine does).
+    // Signing must stay OFF regardless: a node that fell through to the host config would sign Dahrk's
+    // commit with the host user's personal key, which GitHub reports as `unknown_key`.
+    assert.ok(
+      !git(remote, ["cat-file", "commit", branch]).includes("gpgsig"),
+      "an unconfigured node writes plain, unsigned commits and never borrows the host's key",
+    );
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("a per-push identity overrides the service default, and splits author from committer", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir, authorName: "Service", authorEmail: "svc@example.test" });
+  const branch = "dahrk/issue-TEST-per-push";
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-per-push",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-per-push-1",
+      branch,
+    });
+    writeFileSync(join(ref.worktreePath, "hello.txt"), "per push\n");
+    // What the hub puts on `PushJob.identity`: all four fields, author distinct from committer.
+    await svc.commitAndPush(ref, {
+      message: "per-push identity",
+      branch,
+      identity: {
+        authorName: "Author",
+        authorEmail: "author@example.test",
+        committerName: "Committer",
+        committerEmail: "committer@example.test",
+      },
+    });
+    assert.equal(
+      git(remote, ["show", "-s", "--format=%an <%ae> | %cn <%ce>", branch]).trim(),
+      "Author <author@example.test> | Committer <committer@example.test>",
+    );
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("a partial per-push identity echoes the author onto the committer", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir, authorName: "Service", authorEmail: "svc@example.test" });
+  const branch = "dahrk/issue-TEST-partial";
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-partial",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-partial-1",
+      branch,
+    });
+    writeFileSync(join(ref.worktreePath, "hello.txt"), "partial\n");
+    await svc.commitAndPush(ref, {
+      message: "partial identity",
+      branch,
+      identity: { authorName: "Only Author", authorEmail: "only@example.test" },
+    });
+    // NOT the service default committer: an override that names only the author must not leave the
+    // committer reading as somebody else.
+    assert.equal(
+      git(remote, ["show", "-s", "--format=%an <%ae> | %cn <%ce>", branch]).trim(),
+      "Only Author <only@example.test> | Only Author <only@example.test>",
+    );
   } finally {
     rmSync(remote, { recursive: true, force: true });
     rmSync(worktreesDir, { recursive: true, force: true });

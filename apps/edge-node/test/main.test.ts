@@ -242,7 +242,7 @@ test("`start --no-service` enrols without installing a service and without diall
 
     const clean: NodeJS.ProcessEnv = {};
     for (const [k, v] of Object.entries(process.env)) {
-      if (!k.startsWith("DAHRK_") && !k.startsWith("SKAKEL_")) clean[k] = v;
+      if (!k.startsWith("DAHRK_")) clean[k] = v;
     }
     const run = spawnSync(
       process.execPath,
@@ -326,7 +326,7 @@ function spawnRepoAdd(
   home: string,
   extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  // Strip any inherited DAHRK_*/SKAKEL_* config (this suite may itself run inside an enrolled node), so the
+  // Strip any inherited DAHRK_* config (this suite may itself run inside an enrolled node), so the
   // child's only enrolment/hub state is what the test sets - otherwise an ambient DAHRK_ENROL_TOKEN would
   // make an "un-enrolled" node look enrolled.
   const clean: NodeJS.ProcessEnv = {};

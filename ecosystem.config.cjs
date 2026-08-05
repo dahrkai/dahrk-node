@@ -5,8 +5,8 @@
 //   - hub URL defaults to wss://api.dahrk.ai (override with DAHRK_HUB_URL);
 //   - a stable node id is minted and persisted at ~/.dahrk/node.json;
 //   - installed runtimes (claude / codex / pi) are auto-detected.
-// Runs from source via the bundled tsx - no build step. The legacy SKAKEL_* env names are still
-// accepted. Do NOT set ANTHROPIC_API_KEY here; Claude auth is the interactive `claude` OAuth login.
+// Runs from source via the bundled tsx - no build step. Do NOT set ANTHROPIC_API_KEY here; Claude auth
+// is the interactive `claude` OAuth login.
 //
 // Lifecycle:
 //   pm2 start ecosystem.config.cjs    # start
@@ -35,8 +35,8 @@ module.exports = {
       // misconfig is visible; any other non-zero exit still autorestarts.
       stop_exit_codes: [78],
       env: {
-        // Required, secret - from the host env / .env, never committed. Legacy SKAKEL_ name accepted.
-        DAHRK_ENROL_TOKEN: process.env.DAHRK_ENROL_TOKEN || process.env.SKAKEL_ENROL_TOKEN,
+        // Required, secret - from the host env / .env, never committed.
+        DAHRK_ENROL_TOKEN: process.env.DAHRK_ENROL_TOKEN,
         // Optional overrides (DAHRK_HUB_URL, DAHRK_NODE_NAME, DAHRK_RUNTIMES, DAHRK_REPOS) are read
         // straight from the environment - set them in your shell / .env and pm2 passes them through.
       },
