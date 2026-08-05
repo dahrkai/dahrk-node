@@ -9,7 +9,12 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResolvedCheck, RunnerContext, TraceEvent, WorkspaceRef } from "@dahrk/contracts";
-import { createCheckRunner, summariseChecks, type CheckOutcome } from "../src/check-runner.js";
+import {
+  createCheckRunner,
+  summariseChecks,
+  type CheckOutcome,
+  type CheckProbes,
+} from "../src/check-runner.js";
 
 function sandbox(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "dahrk-checks-"));
@@ -226,4 +231,138 @@ test("an all-green note is still written, so 'did it run and pass' is answerable
   ]);
   assert.match(note, /- PASSED/);
   assert.match(note, /all 1 checks passed/);
+});
+
+// --- node-native probes -----------------------------------------------------------------------------
+
+/**
+ * A `probe` check is performed by the node, not spawned, because it needs the repo's git credential
+ * and a check env deliberately has none. `repo-fetch` ran as a bare `git fetch` for its whole life and
+ * so failed on every brokered node with `could not read Password ... Device not configured` - a
+ * REQUIRED probe that could never pass, which pinned preflight's verdict to `pass-with-findings` and
+ * made onboarding's finding-free gate unreachable (evidence: `preflight-79af58f15a3a`).
+ */
+async function runWithProbes(dir: string, checks: ResolvedCheck[], probes: CheckProbes) {
+  const events: TraceEvent[] = [];
+  let outcomes: CheckOutcome[] = [];
+  const runner = createCheckRunner(
+    checks,
+    (o) => {
+      outcomes = o;
+    },
+    probes,
+  );
+  const result = await runner.runBatch(ctxFor(dir), (e) => events.push(e));
+  return { result, events, outcomes, summary: await runner.summarise(ctxFor(dir)) };
+}
+
+test("a probe check is performed by the node, and its command is never spawned", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    // The command would CREATE this file if it ran. It must not: the probe replaces it entirely.
+    const marker = join(dir, "spawned");
+    let called = 0;
+    const { result, outcomes } = await runWithProbes(
+      dir,
+      [{ name: "repo-fetch", command: `touch ${marker}`, probe: "git-fetch" }],
+      {
+        "git-fetch": async () => {
+          called++;
+          return { ok: true, output: "", exitCode: 0, timedOut: false };
+        },
+      },
+    );
+
+    assert.equal(called, 1, "the node performed the probe");
+    assert.equal(existsSync(marker), false, "the check command was not spawned");
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.verifications, [{ name: "repo-fetch", status: "passed" }]);
+    assert.equal(outcomes[0]?.exitCode, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a failing probe is a failed check carrying git's real reason, not a crashed stage", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    const reason = "fatal: could not read Password for 'https://x-access-token@github.com/o/r.git'";
+    const { result, outcomes } = await runWithProbes(
+      dir,
+      [{ name: "repo-fetch", command: "git fetch --dry-run", probe: "git-fetch" }],
+      { "git-fetch": async () => ({ ok: false, output: reason, exitCode: 128, timedOut: false }) },
+    );
+
+    assert.equal(result.status, "fail");
+    assert.deepEqual(result.verifications, [{ name: "repo-fetch", status: "failed" }]);
+    assert.equal(outcomes[0]?.output, reason, "the operator sees what git actually said");
+    assert.equal(outcomes[0]?.exitCode, 128);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unimplemented probe fails the check naming the gap, rather than falling back to the command", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    // Falling through to `command` would be worse than useless here: for a credentialed probe the
+    // command cannot pass, so the operator would get a mystery auth error instead of the real cause.
+    const marker = join(dir, "spawned");
+    const { result, outcomes } = await runWithProbes(
+      dir,
+      [{ name: "repo-fetch", command: `touch ${marker}`, probe: "git-fetch" }],
+      {},
+    );
+
+    assert.equal(existsSync(marker), false, "no silent fall-through to the command");
+    assert.equal(result.status, "fail");
+    assert.match(outcomes[0]?.output ?? "", /does not implement the "git-fetch" probe/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a probe that throws is a failed check, exactly like a spawn failure", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    const { result, outcomes } = await runWithProbes(
+      dir,
+      [{ name: "repo-fetch", command: "git fetch --dry-run", probe: "git-fetch" }],
+      {
+        "git-fetch": async () => {
+          throw new Error("worktree vanished");
+        },
+      },
+    );
+
+    assert.equal(result.status, "fail");
+    assert.match(outcomes[0]?.output ?? "", /worktree vanished/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probe and command checks run side by side, each by its own mechanism", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    const { result } = await runWithProbes(
+      dir,
+      [
+        { name: "git-available", command: "true" },
+        { name: "repo-fetch", command: "false", probe: "git-fetch" },
+        { name: "node-version", command: "true" },
+      ],
+      { "git-fetch": async () => ({ ok: true, output: "", exitCode: 0, timedOut: false }) },
+    );
+
+    // `repo-fetch`'s command is `false`; it passes anyway, which is only possible via the probe.
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.verifications, [
+      { name: "git-available", status: "passed" },
+      { name: "repo-fetch", status: "passed" },
+      { name: "node-version", status: "passed" },
+    ]);
+  } finally {
+    cleanup();
+  }
 });

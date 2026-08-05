@@ -19,6 +19,29 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- `CheckProbe` / `GitService.fetchProbe` / `createCheckRunner(..., probes)`: the seam for a check the
+  NODE performs rather than spawns, because it needs a credential the check env deliberately lacks.
+  Requires `@dahrk/contracts` >= 0.14.0 (`ResolvedCheck.probe`).
+
+  Diagnosed from `preflight-79af58f15a3a` (DHK): `repo-fetch` ran `git fetch --dry-run` through
+  `sh -c` with `process.env` and no askpass helper, so it could not authenticate on any brokered node
+  and reported `could not read Password ... Device not configured` every time. As a REQUIRED probe
+  that pinned preflight to `pass-with-findings` permanently, which is what made onboarding's
+  finding-free gate unreachable (same shape as DHK-464).
+
+  The alternative - reusing `setupAuth` to put `GIT_ASKPASS` + `DAHRK_GIT_TOKEN` into the check env -
+  was rejected deliberately: check commands are REPO-DECLARED for ordinary runs, so it would hand a
+  token scoped (ADR 0003) to clone, push and open PRs to every workflow-authored command. The probe
+  moves to the node instead of the credential moving to the probe.
+
+  An unimplemented probe name is a failed check naming the gap, never a silent fall-through to
+  `command` - for a credentialed probe that command cannot pass, so the fall-through would report a
+  mystery auth error instead of the real cause. `fetchProbe` uses `spawn`, not the sync `git()`
+  helper: it is the one git call here that waits on the network for up to a minute, and blocking the
+  event loop for that would cost the heartbeat and stall every other run on the node.
+
 ## [0.3.4] - 2026-08-04
 
 ### Fixed

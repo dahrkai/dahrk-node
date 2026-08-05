@@ -29,9 +29,24 @@
  * own privileges outside the agent-facing fs-confine policy - identical treatment to
  * `RepositorySetup.command`, and for the same reason: repo-declared infrastructure, not agent-authored
  * input.
+ *
+ * They do NOT, however, get the repo's git credential, and that asymmetry is deliberate. The node
+ * holds the brokered token only transiently, in the env of its own git operations; a check gets
+ * `process.env` and no askpass helper. Widening that so a `git fetch` check could pass would hand a
+ * token scoped (ADR 0003) to clone, push and open PRs to every command a repo can declare. So a check
+ * that genuinely needs the credential is a node-native PROBE instead (`CheckProbe`, injected here as
+ * `probes`): the node performs it, the check env stays credential-free.
  */
 import { spawn } from "node:child_process";
-import type { JobResult, ResolvedCheck, Runner, RunnerContext, StageVerification, TraceEvent } from "@dahrk/contracts";
+import type {
+  CheckProbe,
+  JobResult,
+  ResolvedCheck,
+  Runner,
+  RunnerContext,
+  StageVerification,
+  TraceEvent,
+} from "@dahrk/contracts";
 
 /** Default per-check wall clock, matching the setup step's own cap. */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -53,9 +68,75 @@ export interface CheckOutcome {
   timedOut: boolean;
 }
 
+/** What a node-native probe returns: the same four facts a spawned check yields. */
+export interface ProbeOutcome {
+  ok: boolean;
+  output: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
+/**
+ * The node-native probes this runner can perform, keyed by {@link CheckProbe}.
+ *
+ * Injected rather than imported so the runner keeps no dependency on the git service: a check runner
+ * that reached for a worktree service would couple the deterministic gate to the git layer for the
+ * sake of one probe. A missing entry is a failed check, not a crash (see `runProbe`).
+ */
+export type CheckProbes = Partial<Record<CheckProbe, (check: ResolvedCheck) => Promise<ProbeOutcome>>>;
+
 /** Keep only the trailing `OUTPUT_CAP` bytes (the tail is where the failure is stated). */
 function tail(output: string): string {
   return output.length > OUTPUT_CAP ? output.slice(output.length - OUTPUT_CAP) : output;
+}
+
+/**
+ * Perform one node-native probe (a check the node runs itself, because it needs a credential a check
+ * command cannot have - see `CheckProbe` in the contracts). Never rejects, for the same reason
+ * `runOne` does not: the failure is the verdict.
+ *
+ * An unhandled probe name is a FAILED check naming the gap, never a silent fall-through to `command`:
+ * for a credentialed probe that command cannot pass, so falling through would report a mystery auth
+ * error instead of the real "this node does not implement this probe".
+ */
+async function runProbe(
+  check: ResolvedCheck,
+  probes: CheckProbes,
+  startedAt: number,
+): Promise<CheckOutcome> {
+  const probe = check.probe!;
+  const handler = probes[probe];
+  const base = { name: check.name, command: check.command, timedOut: false };
+  if (!handler) {
+    return {
+      ...base,
+      exitCode: null,
+      output: `check could not run: this node does not implement the "${probe}" probe`,
+      status: "failed",
+      durationMs: Date.now() - startedAt,
+    };
+  }
+  try {
+    const r = await handler(check);
+    return {
+      ...base,
+      exitCode: r.exitCode,
+      output: tail(r.output),
+      status: r.ok ? "passed" : "failed",
+      durationMs: Date.now() - startedAt,
+      timedOut: r.timedOut,
+    };
+  } catch (err) {
+    // A probe that throws is a failed check, not a crashed stage - identical treatment to a spawn
+    // failure in `runOne`.
+    return {
+      ...base,
+      exitCode: null,
+      output: tail(`probe "${probe}" could not run: ${err instanceof Error ? err.message : String(err)}`),
+      status: "failed",
+      durationMs: Date.now() - startedAt,
+    };
+  }
 }
 
 /**
@@ -129,6 +210,7 @@ export function summariseChecks(outcomes: readonly CheckOutcome[]): string {
 export function createCheckRunner(
   checks: readonly ResolvedCheck[],
   onOutcomes?: (outcomes: CheckOutcome[]) => void,
+  probes: CheckProbes = {},
 ): Runner {
   let cancelled = false;
   let lastSummary = "";
@@ -172,7 +254,12 @@ export function createCheckRunner(
           input: { name: check.name, command: check.command },
         });
 
-        const outcome = await runOne(check, cwd, Date.now());
+        // A probe is performed by the node itself rather than spawned, because it needs a credential a
+        // check command cannot have (see `CheckProbe`). Everything downstream - the trace pairing, the
+        // verification, the summary - is identical either way.
+        const outcome = check.probe
+          ? await runProbe(check, probes, Date.now())
+          : await runOne(check, cwd, Date.now());
         outcomes.push(outcome);
 
         onTrace({

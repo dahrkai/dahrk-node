@@ -1373,3 +1373,83 @@ test("reconcileInterrupted throws on a missing worktree rather than pretending i
     for (const d of [worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
   }
 });
+
+// --- fetchProbe: the credentialed reachability check -------------------------------------------------
+
+/**
+ * `fetchProbe` exists because a check command cannot hold the repo's git credential: `repo-fetch` ran
+ * as a bare `git fetch` in the check env, could not authenticate on a brokered node, and died with
+ * `could not read Password ... Device not configured` on every single run (`preflight-79af58f15a3a`).
+ * Moving the probe here - rather than moving the token into the check env, where every repo-declared
+ * command would see it - is what makes it able to pass.
+ */
+test("fetchProbe reaches a real remote and reports success", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-fp",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-fp-1",
+    });
+
+    const result = await svc.fetchProbe(ref, {});
+    assert.equal(result.ok, true, "a reachable remote is a passing probe");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+  } finally {
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("fetchProbe reports an unreachable remote as a failed probe, never a throw", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-fp2",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-fp-2",
+    });
+
+    // Delete the remote out from under the worktree: the probe must REPORT that, not raise it. The
+    // failure is the verdict - a check stage that threw would take the whole stage down instead of
+    // recording one failed probe.
+    rmSync(remote, { recursive: true, force: true });
+    const result = await svc.fetchProbe(ref, {});
+
+    assert.equal(result.ok, false);
+    assert.notEqual(result.exitCode, 0);
+    assert.notEqual(result.output.trim(), "", "git's real reason is carried through for the operator");
+  } finally {
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("fetchProbe on a missing worktree fails cleanly rather than throwing", async () => {
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir: mkdtempSync(join(tmpdir(), "dahrk-mir-")) });
+  const ref = {
+    repoId: "gone",
+    gitUrl: "https://example.invalid/o/r.git",
+    repo: "o/r",
+    baseBranch: "main",
+    worktreePath: join(worktreesDir, "not-there"),
+    scratchPath: join(worktreesDir, "not-there", ".dahrk", "scratch"),
+  } as WorkspaceRef;
+
+  const result = await svc.fetchProbe(ref, {});
+  assert.equal(result.ok, false);
+  assert.match(result.output, /worktree missing/);
+  rmSync(worktreesDir, { recursive: true, force: true });
+});

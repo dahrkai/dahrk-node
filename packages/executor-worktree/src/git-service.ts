@@ -10,7 +10,7 @@
  * fresh `dahrk/<runId>` branch, under a configurable worktrees dir. The `.dahrk/scratch` directory
  * is created here; its `state.json` is written by the edge stage runner (tenant/run/stage context).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -135,6 +135,29 @@ export interface CommitPushResult {
   footprint?: DiffFootprint;
 }
 
+/** Options for {@link GitService.fetchProbe}: a credentialed reachability probe against the remote. */
+export interface FetchProbeOpts {
+  /** Brokered HTTPS token; absent = ambient host credentials are used, exactly as elsewhere. */
+  credentialToken?: string;
+  /** Wall clock in seconds for the fetch. Absent = {@link FETCH_PROBE_TIMEOUT_SECONDS}. */
+  timeoutSeconds?: number;
+}
+
+/** Outcome of {@link GitService.fetchProbe}. The probe never throws: this IS the verdict. */
+export interface FetchProbeResult {
+  /** True when the remote was reached and the dry-run fetch succeeded. */
+  ok: boolean;
+  /** Combined stdout+stderr from git, verbatim, for the check's output. Empty on a clean success. */
+  output: string;
+  /** git's exit code, or `null` when the probe was killed by its own wall clock. */
+  exitCode: number | null;
+  /** True when the probe was killed by its own wall clock rather than exiting. */
+  timedOut: boolean;
+}
+
+/** Default wall clock for {@link GitService.fetchProbe}, matching the hub's declared probe timeout. */
+export const FETCH_PROBE_TIMEOUT_SECONDS = 60;
+
 /** Options for {@link GitService.backupPush}: a merge-free push of the run's HEAD to a disposable ref. */
 export interface BackupPushOpts {
   /** Commit message for any pending (uncommitted) work captured before the backup push. */
@@ -231,6 +254,22 @@ export interface GitService {
     ref: InterruptedWorktree,
     opts: ReconcileInterruptedOpts,
   ): Promise<ReconcileInterruptedResult>;
+  /**
+   * Probe whether the REAL remote is reachable and fetchable with this repo's own credential, for the
+   * `git-fetch` node-native check probe.
+   *
+   * It lives here rather than as a check command because the credential does. A check runs `sh -c`
+   * with the node process env and no askpass helper, so a bare `git fetch` in the worktree cannot
+   * authenticate on a brokered node: it fell through to a password prompt and, with no TTY under pm2,
+   * died as `could not read Password ... Device not configured` on every run. Handing the token to the
+   * check env instead would give every repo-declared check command a token scoped to clone, push and
+   * open PRs, so the probe moves here, where the token is already held transiently and only for the
+   * life of one git invocation.
+   *
+   * Never throws: the failure IS the verdict, so a fetch that cannot authenticate returns
+   * `{ ok: false }` with git's real stderr for the check's output.
+   */
+  fetchProbe(ref: WorkspaceRef, opts: FetchProbeOpts): Promise<FetchProbeResult>;
   teardownWorktree(ref: WorkspaceRef): Promise<void>;
   /** The resolved absolute worktree base this service creates run worktrees under
    *  (`join(worktreesDir, runId)`). Exposed so the client can advertise it to the hub on `hello`, so
@@ -1058,6 +1097,53 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       git(worktreePath, ["clean", "-fd", "--exclude", SCRATCH_DIR]);
 
       return { dirty: true, headSha, tailSha, wipRef, pushed };
+    },
+
+    async fetchProbe(ref, opts) {
+      const timeoutMs = (opts.timeoutSeconds ?? FETCH_PROBE_TIMEOUT_SECONDS) * 1000;
+      if (!existsSync(ref.worktreePath)) {
+        return { ok: false, output: `worktree missing: ${ref.worktreePath}`, exitCode: null, timedOut: false };
+      }
+
+      // Probe the REAL remote, not `origin` - for a mirror-backed worktree `origin` is the local mirror,
+      // which would answer happily while the actual remote was unreachable. Same resolution the push
+      // paths use, so the probe authenticates exactly the way a real fetch will.
+      const { remote, authEnv, cleanup } = resolveRemoteAuth(ref.gitUrl, opts.credentialToken);
+
+      // `spawn`, not the `git()` helper: this is the one git call here that waits on the network for up
+      // to a minute, and `execFileSync` would block the event loop for all of it - no heartbeat (so the
+      // hub's lease reaper would read this node as dead), no progress frames, and every other run on
+      // this node stalled behind it. Same reasoning as the check runner's own spawn.
+      return await new Promise<FetchProbeResult>((resolve) => {
+        const child = spawn("git", ["fetch", "--dry-run", remote], {
+          cwd: ref.worktreePath,
+          env: netEnv(authEnv),
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let output = "";
+        let timedOut = false;
+        const capture = (chunk: Buffer): void => void (output += chunk.toString());
+        child.stdout.on("data", capture);
+        child.stderr.on("data", capture);
+
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, timeoutMs);
+
+        const settle = (exitCode: number | null): void => {
+          clearTimeout(timer);
+          cleanup(); // tear the askpass helper down on EVERY path, including spawn failure
+          resolve({ ok: !timedOut && exitCode === 0, output, exitCode, timedOut });
+        };
+        // Never throws: the failure IS the verdict. A git that cannot authenticate, a remote that is
+        // down, or a missing binary all resolve as a failed probe carrying the real reason as output.
+        child.on("error", (err) => {
+          output += `${err.message}\n`;
+          settle(null);
+        });
+        child.on("close", (code) => settle(timedOut ? null : code));
+      });
     },
 
     async teardownWorktree(ref) {
