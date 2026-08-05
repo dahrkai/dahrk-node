@@ -8,6 +8,12 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- **A Claude stage ignored the model set on the workspace's connected provider.** The default model
+  you choose alongside a provider was applied on Pi stages and silently dropped on Claude ones, which
+  read only a model named by the stage itself. A workspace-wide default therefore did nothing on most
+  stages, and nothing said so. A Claude stage now uses its own model if it has one and the provider's
+  default otherwise, matching Pi. With neither set the runtime still chooses, as before.
+
 - **The health check reported on the wrong agent runtime.** It looked for a `claude` command on the
   system path, which measured nothing useful: neither supported runtime is a command on the path. Both
   are libraries the node loads directly, and the Claude one runs a program bundled inside that library
