@@ -19,6 +19,39 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- `runtime-detect` probe (`stage-runner.ts` `runtimeDetectProbe`), the second user of the `CheckProbe` seam
+  added in 0.3.5, plus an injectable `StageRunnerDeps.probeRuntimes`. Requires `@dahrk/contracts` >= 0.15.0
+  (`CheckProbe: "runtime-detect"`, `RepositoryCheck/ResolvedCheck.probeRuntimes`).
+
+  Replaces preflight's `claude-runtime` check, which was wrong on two independent axes. Mechanism:
+  `command -v claude` is uncorrelated with the ability to run a `claude-code` stage, because neither
+  runtime is a PATH binary - `claude-adapter.ts` calls `query()` from `@anthropic-ai/claude-agent-sdk`
+  (which spawns the binary vendored INSIDE that SDK) and `pi-adapter.ts` runs `createAgentSession()`
+  in-process. `detect-runtimes.ts` already says this in its header; the check predated the ambient-mode
+  deletion that made it true. Target: the hub probed Claude unconditionally while `resolveStageRuntime`
+  had already redirected preflight's agent stages onto `pi` for a non-Anthropic tenant, so the report
+  attested "Claude runtime ok" for runs that never touched Claude (`preflight-e26fa3b20ae4`, whose
+  `analyse`/`report` traces both carry `runtime: "pi"` against an `openai-codex` credential).
+
+  Asserts `capable`, NOT `available`: `available` folds in the `CredentialLatch`, a refusal memory that
+  only clears on restart, and a REQUIRED onboarding check a stale memory can fail is DHK-464 again.
+
+  The hub sets `command: "true"` on these checks rather than a descriptive one, and that is deliberate:
+  a node predating the probe name falls back to spawning `command`, and there is no honest shell
+  equivalent for "is this SDK resolvable from `executor-worktree`" (anything run in the worktree
+  resolves from the wrong root). A false negative on a REQUIRED check is worse than a green one, so the
+  fallback passes.
+
+  Catalog bumped to `@dahrk/contracts` `^0.15.0`, published from harness `main` (DHK PR #614), and
+  verified against the published package rather than a local overlay.
+
+  **OUTSTANDING: a release.** This probe reaches no real node until the next `dahrk-node` release ships
+  and nodes upgrade. Worth watching, because the sibling probe demonstrated the gap: `0.3.4` was tagged
+  BEFORE #174 landed, so `repo-fetch` kept failing on the live node for hours after its issue was
+  closed - visible in `preflight-e26fa3b20ae4`. `0.3.5` has since shipped with it.
+
 ## [0.3.5] - 2026-08-05
 
 ### Added

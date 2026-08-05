@@ -48,10 +48,12 @@ import {
   type PackCache,
   type CheckOutcome,
   type CheckProbes,
+  type ProbeOutcome,
   type PreExecutionCapability,
   type ReapReport,
 } from "@dahrk/executor-worktree";
 import { credentialLatch, type CredentialLatch } from "./credential-latch.js";
+import { probeRuntimeStatuses } from "./detect-runtimes.js";
 import { buildRules } from "./builtins.js";
 import { computeFsRoots } from "./fs-roots.js";
 import { createNodeLogger, type NodeLogger } from "./logger.js";
@@ -108,6 +110,11 @@ export interface StageRunnerDeps {
   ) => Runner;
   /** The node's logger. Absent (tests, embedders) = a silent logger, so the runner stays quiet by
    *  default. Used to surface the best-effort paths below, which used to fail invisibly. */
+  /** Probe which agent runtimes are executable here, for the `runtime-detect` check. Injected so a
+   *  test never has to touch `node_modules` to make a runtime look present or absent; defaults to the
+   *  node's own `probeRuntimeStatuses`, which is the same code path that decides what this node
+   *  advertises - so the check cannot answer differently from a real dispatch. */
+  probeRuntimes?: typeof probeRuntimeStatuses;
   logger?: NodeLogger;
   /** Optional self-hosted allowlist of registry repoIds this edge will serve. Empty/absent
    *  = serve any repo (clone on demand). A Job for a repoId outside a non-empty allowlist is
@@ -207,6 +214,48 @@ const putBytes = async (url: string, body: Buffer, contentType: string): Promise
  *  predates the field, so it rides through the plain-JSON transport untyped until the contract is
  *  republished (the same forward-compat pattern the push-mode and footprint fields used before
  *  `@dahrk/contracts` 0.6.0/0.7.0 declared them). */
+/**
+ * The `runtime-detect` probe: are all of `wanted` executable on this node?
+ *
+ * Answered by the node's OWN detection, the same function that decides which runtimes it advertises to
+ * the hub, so the check cannot disagree with a real dispatch. That matters because the thing it
+ * replaces, `command -v claude`, disagreed by construction: neither runtime is a PATH binary (the
+ * Claude adapter calls `query()` from a vendored SDK, the Pi adapter runs `createAgentSession()`
+ * in-process), so the command measured something uncorrelated with the ability to run the stage.
+ *
+ * Asserts `capable` (the SDK resolves from here), NOT `available`. `available` also folds in the
+ * credential latch - a refusal the node happens to remember until it restarts - and a REQUIRED
+ * onboarding check that a stale memory can fail is the DHK-464 shape all over again. Whether a
+ * credential authenticates is answered by the run itself.
+ *
+ * An empty `wanted` passes: it is how a tenant with nothing to assert emits a check that passes,
+ * rather than every caller carrying a special case.
+ */
+async function runtimeDetectProbe(
+  wanted: readonly Runtime[],
+  probe: typeof probeRuntimeStatuses = probeRuntimeStatuses,
+): Promise<ProbeOutcome> {
+  if (wanted.length === 0) {
+    return { ok: true, output: "no runtime asserted for this node", exitCode: 0, timedOut: false };
+  }
+  const statuses = await probe();
+  const byRuntime = new Map(statuses.map((s) => [s.runtime, s]));
+  const lines = wanted.map((r) => {
+    const s = byRuntime.get(r);
+    // A runtime this build has never heard of is missing, not fine. A newer hub can name one, and
+    // "absent from my own detection" is exactly the honest answer.
+    if (!s) return { runtime: r, capable: false, detail: "this node does not know this runtime" };
+    return { runtime: r, capable: s.capable, detail: s.detail };
+  });
+  const missing = lines.filter((l) => !l.capable);
+  return {
+    ok: missing.length === 0,
+    output: lines.map((l) => `${l.runtime}: ${l.capable ? "executable" : "NOT executable"} (${l.detail})`).join("\n"),
+    exitCode: missing.length === 0 ? 0 : 1,
+    timedOut: false,
+  };
+}
+
 function previewOf(event: TraceEvent): { text?: string; tool?: string; toolUseId?: string } {
   const clip = (v: unknown, max = PREVIEW): string =>
     (typeof v === "string" ? v : JSON.stringify(v) ?? "").slice(0, max);
@@ -1072,6 +1121,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
                       ? { credentialToken: job.workspaceRef.credentialToken }
                       : {}),
                   }),
+                "runtime-detect": async (check) =>
+                  await runtimeDetectProbe(check.probeRuntimes ?? [], deps.probeRuntimes),
               },
             )
           : deps.makeRunner(runtime!);

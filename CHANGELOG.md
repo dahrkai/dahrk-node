@@ -6,6 +6,18 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- **The health check reported on the wrong agent runtime.** It looked for a `claude` command on the
+  system path, which measured nothing useful: neither supported runtime is a command on the path. Both
+  are libraries the node loads directly, and the Claude one runs a program bundled inside that library
+  rather than anything you could install yourself. So the check could say a runtime was fine when the
+  node could not run it, and vice versa. It also only ever looked for Claude, even on a node whose
+  stages were about to run on Pi because that is what the connected model provider needs, so the report
+  could confirm a runtime the run never touched. The node now answers this with the same detection it
+  uses to decide which runtimes it advertises, and it answers for whichever runtimes the workspace's
+  connected providers actually need.
+
 ## [0.3.5] - 2026-08-05
 
 ### Fixed
