@@ -24,6 +24,25 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- `AuthProfile.defaultModel` reached the Pi adapter and was dropped on the floor by the Claude one,
+  which read `ctx.config.model` and nothing else. An operator setting a default model beside a
+  connected provider therefore got it honoured on Pi stages and silently ignored on Claude ones, with
+  nothing in the trace recording the divergence. Survivable while a runtime was picked by hand; not
+  survivable once DHK-1013's fix derives the runtime from the account's auth profile, which makes
+  `claude-code` the runtime for every Anthropic-bound account and so for most stages - an
+  account-wide default model would have been ignored across the board.
+
+  `selectClaudeModel` (`claude-adapter.ts`) mirrors Pi's `selectStageModel` precedence: stage model
+  wins, profile `defaultModel` fills in, neither leaves the runtime to choose. It deliberately does
+  NOT throw where Pi does. Pi reconciles a model id against a multi-provider catalogue, so an
+  unresolvable id there is a wrong answer waiting to happen; Claude speaks to exactly one provider
+  and the SDK reports an unknown model itself. The option is spread via `modelOption` rather than
+  assigned, so an absent model omits the key entirely - the SDK distinguishes that from `undefined`.
+
+  Paired with dahrkai/dahrk-harness#616 (DHK-1013), which is what makes this load-bearing.
+
 ## [0.3.6] - 2026-08-05
 
 ### Added

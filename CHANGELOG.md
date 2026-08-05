@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A Claude stage uses the model set on the workspace's connected provider when the stage names none. (#179)
+
 ## [0.3.6] - 2026-08-05
 
 ### Fixed

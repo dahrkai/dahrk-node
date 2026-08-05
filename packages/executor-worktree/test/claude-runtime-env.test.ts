@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { RunnerContext } from "@dahrk/contracts";
-import { runtimeEnvOptions } from "../src/claude-adapter.js";
+import { runtimeEnvOptions, selectClaudeModel } from "../src/claude-adapter.js";
 
 const ctx = (over: Partial<RunnerContext> = {}): RunnerContext =>
   ({
@@ -153,4 +153,29 @@ test("a foreign subscription is tolerated when an api key also credentials the s
   );
   assert.equal(opts.env?.ANTHROPIC_API_KEY, "sk-brokered");
   assert.equal(opts.env?.CLAUDE_CODE_OAUTH_TOKEN, undefined, "no foreign token is smuggled onto the env");
+});
+
+// --- the model the stage runs on -----------------------------------------------------------------
+// The profile's `defaultModel` reached Pi and was dropped on the floor by Claude, so an account-wide
+// default model did nothing on a Claude stage and nothing said so. That was survivable while a runtime
+// was picked by hand; it is not now that runtimes are DERIVED from the auth profile, which makes
+// `claude-code` the runtime for every Anthropic-bound account and so for most stages.
+
+test("a stage's own model wins over the profile default", () => {
+  const c = ctx({
+    config: { runtime: "claude-code", interaction: "batch", model: "opus" },
+    runtimeAuth: { providers: [], defaultModel: "sonnet" },
+  } as Partial<RunnerContext>);
+  assert.equal(selectClaudeModel(c), "opus", "an explicit stage instruction is never overridden");
+});
+
+test("the profile's defaultModel is used when the stage names none", () => {
+  const c = ctx({ runtimeAuth: { providers: [], defaultModel: "sonnet" } } as Partial<RunnerContext>);
+  assert.equal(selectClaudeModel(c), "sonnet", "the account default is the fallback, as it is on Pi");
+});
+
+test("with neither set the runtime chooses - no opinion is not an error", () => {
+  assert.equal(selectClaudeModel(ctx()), undefined);
+  // And the option is OMITTED rather than set undefined: the SDK distinguishes the two.
+  assert.equal("model" in runtimeEnvOptions(ctx()), false);
 });

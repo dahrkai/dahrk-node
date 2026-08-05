@@ -181,6 +181,32 @@ export function runtimeEnvOptions(ctx: RunnerContext): Partial<Options> {
 const CLAUDE_OAUTH_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /**
+ * Which model this stage runs on: the stage's own, else the bound auth profile's `defaultModel`.
+ *
+ * Pi has honoured the profile default since it gained one (`selectStageModel`); Claude read
+ * `config.model` and nothing else, so `AuthProfile.defaultModel` - a first-class field an operator
+ * sets in the portal - did precisely nothing on a Claude stage. That was survivable while a runtime
+ * was chosen by hand. It is not now that runtimes are DERIVED from the auth profile, which makes
+ * `claude-code` the runtime for every Anthropic-bound account and therefore for most stages: an
+ * account-wide default model would have been silently ignored across the board.
+ *
+ * Deliberately simpler than Pi's version, and it does not throw. Pi has to reconcile a model id
+ * against a multi-provider catalogue, so an unresolvable id there is a wrong answer waiting to
+ * happen; Claude speaks to exactly one provider and the SDK reports an unknown model itself. With
+ * neither value set, the runtime picks - the correct no-opinion behaviour, not an error.
+ */
+export function selectClaudeModel(ctx: RunnerContext): string | undefined {
+  return ctx.config.model ?? ctx.runtimeAuth?.defaultModel;
+}
+
+/** {@link selectClaudeModel} as a spreadable `Options` fragment, so an absent model omits the key
+ *  entirely rather than setting it undefined (the SDK distinguishes the two). */
+function modelOption(ctx: RunnerContext): Partial<Options> {
+  const model = selectClaudeModel(ctx);
+  return model ? { model } : {};
+}
+
+/**
  * Brokered inference from an OAUTH-SUBSCRIPTION auth profile (DHK-998).
  *
  * The api-key path above needs nothing from us: the broker mints the secret into `runtimeEnv` under
@@ -324,7 +350,7 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     settingSources: ["project", "local"],
     // Brokered inference env (DHK-89): a node has no login of its own.
     ...runtimeEnvOptions(ctx),
-    ...(ctx.config.model ? { model: ctx.config.model } : {}),
+    ...modelOption(ctx),
     ...(ctx.sessionId ? { resume: ctx.sessionId } : {}),
     ...(ctx.config.skill ? { skills: [ctx.config.skill] } : {}),
   });
