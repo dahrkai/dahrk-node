@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-05
+
 ### Fixed
 
 - **The health check reported on the wrong agent runtime.** It looked for a `claude` command on the
@@ -16,7 +18,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
   stages were about to run on Pi because that is what the connected model provider needs, so the report
   could confirm a runtime the run never touched. The node now answers this with the same detection it
   uses to decide which runtimes it advertises, and it answers for whichever runtimes the workspace's
-  connected providers actually need.
+  connected providers actually need. (#176)
 
 ## [0.3.5] - 2026-08-05
 
@@ -1360,7 +1362,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes `dahrk-node` to npm, bumps the Homebrew tap
   formula, and cuts a GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/dahrkai/dahrk-node/compare/v0.3.2...v0.3.3

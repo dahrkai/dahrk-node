@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-05
+
 ### Added
 
 - `runtime-detect` probe (`stage-runner.ts` `runtimeDetectProbe`), the second user of the `CheckProbe` seam
