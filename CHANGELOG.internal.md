@@ -19,6 +19,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-05
+
 ### Added
 
 - `CheckProbe` / `GitService.fetchProbe` / `createCheckRunner(..., probes)`: the seam for a check the
