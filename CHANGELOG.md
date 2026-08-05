@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-08-05
+
 ### Fixed
 
 - A Claude stage uses the model set on the workspace's connected provider when the stage names none. (#179)
@@ -577,7 +579,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/dahrkai/dahrk-node/compare/v0.3.3...v0.3.4

@@ -24,6 +24,25 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-08-05
+
+### Changed
+
+- Public changelog entries are now one sentence, 25 words maximum, present tense, no bold lead-in and
+  no mechanism; the mechanism belongs in this file. `lint-changelog.mjs` fails any entry over the
+  limit, and it already runs in CI on every PR (`ci.yml:44`), so the rule is enforced rather than
+  imitated. `CLAUDE.md`, `release.mjs` and the `dahrk-release` command carry the same rule; the
+  release audit now reads a PR diff to settle *is this user-visible* and *which heading*, not to
+  source a paragraph.
+
+  Entries had drifted to 80-140 word paragraphs because the only written rule was "match the
+  surrounding entries", which is imitation as a specification, and it compounded every release. All
+  40 historical sections were condensed (16,189 words to 3,622) so that instruction now points
+  somewhere sane. Headings and every `(#N)` reference are unchanged. The published GitHub release
+  bodies were rewritten to match, since dahrk.ai/changelog renders from the Releases API rather than
+  this repo; that also repaired v0.1.5, whose body documented one of its four changes - the
+  #22/#23/#24 incident. (#178)
+
 ### Fixed
 
 - `AuthProfile.defaultModel` reached the Pi adapter and was dropped on the floor by the Claude one,
