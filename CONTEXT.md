@@ -127,6 +127,25 @@ _Avoid_: Integration, install, org.
 A Linear workspace exposed by a Connection. Contains the issues that become runs.
 _Avoid_: Org, team (a team is a subdivision of a workspace).
 
+**AuthProfile**:
+The tenant-owned record naming a provider and the credential that authenticates **inference** for it. Its
+provider decides the **runtime** (`anthropic` -> Claude Code, everything else -> Pi) and its `defaultModel`
+decides the model, so it is the single fact behind "how does this stage think". Resolved in exactly two
+rungs: the stage's own reference, else the account default.
+_Avoid_: API key, credential (a credential is what the profile points at), model config.
+
+**Env profile**:
+The tenant-owned bundle of **non-secret** `{ envVar -> literal }` entries that points a stage at a dev or
+mock endpoint instead of production. Deliberately the same two-rung ladder as an AuthProfile, so one
+sentence describes both. Never carries a secret.
+_Avoid_: Environment, config, settings.
+
+**Placement**:
+Which node the hub gives a job to. Decided on capability and availability alone, and **inert**: any node
+that can serve a job produces the same result. Placement is never an input to which model, which credential
+or which repository a run gets.
+_Avoid_: Assignment, scheduling, node routing (there is no such routing).
+
 **Broker**:
 The hub component that turns a stored `credentialRef` into the credential a job carries. It **mints**
 where the provider allows it (a GitHub App installation token, scoped to one repo, about an hour) and
@@ -188,7 +207,7 @@ advertising a runtime it cannot actually run. A latch rather than a probe: "is t
 good" has no cheap honest answer that does not involve spending it, so detection does not poll - it
 remembers what a failed stage already proved. It is fed **evidence** (a finished stage's runtime,
 status and summary) and owns the judgement of what counts as a refusal; a later successful stage
-clears it, so a re-credentialled pool recovers with no restart. Per-process, so `dahrk doctor` cannot
+clears it, so a re-credentialled node recovers with no restart. Per-process, so `dahrk doctor` cannot
 observe the running node's latch.
 _Avoid_: Credential cache, health check, probe (it is evidence, not inference).
 

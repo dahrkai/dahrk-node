@@ -10,6 +10,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 - Commits are SSH-signed when the hub supplies a signing key, so they show as verified on GitHub.
 
+### Changed
+
+- A node now enrols to your account rather than to a node group, and serves every repository in it.
+- The hub requires node 0.4.0 or newer; older clients are refused with an upgrade message.
+
 ### Removed
 
 - The legacy `SKAKEL_*` environment variable aliases and the `~/.skakel` state directory fallback.
@@ -19,6 +24,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 - A commit is never signed with the host's own key, even where git is configured to sign by default.
 - A repository's configured commit author and committer are applied instead of being ignored.
 - `dahrk doctor` and `dahrk preflight` resolve the state directory the same way the running node does.
+- An installed node reports its real version instead of `0.0.0`.
 
 ## [0.3.7] - 2026-08-05
 
