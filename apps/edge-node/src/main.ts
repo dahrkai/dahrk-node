@@ -6,7 +6,7 @@
  * The token is needed ONCE. On a successful enrolment it is cached (0600) alongside the node id in
  * `~/.dahrk/node.json`, so every later `dahrk start` - and every reboot, and the installed service -
  * re-attaches as the same node with no `--token`. Pass one again only to re-enrol (a rotated token, or
- * a move to another pool); `--ephemeral` opts out of the disk entirely.
+ * a move to another account); `--ephemeral` opts out of the disk entirely.
  *
  * Everything else is either auto-detected on the node or pushed from the hub. On boot the node
  * works out which runtimes it can serve (SDK resolvable + credentials available), reads or mints a stable node id
@@ -101,7 +101,32 @@ import {
   writeState,
 } from "./state.js";
 
-const CLIENT_VERSION = process.env.npm_package_version ?? "0.0.0";
+/**
+ * This client's own version, read from the package manifest beside the bundle.
+ *
+ * It used to be `process.env.npm_package_version ?? "0.0.0"`, which only ever held a real value when
+ * the process was started through a package-manager script. An INSTALLED node - the normal case, `dahrk
+ * start` from a global install or a service unit - has no such variable, so it reported `0.0.0`. That
+ * was survivable while the hub only used the version to draw an "outdated" badge. It is not survivable
+ * now that the hub REFUSES a client below its minimum: every installed node would report `0.0.0` and be
+ * turned away from the hub its own release ships with.
+ *
+ * Falls back to the declared minimum-compatible version rather than `0.0.0`: a manifest we cannot read
+ * is a packaging fault, and failing every enrolment is a far worse answer to it than proceeding.
+ */
+function readClientVersion(): string {
+  try {
+    const manifest = new URL("../package.json", import.meta.url);
+    const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+    const v = (parsed as { version?: unknown }).version;
+    if (typeof v === "string" && v.length > 0) return v;
+  } catch {
+    /* unreadable manifest: fall through */
+  }
+  return process.env.npm_package_version ?? "0.0.0";
+}
+
+const CLIENT_VERSION = readClientVersion();
 
 /** Canonical hosted hub; used when neither DAHRK_HUB_URL nor --hub-url is set. */
 export const DEFAULT_HUB_URL = "wss://api.dahrk.ai";
@@ -198,7 +223,7 @@ export function buildEdgeOptions(env: NodeJS.ProcessEnv, resolved?: ResolvedBoot
     ...(nodeId ? { nodeId } : {}),
     ...(env.DAHRK_NODE_NAME ? { name: env.DAHRK_NODE_NAME } : {}),
     ...(resolved ? { clientVersion: resolved.clientVersion } : {}),
-    // Enrolment token (required); tenant is derived hub-side from its pool.
+    // Enrolment token (required); the hub resolves it straight to the tenant the node joins.
     ...(env.DAHRK_ENROL_TOKEN ? { enrolToken: env.DAHRK_ENROL_TOKEN } : {}),
     // DAHRK_TENANT_ID is no longer required (tenant comes from `welcome`) but is still honoured as a
     // defence-in-depth override for the managed profile.

@@ -94,6 +94,33 @@ this file is left verbatim.
   config has no `committer.*` keys); a partial override echoes the author onto the committer rather
   than falling back to the service default, so it cannot read as somebody else.
 
+### Changed
+
+- Node groups are retired hub-side (DHK-1039). An enrolment token now names the TENANT a node joins
+  rather than a group from which the tenant was then read. Nothing changes in the `hello` frame:
+  `servesRepoIds` stays on the wire as an advisory hint that may only narrow, never widen, the repos a
+  node will take, so this is not a breaking `@dahrk/contracts` change and no republish is needed. The
+  hub's `welcome.allowedRepos` now carries every registered repo in the tenant instead of a group's
+  explicit allow-list.
+
+- The hub enforces a minimum client version at the handshake (`MIN_NODE_CLIENT_VERSION`, 0.4.0). It
+  closes with `EDGE_CLOSE.ENROL_INVALID` (4401) and an upgrade instruction rather than a fresh close
+  code, deliberately: a new code would be unknown to exactly the old clients a version refusal targets,
+  and they would reconnect-loop against a hub that will never accept them. 4401 is already treated as
+  fatal by every published client, and the close text is printed verbatim.
+
+- The legacy one-way `advertise` frame is no longer bound. It carried no `clientVersion`, so the
+  version gate would refuse every sender regardless.
+
+### Fixed
+
+- `CLIENT_VERSION` was `process.env.npm_package_version ?? "0.0.0"`, which only holds a real value when
+  the process starts through a package-manager script. An INSTALLED node - the normal case - has no
+  such variable and reported `0.0.0`. That was cosmetic while the version only drew an "outdated"
+  badge; with a minimum-version gate it would have refused every installed node from the hub its own
+  release ships with. It now reads `version` from the package manifest beside the bundle, falling back
+  to the env var.
+
 ## [0.3.7] - 2026-08-05
 
 ### Changed

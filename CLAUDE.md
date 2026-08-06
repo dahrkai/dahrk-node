@@ -21,7 +21,8 @@ Naming conventions for this repo (summary; the source of truth is `dahrk-hq`):
   "unmanaged".
 - **Credentials.** Every credential is **brokered**: the hub mints a short-lived, repo-scoped git token
   from the GitHub App, opens pull requests itself through that App, and hands the node an inference
-  credential per stage from the AuthProfile bound to its pool. There is no ambient mode; a node never
+  credential per stage from the AuthProfile the run resolves - the stage's own, else the account default.
+  There is no ambient mode; a node never
   reads the host's SSH key, `gh` login, `claude` login, Keychain, or provider env vars.
 - **Voice.** British English, no em dashes. Amber `#f5a524` is the only brand accent.
 
