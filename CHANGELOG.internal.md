@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-06
+
 ### Removed
 
 - **Skakel is gone from the env surface.** The `SKAKEL_*` aliases were supported two different ways,

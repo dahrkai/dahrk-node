@@ -6,25 +6,28 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-06
+
 ### Added
 
-- Commits are SSH-signed when the hub supplies a signing key, so they show as verified on GitHub.
+- Commits are SSH-signed when the hub supplies a signing key, so they show as verified on GitHub. (#181)
 
 ### Changed
 
-- A node now enrols to your account rather than to a node group, and serves every repository in it.
-- The hub requires node 0.4.0 or newer; older clients are refused with an upgrade message.
+- A node now enrols to your account rather than to a node group, and serves every repository in it. (#182)
+- The hub requires node 0.4.0 or newer; older clients are refused with an upgrade message. (#182)
 
 ### Removed
 
-- The legacy `SKAKEL_*` environment variable aliases and the `~/.skakel` state directory fallback.
+- The legacy `SKAKEL_*` environment variable aliases and the `~/.skakel` state directory fallback. (#181)
+- A node still holding its identity in `~/.skakel` mints a new one and must be enrolled again. (#181)
 
 ### Fixed
 
-- A commit is never signed with the host's own key, even where git is configured to sign by default.
-- A repository's configured commit author and committer are applied instead of being ignored.
-- `dahrk doctor` and `dahrk preflight` resolve the state directory the same way the running node does.
-- An installed node reports its real version instead of `0.0.0`.
+- A commit is never signed with the host's own key, even where git is configured to sign by default. (#181)
+- A repository's configured commit author and committer are applied instead of being ignored. (#181)
+- `dahrk doctor` and `dahrk preflight` resolve the state directory the same way the node does. (#181)
+- An installed node reports its real version instead of `0.0.0`. (#182)
 
 ## [0.3.7] - 2026-08-05
 
@@ -599,7 +602,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dahrkai/dahrk-node/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/dahrkai/dahrk-node/compare/v0.3.4...v0.3.5
