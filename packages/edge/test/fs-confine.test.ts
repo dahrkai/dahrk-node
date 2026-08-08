@@ -58,6 +58,7 @@ test("shell commands that reach outside the worktree are denied", () => {
     "find ~ -name '*.pem'",
     "cat ~/.ssh/id_ed25519",
     "cat /Users/someone-else/notes.md",
+    'cat "/Users/someone-else/my notes.md"', // a quoted anchored path with spaces is still a path (DHK-1019)
     "grep -r password /Users",
     "git -C /Users/other/repo status",
     "cd .. && ls",
@@ -103,6 +104,7 @@ test("the ordinary commands a build stage runs are NOT mistaken for escapes", ()
     'git commit -m "fix: a thing"',
     "git push origin HEAD",
     'git commit -m "note: /usr/local was the problem"', // a path inside PROSE
+    'git commit -m "/usr is broken"', // anchored prose with spaces in a PATTERN_FLAGS operand still allows (DHK-1019)
     "node --version",
     "rg foo src/",
     "rg -e '/api/v1' src/", // the pattern is a path-shaped regex

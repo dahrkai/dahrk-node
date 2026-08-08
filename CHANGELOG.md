@@ -13,6 +13,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Fixed
 
 - A run waiting at a human gate keeps its worktree, so the approved push no longer fails with a missing worktree. (#185)
+- Worktree confinement now denies an anchored path that contains a space, so a quoted or escaped path can no longer escape the worktree.
 
 ## [0.4.0] - 2026-08-06
 
