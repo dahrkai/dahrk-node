@@ -24,6 +24,10 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- `packaging/homebrew/README.md` updated to reflect that `dahrkai/homebrew-tap` exists; removed stale "does not exist yet" bootstrap steps. (DHK-1053)
+
 ## [0.4.2] - 2026-08-08
 
 ### Fixed
