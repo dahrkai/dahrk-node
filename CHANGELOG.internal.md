@@ -24,6 +24,31 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-08
+
+### Added
+
+- **`run-finished` is now handled end to end, closing the follow-up DHK-1045 left open (DHK-1047).**
+  The frame has existed in `@dahrk/contracts` since DHK-373, but nothing on the edge read it, so the
+  node could only ever *infer* that a run had ended. `StageRunner` gains `finishRun(runId)`, which
+  guards on `isBusy` and delegates to the existing `teardownRun`, and `ws-client.ts` dispatches the
+  `run-finished` frame to it. Teardown is idempotent and a stage still executing wins, so a stray or
+  duplicated frame cannot pull a worktree out from under live work.
+
+  This restores the idle rule to something it can actually carry. DHK-1045 made `isLive` runs exempt
+  from `maxIdleMs` entirely, which was correct but left both age paths inert: with nothing telling the
+  edge a run had ended, no run ever became collectable by age. Now the hub says so explicitly, and
+  disk is reclaimed at the moment the run finishes rather than waiting for a restart to hand the
+  whole set back to the reaper. (#186)
+
+### Changed
+
+- **`@earendil-works/pi-coding-agent` `0.83.0` -> `0.84.1`** in `apps/edge-node` and
+  `packages/executor-worktree`, with the lockfile regenerated. The matching `pi-ai` bump and
+  catalogue regeneration shipped from dahrk-harness first, because `scripts/check-pi-pin.mjs` reads
+  `PI_CATALOG_VERSION` from the published `@dahrk/contracts`. Version pins and lockfile only, no
+  source change. (#184)
+
 ### Fixed
 
 - **The reaper collected the worktree of a run parked at a human gate (DHK-1045).** Run
