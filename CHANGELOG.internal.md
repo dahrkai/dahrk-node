@@ -44,7 +44,7 @@ this file is left verbatim.
   the `maxRuns` count cap still apply to a live run, so the disk stays bounded, and liveness is
   process-local so a restart still hands the whole disk back to the reaper - the DHK-371 leak cannot
   return. The in-memory LRU in `applyRetention` had the same defect through `policy.maxAgeMs` and gets
-  the same guard.
+  the same guard. (#185)
 
   This leaves the node inferring liveness rather than being told. The `run-finished` frame that would
   make it a fact exists in `@dahrk/contracts` (DHK-373) but no hub sends it and this client does not
