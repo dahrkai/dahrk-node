@@ -24,6 +24,33 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The reaper collected the worktree of a run parked at a human gate (DHK-1045).** Run
+  `run-d8f42887-0852-476c-accd-aa89cb657b5e-c1` finished reproduce/build/test at 20:48, opened the
+  deliver gate, and had its worktree reaped 12 h later during an unrelated preflight job's retention
+  pass (`reason: "idle"`, `maxIdleMs` 6 h). The approval landed 25 h after that and the push died with
+  `worktree missing for push`. The run had done all of its work and cost $2.25.
+
+  The cause is that idleness was standing in for "finished". `lastUsedMs` is the mtime of
+  `.dahrk/scratch/state.json`, so a run is idle from the moment its last stage ends - a gated run and a
+  completed run look identical - and the only guard, `isBusy`, means "a stage is executing right now",
+  which a gated run is not. Every run gated for longer than `maxIdleMs` was exposed; this is the third
+  occurrence in the node log (2026-07-29, 2026-07-31, 2026-08-08).
+
+  The fix is `isLive`: the runs this node still holds a worktree for are exempt from the idle rule
+  entirely, rather than given a longer window. A longer window only moves the cliff (a gate open over a
+  long weekend would find it again), and the number would be a guess at human behaviour. `broken` and
+  the `maxRuns` count cap still apply to a live run, so the disk stays bounded, and liveness is
+  process-local so a restart still hands the whole disk back to the reaper - the DHK-371 leak cannot
+  return. The in-memory LRU in `applyRetention` had the same defect through `policy.maxAgeMs` and gets
+  the same guard.
+
+  This leaves the node inferring liveness rather than being told. The `run-finished` frame that would
+  make it a fact exists in `@dahrk/contracts` (DHK-373) but no hub sends it and this client does not
+  handle it; wiring it end to end is the follow-up, and it is what would let an idle rule apply to
+  genuinely finished runs again.
+
 ## [0.4.0] - 2026-08-06
 
 ### Removed
