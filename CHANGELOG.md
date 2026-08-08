@@ -6,9 +6,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-08
+
 ### Added
 
-- A node tears down a finished run's worktree as soon as the hub reports the run finished, freeing disk sooner.
+- A node tears down a finished run's worktree as soon as the hub reports the run finished, freeing disk sooner. (#186)
 
 ### Fixed
 
@@ -610,7 +612,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/dahrkai/dahrk-node/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dahrkai/dahrk-node/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/dahrkai/dahrk-node/compare/v0.3.5...v0.3.6
