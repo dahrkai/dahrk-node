@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A run waiting at a human gate keeps its worktree, so the approved push no longer fails with a missing worktree. (#185)
+
 ## [0.4.0] - 2026-08-06
 
 ### Added

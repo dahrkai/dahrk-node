@@ -577,11 +577,18 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
   /** True while a run is executing a stage on THIS node. The reaper and the stale-claim eviction in
    *  `createWorktree` both consult it, so a live run is never collected or stomped. */
   const isBusy = (runId: string): boolean => (inFlight.get(runId) ?? 0) > 0;
+  /** True while this node still holds a run's worktree and has not seen the run finish (DHK-1045).
+   *  Strictly weaker than `isBusy`, and that gap is the whole point: between two stages, and for the
+   *  entire length of a human gate, a run has no job in flight yet its worktree is exactly what the
+   *  eventual deliver pushes from. The map is only emptied by `teardownRun`, so a process restart
+   *  correctly reports nothing live and hands the whole disk back to the reaper. */
+  const isLive = (runId: string): boolean => worktrees.has(runId);
   const reaperDryRun = process.env.DAHRK_REAPER_DRY_RUN === "1";
   const reaper = createWorktreeReaper({
     worktreesDir: deps.gitService.worktreesDir,
     mirrorsDir: resolveMirrorsDir(),
     isBusy,
+    isLive,
     logger: { info: (m) => console.log(`REAPER ${m}`), warn: (m) => console.warn(`REAPER ${m}`) },
   });
   /** Runs whose workspace is a telemetry-only scratch dir, not a git worktree, so teardown
@@ -641,7 +648,12 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
     const now = Date.now();
     if (policy.maxAgeMs !== undefined) {
       for (const id of [...worktrees.keys()]) {
-        if (prunable(id) && now - (lastUsed.get(id) ?? 0) > policy.maxAgeMs) await teardownRun(id);
+        // Same rule as the reaper (DHK-1045): age is not evidence that a run is over, so a run this
+        // node still holds a worktree for is never collected for being old. Every entry in `worktrees`
+        // is live by that definition today, which makes this branch inert until something tells the
+        // edge a run has finished - the `run-finished` frame. That is the honest state of affairs, not
+        // a shorter timer: the count cap below is what bounds the disk in the meantime.
+        if (!isLive(id) && prunable(id) && now - (lastUsed.get(id) ?? 0) > policy.maxAgeMs) await teardownRun(id);
       }
     }
     if (policy.maxRuns !== undefined && worktrees.size > policy.maxRuns) {

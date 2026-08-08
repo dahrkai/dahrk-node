@@ -6,9 +6,16 @@
  * (b) consulted an IN-MEMORY map, so every worktree created by a previous process was orphaned for
  * ever. On one node that reached 92 registered worktrees and 65 GB.
  *
- * There is no `run-finished` frame in the hub -> edge protocol, so the edge cannot simply be told when
- * a run is over. This reaper is therefore the primary mechanism, and it is deliberately built to be
- * restart-safe: it reconciles what is ON DISK and what git has REGISTERED, never process-local state.
+ * The hub -> edge protocol has a `run-finished` frame, but it is best-effort and no hub sends it yet,
+ * so the edge cannot rely on being told when a run is over. This reaper is therefore the primary
+ * mechanism, and it is deliberately built to be restart-safe: it reconciles what is ON DISK and what
+ * git has REGISTERED, never process-local state.
+ *
+ * What it must NOT do is mistake "idle" for "over" (DHK-1045). Idleness is measured from the last time
+ * a stage touched the worktree, so a run parked at a human gate looks identical to a finished one, and
+ * collecting it strands the deliver that follows the approval. `isLive` marks the runs this node still
+ * holds a worktree for, and idleness simply does not apply to them - the count cap and a restart are
+ * what bound their disk.
  *
  * It also clears the two things that wedge future runs:
  *   - a stale worktree registration keeps claiming its branch name for ever, so the next run of the
@@ -74,6 +81,12 @@ export interface ReaperOptions {
   mirrorsDir: string;
   /** True while a run is executing a stage on this node. A busy run is never reaped. */
   isBusy?: (runId: string) => boolean;
+  /** True while this node holds a worktree for a run it has not seen finish - which includes every run
+   *  parked at a human gate, waiting on auth, or between stages. Such a run is not busy (no job is in
+   *  flight) but its worktree is still load-bearing: deliver will push from it. Held to
+   *  `liveRunMaxIdleMs` rather than `maxIdleMs`. Process-local by design, so a restart still hands the
+   *  whole disk back to the reaper (DHK-1045). */
+  isLive?: (runId: string) => boolean;
   logger?: { info: (m: string) => void; warn: (m: string) => void };
 }
 
@@ -255,7 +268,7 @@ export function createWorktreeReaper(opts: ReaperOptions) {
       // Both sides canonicalised, so the same worktree from `readdir` and from git dedupes to one entry.
       const candidates = [...new Set([...onDisk, ...[...registered.values()].flat()])];
 
-      type Entry = { path: string; runId: string; idleMs: number; broken: boolean; mirror?: string };
+      type Entry = { path: string; runId: string; idleMs: number; live: boolean; broken: boolean; mirror?: string };
       const entries: Entry[] = [];
       for (const path of candidates) {
         report.scanned++;
@@ -273,16 +286,22 @@ export function createWorktreeReaper(opts: ReaperOptions) {
         // Broken = the worktree cannot resolve HEAD (its branch ref was deleted under it). It is
         // unusable for any future run and only serves to hold its branch name hostage.
         const broken = !existsSync(path) || !gitOk(path, ["rev-parse", "--verify", "-q", "HEAD"]);
-        entries.push({ path, runId, idleMs, broken, ...(ownerOf(path, registered) ? { mirror: ownerOf(path, registered)! } : {}) });
+        // A run this node has not seen finish is EXEMPT FROM IDLENESS ENTIRELY, because idleness cannot
+        // distinguish it from a finished one: it is idle between every pair of stages and for the whole
+        // of a human gate. No ceiling is guessed here - a longer one would only move the cliff, not
+        // remove it. `broken` and the count cap still apply: a worktree that cannot resolve HEAD is
+        // useless to the run anyway, and `maxRuns` is what keeps the disk bounded meanwhile.
+        const live = opts.isLive?.(runId) ?? false;
+        entries.push({ path, runId, idleMs, live, broken, ...(ownerOf(path, registered) ? { mirror: ownerOf(path, registered)! } : {}) });
       }
 
       // Idlest first, so the over-count sweep evicts the least recently useful.
       entries.sort((a, b) => b.idleMs - a.idleMs);
-      const keep = entries.filter((e) => !e.broken && e.idleMs <= maxIdleMs);
+      const keep = entries.filter((e) => !e.broken && (e.live || e.idleMs <= maxIdleMs));
       const doomed: Array<Entry & { reason: ReapReason }> = [];
       for (const e of entries) {
         if (e.broken) doomed.push({ ...e, reason: "broken" });
-        else if (e.idleMs > maxIdleMs) doomed.push({ ...e, reason: "idle" });
+        else if (!e.live && e.idleMs > maxIdleMs) doomed.push({ ...e, reason: "idle" });
       }
       // Then trim whatever survives down to maxRuns, idlest first.
       const survivors = keep.filter((e) => !doomed.some((d) => d.path === e.path));

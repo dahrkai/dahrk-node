@@ -202,6 +202,54 @@ test("dryRun reports what it would collect and deletes nothing", async () => {
   }
 });
 
+test("a live run's worktree survives any amount of idleness, but not the count cap (DHK-1045)", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    // `run-gated` is the DHK-1045 shape: its stages finished, it is parked at a human deliver gate, so
+    // no job is in flight (NOT busy) and nothing has touched the worktree for well over the idle cap.
+    // Collecting it strands the push that follows the approval.
+    const gatedRef = await svc.createWorktree({
+      repoId: "repo-r6",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-gated",
+      branch: "dahrk/issue-DHK-1013",
+    });
+    const doneRef = await svc.createWorktree({
+      repoId: "repo-r6",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-done",
+      branch: "dahrk/issue-DHK-31",
+    });
+    ageBy(gatedRef.worktreePath, 99 * HOUR);
+    ageBy(doneRef.worktreePath, 12 * HOUR);
+
+    const reaper = createWorktreeReaper({
+      worktreesDir,
+      mirrorsDir,
+      // Not busy - no stage is executing. Live - the node still holds its worktree.
+      isBusy: () => false,
+      isLive: (id) => id === "run-gated",
+    });
+    const report = await reaper.reap({ maxIdleMs: 6 * HOUR });
+
+    assert.equal(report.reaped.length, 1, "only the run the node is not holding a worktree for");
+    assert.equal(report.reaped[0]?.runId, "run-done");
+    assert.ok(existsSync(gatedRef.worktreePath), "the gated run's worktree survives 99h of idleness");
+
+    // The count cap is deliberately NOT waived: it is what bounds the disk now that idleness cannot.
+    const capped = await reaper.reap({ maxRuns: 0, maxIdleMs: 6 * HOUR });
+    assert.equal(capped.reaped[0]?.reason, "over-count");
+    assert.ok(!existsSync(gatedRef.worktreePath), "so a live run still yields to the count cap");
+  } finally {
+    for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("over the count cap, the idlest worktrees go first", async () => {
   const remote = makeBareRemote();
   const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
