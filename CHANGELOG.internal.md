@@ -24,6 +24,29 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-08
+
+### Fixed
+
+- **An anchored path containing a space bypassed worktree confinement entirely (DHK-1019).** In
+  `looksLikePath` (`packages/edge/src/shell-scan.ts`) a whitespace-is-prose short-circuit ran *before*
+  the anchor test, so any argument that both looked anchored (`/…`, `~/…`, `../…`) and carried a
+  space was classified as prose and waved through. Quoting or backslash-escaping the space was enough:
+  all six shapes resolved to `ok` where they should have been `escape`. The fix makes the anchor
+  authoritative by dropping the early return, so an anchor decides the classification and whitespace
+  no longer overrides it.
+
+  Note the ordering hazard this one exposed rather than the defect itself: the six cases already
+  existed in `shell-scan.test.ts` as `todo`, which is why the gap was known but not closed. They now
+  assert `escape`, with a deny/allow integration pair added in `fs-confine.test.ts`. (#188)
+
+- **Changelog hygiene:** this PR's public note was written under `[Unreleased]` while the 0.4.1
+  release PR was in flight, so once that PR rolled the heading the merge deposited the bullet inside
+  the published `[0.4.1]` section. The 0.4.1 GitHub release body was cut from the release commit and
+  is unaffected, but `CHANGELOG.md` on `main` briefly claimed this fix shipped in 0.4.1. Moved to
+  `[Unreleased]` for this release. Worth knowing that a note authored during a release window can land
+  in the wrong section without any conflict.
+
 ## [0.4.1] - 2026-08-08
 
 ### Added
