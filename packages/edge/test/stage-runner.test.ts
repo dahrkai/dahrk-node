@@ -291,6 +291,129 @@ forBothRuntimes("retention tears down old run worktrees and keeps the newest", a
   }
 });
 
+/** Wrap a git service so a test can observe which worktree paths were torn down. */
+function tornTracking(root: string): { gitService: never; torn: string[] } {
+  const torn: string[] = [];
+  const gitService = createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") });
+  const wrapped = {
+    ...gitService,
+    teardownWorktree: async (ref: { worktreePath: string }) => {
+      torn.push(ref.worktreePath);
+      return gitService.teardownWorktree(ref as never);
+    },
+  };
+  return { gitService: wrapped as never, torn };
+}
+
+const finishJob = (runtime: Runtime, repo: string, n: number): JobRequest => ({
+  tenantId: "t_default",
+  runId: `run-${n}`,
+  stageId: "build",
+  jobId: `job-${n}`,
+  awakeableId: `awk-${n}`,
+  executorType: "worktree",
+  agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+  workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+  timeout: 60,
+});
+
+forBothRuntimes("DHK-1047: a run-finished tears down the run's worktree and clears its liveness", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-fin-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const { gitService, torn } = tornTracking(root);
+
+  // No retention policy: the only thing that can tear this worktree down is the run-finished frame.
+  const runner = createStageRunner({ gitService, makeRunner: createMockRunner, rules: [], sendProgress: () => undefined });
+
+  try {
+    await runner.runJob(finishJob(runtime, repo, 1));
+    assert.equal(torn.length, 0, "the run's sticky worktree is kept while the run is live");
+    await runner.finishRun("run-1");
+    assert.equal(torn.length, 1, "the run-finished frame tears the worktree down");
+    assert.ok(torn[0]!.includes("run-1"), "and it is this run's worktree that goes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("DHK-1047: a run-finished for an unknown or already-finished run is a no-op", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-fin-noop-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const { gitService, torn } = tornTracking(root);
+
+  const runner = createStageRunner({ gitService, makeRunner: createMockRunner, rules: [], sendProgress: () => undefined });
+
+  try {
+    // A frame for a run this node has never seen neither throws nor tears anything down.
+    await runner.finishRun("run-never-seen");
+    assert.equal(torn.length, 0, "an unknown run is a no-op");
+
+    await runner.runJob(finishJob(runtime, repo, 2));
+    await runner.finishRun("run-2");
+    assert.equal(torn.length, 1, "the first frame tears the worktree down");
+    // A duplicate / out-of-order frame for the same, now-finished run is idempotent.
+    await runner.finishRun("run-2");
+    assert.equal(torn.length, 1, "a second frame for the same run tears nothing down again");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("DHK-1047: isBusy wins - a run-finished mid-job does not tear down the worktree", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-fin-busy-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const { gitService, torn } = tornTracking(root);
+
+  // A runner that signals when the stage starts and blocks until released, so the test can land a
+  // run-finished frame while the job is genuinely in flight.
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((r) => (release = r));
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((r) => (signalStarted = r));
+  const gateRunner: Runner = {
+    runtime,
+    async runBatch() {
+      signalStarted?.();
+      await released;
+      return { status: "ok", summary: "done" };
+    },
+    async runInteractive() {
+      signalStarted?.();
+      await released;
+      return { status: "ok", summary: "done" };
+    },
+    async summarise() {
+      return "n/a";
+    },
+    async cancel() {
+      release?.();
+    },
+  };
+
+  const runner = createStageRunner({ gitService, makeRunner: () => gateRunner, rules: [], sendProgress: () => undefined });
+
+  try {
+    const job = finishJob(runtime, repo, 3);
+    const inFlight = runner.runJob(job);
+    await started; // the worktree now exists and the stage is executing
+    assert.equal(runner.isBusy("run-3"), true, "precondition: the run has a job in flight");
+
+    await runner.finishRun("run-3");
+    assert.equal(torn.length, 0, "isBusy wins: the worktree is not yanked from under a live job");
+
+    release?.();
+    await inFlight; // the job finishes normally on its own worktree
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 forBothRuntimes("a stage that exceeds its timeout is killed and marked `timeout` (job.timeout kill)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-to-"));
   const repo = join(root, "repo");

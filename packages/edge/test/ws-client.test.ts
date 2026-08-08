@@ -210,6 +210,17 @@ test("a cancel frame is acknowledged, even for a job the node is not running (a 
   });
 });
 
+test("DHK-1047: a run-finished frame decodes and routes to the stage runner without error", async () => {
+  await withEdge(async (ctx) => {
+    // The DHK-1046 wire shape: a run-scoped frame the hub sends when a run reaches a terminal state.
+    // The node has no worktree for it, so teardown is a harmless no-op - what this proves is that the
+    // frame decodes and dispatches (the marker) rather than falling through as an unknown message.
+    ctx.toEdge({ type: "run-finished", runId: "run-1" });
+    await waitFor(() => marker(ctx.lines, "RUN_FINISHED:run-1") === 1);
+    assert.equal(marker(ctx.lines, "RUN_FINISHED:run-1"), 1);
+  });
+});
+
 test("a cancel-ack is cached and re-sent on reconnect, so a hub roll still settles the cancel", async () => {
   await withEdge(
     async (ctx) => {
