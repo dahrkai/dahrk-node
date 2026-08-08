@@ -265,7 +265,11 @@ function tokenise(cmd: string): { tokens: Token[]; subshells: string[] } | null 
 /** Anchored outside the cwd, or climbing out of it. Everything else resolves inside the worktree. */
 function looksLikePath(t: Token): boolean {
   if (t.value.startsWith("-")) return false; // a flag: `-print0`, `--version`
-  if (/\s/.test(t.value)) return false; // prose: `git commit -m "/usr is broken"`
+  // Whitespace does NOT make a token prose: an anchored path can carry a space (`cat "/x/my file"`,
+  // `cat /x/a\ b`), and the one whitespace-prose shape that motivated a guard here -
+  // `git commit -m "/usr is broken"` - never reaches this function, because PATTERN_FLAGS skips
+  // `-m`'s operand upstream. So the anchor test below is authoritative; a non-anchored sentence still
+  // fails it and returns false (DHK-1019).
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t.value)) return false; // a URL, not a path
   const s = t.value.replace(/^@/, ""); // curl's `-d @file`
   if (s.includes("$SUBSHELL")) return false; // opaque: we scanned the inner command separately

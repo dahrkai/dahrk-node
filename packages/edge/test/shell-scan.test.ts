@@ -144,19 +144,17 @@ test("an escape reports the offending path and the access it needed", () => {
 });
 
 /**
- * A KNOWN HOLE, recorded rather than asserted: an anchored path containing a space is not confined.
+ * An anchored path containing a space is still a path (DHK-1019). `looksLikePath` used to reject any
+ * token carrying whitespace as prose (`git commit -m "/usr is broken"`), which ran after tokenising,
+ * so a quoted or backslash-escaped path was indistinguishable from a sentence by that rule alone -
+ * even though `Token.quoted` was introduced to keep the two facts apart. Every case below is a real
+ * read or write outside every root, and each must now be an escape.
  *
- * `looksLikePath` rejects any token carrying whitespace as prose (`git commit -m "/usr is broken"`),
- * but that test runs after tokenising, so a quoted or backslash-escaped path is indistinguishable
- * from a sentence by that rule alone - even though `Token.quoted` was introduced to keep the two
- * facts apart. Every case below is a real read or write outside every root, and every one is
- * currently allowed.
- *
- * Left `todo` deliberately: making the anchor authoritative over the whitespace test is a change to
- * what the guard DENIES, and its blast radius is false denies on prose that no PATTERN_FLAG covers
- * (`gh issue create --body "see /etc/hosts"`). That is its own decision, not a test fixture's.
+ * The anchor is authoritative: whitespace no longer outranks it. The one whitespace-prose shape that
+ * motivated the old rule (`git commit -m "…"`) is covered upstream by PATTERN_FLAGS skipping `-m`'s
+ * operand, so the guard against a false deny lives in the ALLOWED table below, not here.
  */
-test("an anchored path containing a space escapes confinement", { todo: "the whitespace-is-prose rule outranks the anchor" }, () => {
+test("an anchored path containing a space escapes confinement", () => {
   for (const cmd of [
     String.raw`cat /dahrk-test-outside/a\ b`,
     `cat "${OUT}/my notes.md"`,
@@ -204,6 +202,7 @@ const ALLOWED: Array<[string, string]> = [
 
   // Prose, URLs and opaque expansions.
   ['git commit -m "fix: /usr/local was the problem"', "a path inside a commit message is prose"],
+  ['git commit -m "/usr is broken"', "an anchored path with spaces in a PATTERN_FLAGS operand is still prose (DHK-1019)"],
   [`git commit -m "don't touch /etc"`, "an apostrophe inside prose"],
   ["curl -s https://registry.npmjs.org/@dahrk/contracts", "a URL is not a path"],
   ["echo $HOME", "echo prints, it does not open"],
