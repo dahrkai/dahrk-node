@@ -678,6 +678,17 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       ackCancel(msg.jobId);
       return;
     }
+    if (msg.type === "run-finished") {
+      // The run reached a terminal state (DHK-1047): tear its worktree down promptly and drop its sticky
+      // state, so it stops counting as live and the disk is freed without waiting for the count cap.
+      // Best-effort - a failure to tidy up must never surface on the socket loop - and `isBusy` is
+      // honoured inside `finishRun`, so a frame racing a live job cannot yank its worktree.
+      log.info({ runId: msg.runId }, `RUN_FINISHED:${msg.runId}`);
+      void stageRunner.finishRun(msg.runId).catch((e: unknown) =>
+        log.warn({ err: e, runId: msg.runId }, `RUN_FINISHED_ERROR:${(e as Error).message}`),
+      );
+      return;
+    }
     if (msg.type === "turn") {
       // A relayed human turn for an in-flight interactive stage (M5b): text feeds the open
       // conversation; an `end` closes it (complete -> gate exit, cancel -> abort).

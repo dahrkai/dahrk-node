@@ -175,6 +175,11 @@ export interface StageRunner {
   runPush(job: PushJob): Promise<PushResult>;
   /** Cancel an in-flight Job's runner (the Linear `stop` signal, relayed by the hub). */
   cancel(jobId: string): void;
+  /** Tear down a finished run's worktree and drop its sticky state on a hub `run-finished` frame
+   *  (DHK-1047), so the run stops counting as live and its disk is freed at once rather than waiting
+   *  for the count cap. Idempotent and unordered-safe: a no-op for an unknown run, an already-torn-down
+   *  run, or one with a job still in flight (`isBusy` wins). */
+  finishRun(runId: string): Promise<void>;
   /** Feed a human turn to an in-flight interactive stage (relayed `prompted` text; M5b). */
   enqueueTurn(jobId: string, turn: HumanTurn): void;
   /** Close an interactive stage's turn stream (the human signed off -> its gate exit; M5b). */
@@ -1465,6 +1470,15 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
       } finally {
         inFlight.set(runId, Math.max(0, (inFlight.get(runId) ?? 1) - 1));
       }
+    },
+
+    async finishRun(runId) {
+      // isBusy still wins: a frame that races a job in flight must never yank the worktree from under
+      // it. A run with no worktree / already torn down / unknown falls through `teardownRun` as a no-op,
+      // so this is idempotent and unordered-safe. Clearing `worktrees` (in `teardownRun`) is exactly
+      // what flips `isLive` to false, re-arming the age-based reclamation DHK-1045 left inert.
+      if (isBusy(runId)) return;
+      await teardownRun(runId);
     },
 
     cancel(jobId) {

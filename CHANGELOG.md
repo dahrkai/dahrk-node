@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- A node tears down a finished run's worktree as soon as the hub reports the run finished, freeing disk sooner.
+
 ### Fixed
 
 - A run waiting at a human gate keeps its worktree, so the approved push no longer fails with a missing worktree. (#185)
