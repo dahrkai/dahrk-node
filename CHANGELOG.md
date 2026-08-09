@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-09
+
 ### Changed
 
 - The installer now detects your operating system and prints the exact Node 22 install commands for it. (#196)
@@ -13,7 +15,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Fixed
 
 - The installer explains an unwritable global npm prefix and how to fix it, instead of failing with EACCES. (#196)
-- A re-run that continues preserved work now starts from that work, and fails loudly rather than silently branching off the base.
+- A re-run that continues preserved work now starts from that work, and fails loudly rather than silently branching off the base. (#195)
 
 ## [0.4.3] - 2026-08-09
 
@@ -638,7 +640,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/dahrkai/dahrk-node/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/dahrkai/dahrk-node/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/dahrkai/dahrk-node/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/dahrkai/dahrk-node/compare/v0.4.0...v0.4.1

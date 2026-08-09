@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-09
+
 ### Changed
 
 - `install.sh` detects the platform (`uname -s` plus a built-in parse of `/etc/os-release`) and probes
