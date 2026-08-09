@@ -118,13 +118,29 @@ The top isolation boundary for the future SaaS. In Phase 1 it is pinned to one c
 varied. Tenant 0 is the platform itself, not a customer.
 _Avoid_: Org, customer, account (as synonyms).
 
+**Integration**:
+Any outside system the account links: a tracker (Linear), a code host (GitHub), a model provider
+(Anthropic, OpenAI). The **user-facing umbrella term**, and the name of the portal surface that holds
+them. An integration is a *provider*; the records beneath it (a Connection, an Installation, an
+AuthProfile) are its *instances*.
+_Avoid_: Connection (as the umbrella), plugin, app.
+
 **Connection**:
-One Linear OAuth app install acting as an agent (`actor=app`). The unit of authentication. One
-Connection can expose several Workspaces.
-_Avoid_: Integration, install, org.
+One Linear OAuth app install acting as an agent (`actor=app`). The unit of authentication, and the
+instance behind the Linear integration. One per tenant. Internal: it is never a menu label, because a
+user thinks in workspaces and providers, not in auth records.
+_Avoid_: Integration (that is the umbrella), install, org.
+
+**Installation**:
+One GitHub App install of the **broker App**, granting repository access to a tenant. The instance
+behind the GitHub integration; one per tenant. Distinct from the **sign-in OAuth app** behind
+"Continue with GitHub", which is identity and grants nothing: conflating the two produced a
+cross-tenant IDOR, so name which GitHub you mean.
+_Avoid_: Connection, GitHub integration (the integration is the provider, this is its instance).
 
 **Workspace**:
-A Linear workspace exposed by a Connection. Contains the issues that become runs.
+A Linear workspace exposed by a Connection. Contains the issues that become runs. The name a person
+recognises, so it is what a surface prints for a Connection.
 _Avoid_: Org, team (a team is a subdivision of a workspace).
 
 **AuthProfile**:
@@ -160,6 +176,23 @@ its SSH key, `gh` login, `claude` login, keychain, or provider environment varia
 where a credential came from, not how long it lives.
 _Avoid_: Ambient credentials, credential mode, brokered node (retired: there is no non-brokered
 alternative for either to distinguish).
+
+**Secret**:
+A credential a **node** uses while running a stage: a cloud key, an MCP server's key, anything a
+repository's build needs. An input to the work, never a way to reach a model. Distinct from what an
+AuthProfile points at, even though both are stored as credential rows.
+_Avoid_: Credential (broader), API key, auth profile.
+
+**Account**:
+One customer's tenancy of the product, as a person experiences it: their members, their preferences,
+their integrations. The user-facing word for what the code calls a Tenant. "Account default" (the
+fallback AuthProfile) is scoped to exactly this.
+_Avoid_: Factory (retired), organisation, workspace (that is Linear's).
+
+**Repository**:
+A registry row binding a git repo to routing (`teamKeys`, `routingLabels`, `projectKeys`) and to the
+Connections allowed to send it issues. It is what a run is executed against, in a worktree on a node.
+_Avoid_: Repo config, project, codebase.
 
 ### The control surface
 
