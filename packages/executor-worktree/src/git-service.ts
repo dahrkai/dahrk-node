@@ -305,6 +305,15 @@ export interface GitService {
    * `{ ok: false }` with git's real stderr for the check's output.
    */
   fetchProbe(ref: WorkspaceRef, opts: FetchProbeOpts): Promise<FetchProbeResult>;
+  /**
+   * Measure the worktree's diff against base without committing or pushing (DHK-1053), so a deliver
+   * gate can tell a human how big the change is BEFORE they approve pushing it. Sees uncommitted and
+   * untracked work, which is where all stage output lives until deliver commits it.
+   *
+   * Synchronous and never throws: it is called on the stage-end path, where a failure must degrade to
+   * "no measurement" rather than fail an otherwise-ok stage.
+   */
+  probeFootprint(ref: WorkspaceRef, opts: { base: string }): DiffFootprint | undefined;
   teardownWorktree(ref: WorkspaceRef): Promise<void>;
   /** The resolved absolute worktree base this service creates run worktrees under
    *  (`join(worktreesDir, runId)`). Exposed so the client can advertise it to the hub on `hello`, so
@@ -476,6 +485,86 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       }
     }
     return { headSha: git(worktreePath, ["rev-parse", "HEAD"]).trim(), dirty };
+  };
+
+  /**
+   * Whether a path is engine-owned state rather than customer change, and so must never count towards
+   * a change footprint or keep a "nothing to deliver" push from being a no-op.
+   *
+   * `--no-index` so a path is judged purely by the ignore rules, not by whether it is tracked: a
+   * scratch file a regression already committed is still recognised as ignored (plain `check-ignore`
+   * never reports a tracked path). Shared by the deliver push and the stage-end probe (DHK-1053), so
+   * the two cannot drift on what counts as a change.
+   */
+  const isScratchPath = (worktreePath: string, p: string): boolean =>
+    p === SCRATCH_DIR ||
+    p.startsWith(`${SCRATCH_DIR}/`) ||
+    gitOk(worktreePath, ["check-ignore", "-q", "--no-index", "--", p]);
+
+  /**
+   * Resolve the run's base to a ref that actually exists here, and say how far HEAD is ahead of it.
+   *
+   * Freshest form first: `FETCH_HEAD` is the base a push just fetched, then the remote-tracking ref. A
+   * bare name (`main`) is LAST because it resolves to a local head, which under the old `--mirror`
+   * layout happened to track the remote but is now ours and could be stale or absent (DHK-371).
+   *
+   * Extracted so the deliver push and the stage-end probe (DHK-1053) agree on what "base" means: a
+   * probe that measured against a different ref than the push would report a change size the PR then
+   * contradicted. Best-effort: returns null when the base is present under no name at all, so callers
+   * degrade rather than abort.
+   */
+  const resolveBaseRef = (worktreePath: string, base: string): { ref: string; commitsAhead: number } | null => {
+    for (const ref of ["FETCH_HEAD", `origin/${base}`, base, `refs/heads/${base}`]) {
+      if (!ref) continue;
+      try {
+        const commitsAhead = Number.parseInt(git(worktreePath, ["rev-list", "--count", `${ref}..HEAD`]).trim(), 10) || 0;
+        return { ref, commitsAhead };
+      } catch {
+        /* base not present under this name; try the next form */
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Measure the worktree's diff against the run's base WITHOUT committing or pushing anything
+   * (DHK-1053).
+   *
+   * This exists because a deliver gate opens BEFORE the push runs, so `commitAndPush` - the only thing
+   * that had ever measured a diff - has not happened when a human is asked to approve one. Stages
+   * never commit either: their output sits uncommitted, and often untracked, in the shared worktree
+   * until deliver squashes the lot. So the probe must see the working tree, not just HEAD.
+   *
+   * Three details carry the correctness:
+   *
+   * - `--intent-to-add` registers untracked files in the index so `git diff` reports them at all. It
+   *   stages empty blobs only, and the next git operation of the run is `commitPending`'s plain
+   *   `add -A`, so the index mutation is inert. Without it a stage that only ADDS files - the common
+   *   case for a docs or scaffold change - would measure as zero.
+   * - The comparison point is the MERGE BASE, not the base ref itself. Diffing the base directly would
+   *   count commits the base gained since this run branched as if the run had reverted them.
+   * - Scratch and ignored paths are filtered out, so engine state never inflates the blast radius.
+   *
+   * Never throws: a probe is an informational nicety and must never be able to fail a stage. Returns
+   * undefined when the base cannot be resolved or nothing changed.
+   */
+  const probeFootprint = (ref: WorkspaceRef, opts: { base: string }): DiffFootprint | undefined => {
+    const worktreePath = ref.worktreePath;
+    try {
+      const resolved = resolveBaseRef(worktreePath, opts.base);
+      if (!resolved) return undefined;
+      const mergeBase = git(worktreePath, ["merge-base", resolved.ref, "HEAD"]).trim();
+      if (!mergeBase) return undefined;
+      git(worktreePath, ["add", "-A", "--intent-to-add", "--", "."]);
+      const entries = parseNumstat(git(worktreePath, ["diff", "--numstat", mergeBase])).filter(
+        (e) => !isScratchPath(worktreePath, e.path),
+      );
+      if (entries.length === 0) return undefined;
+      return deriveFootprint(entries, { cap: CHANGED_PATHS_CAP });
+    } catch (err) {
+      log.warn(`footprint probe skipped for ${ref.worktreePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   };
 
   /** The still-unmerged paths of an in-progress merge (`git diff --name-only --diff-filter=U`). */
@@ -884,6 +973,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
 
   return {
     worktreesDir,
+    probeFootprint,
     async createWorktree(spec) {
       const { repoId, gitUrl, baseBranch, runId } = spec;
       const branchName = sanitizeBranchName(spec.branch ?? `dahrk/${runId}`);
@@ -990,21 +1080,10 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
       // exactly like the one above, so resolve the attribution ONCE here and tear its key file down in
       // the same `finally` as the askpass helper.
       const attribution = resolveAttribution(opts);
-      // How far the branch is ahead of its base, for a human-readable "N commits" in Linear. Freshest
-      // form first: `FETCH_HEAD` is the base we just fetched above, then the remote-tracking ref. A bare
-      // name (`main`) is LAST because it resolves to a local head, which under the old `--mirror` layout
-      // happened to track the remote but is now ours and could be stale or absent (DHK-371). Best-effort,
-      // so a failure (base not present under any name) yields 0 rather than aborting the push.
-      let commitsAhead = 0;
-      for (const baseRef of ["FETCH_HEAD", `origin/${opts.base}`, opts.base, `refs/heads/${opts.base}`]) {
-        if (!baseRef) continue;
-        try {
-          commitsAhead = Number.parseInt(git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`]).trim(), 10) || 0;
-          break;
-        } catch {
-          /* base not present under this name; try the next form */
-        }
-      }
+      // How far the branch is ahead of its base, for a human-readable "N commits" in Linear. The ref
+      // ladder lives in `resolveBaseRef`, shared with the stage-end probe (DHK-1053) so the two agree
+      // on what "base" means. Best-effort: an unresolvable base yields 0 rather than aborting the push.
+      const commitsAhead = resolveBaseRef(worktreePath, opts.base)?.commitsAhead ?? 0;
 
       // Push to the REAL remote, never `origin` (which for a mirror-backed worktree may be the local
       // mirror). `HEAD:refs/heads/<branch>` targets the stable per-issue branch regardless of the
@@ -1056,21 +1135,14 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
             .split("\n")
             .map((l) => l.trim())
             .filter(Boolean);
-          // `--no-index` so a path is judged purely by the ignore rules, not by whether it is tracked:
-          // a scratch file a regression already committed is still recognised as ignored (plain
-          // `check-ignore` never reports a tracked path).
-          const isScratchPath = (p: string): boolean =>
-            p === SCRATCH_DIR ||
-            p.startsWith(`${SCRATCH_DIR}/`) ||
-            gitOk(worktreePath, ["check-ignore", "-q", "--no-index", "--", p]);
-          if (!delta.some((p) => !isScratchPath(p))) {
+          if (!delta.some((p) => !isScratchPath(worktreePath, p))) {
             return { headSha, pushed: false, nothingToCommit: true, commitsAhead, integration: "noop" };
           }
           // There IS a real delta, so compute the footprint once from the same range (DHK-615): the
           // per-file line stats via `--numstat`, scratch-filtered so engine state never inflates the
           // blast radius, then summed/scoped/capped by the pure `deriveFootprint`.
           const numstatEntries = parseNumstat(git(worktreePath, ["diff", "--numstat", "FETCH_HEAD...HEAD"])).filter(
-            (e) => !isScratchPath(e.path),
+            (e) => !isScratchPath(worktreePath, e.path),
           );
           if (numstatEntries.length > 0) {
             footprint = deriveFootprint(numstatEntries, { cap: CHANGED_PATHS_CAP });

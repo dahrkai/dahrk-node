@@ -882,6 +882,22 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // `dahrk_stage_complete`) and succeeded, resolve it from whichever channel produced content
           // so the engine can publish it (e.g. the `attach-document` action). Read-only; a miss returns
           // undefined and the action surfaces the absence. Ordinary code/build stages are not scanned.
+          // DHK-1053: measure the worktree against base so the deliver gate can quantify the change it
+          // asks a human to approve. It has to happen HERE, per stage, because the gate opens before
+          // the push - the only thing that had ever measured a diff - and because stage output sits
+          // uncommitted until deliver. Every stage shares the worktree, so each probe supersedes the
+          // last rather than adding to it. Best-effort by construction (`probeFootprint` swallows its
+          // own failures and returns undefined): a measurement is a nicety, and must never be able to
+          // fail an otherwise-ok stage.
+          // A telemetry-only run's `ref` is a bare scratch dir with no git repo and an empty base, so
+          // probing it could only ever fail; skip it rather than warn once per stage for nothing.
+          // The `typeof` guard is not ceremony either: `finish` is the ONLY path that returns the
+          // stage's result, so anything that throws here loses the whole stage, trace and all. A git
+          // service predating this method must degrade to "no measurement", not take the result too.
+          const footprint =
+            ref && !scratchOnly.has(runId) && typeof deps.gitService.probeFootprint === "function"
+              ? deps.gitService.probeFootprint(ref, { base: ref.baseBranch })
+              : undefined;
           const wantsArtifact = agentConfig?.emitArtifact !== undefined || handedBackDoc !== undefined;
           const resolved =
             status === "ok" && wantsArtifact
@@ -908,6 +924,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             // field has had no producer. Forwarded for EVERY stage, not just check jobs, so a hook or
             // an agent-run gate can populate it too.
             ...(verifications?.length ? { verifications } : {}),
+            ...(footprint ? { footprint } : {}),
           };
         };
 

@@ -9,6 +9,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Added
 
 - The hub can ask a running node for a live health check, answered from the node's own process in milliseconds. (#191)
+- Each stage now reports how much it changed, so an approval request can state the file count and line churn up front.
+
+### Changed
+
+- A stage's closing summary is now one plain sentence, with command names and file counts left to the change summary beside it.
 
 ## [0.4.2] - 2026-08-08
 
