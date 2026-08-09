@@ -6,6 +6,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- The hub can ask a running node for a live health check, answered from the node's own process in milliseconds. (#191)
+
+## [0.4.2] - 2026-08-08
+
+### Fixed
+
+- Worktree confinement denies an anchored path containing a space, so a quoted or escaped path can no longer escape the worktree. (#188)
+
 ## [0.4.1] - 2026-08-08
 
 ### Added
@@ -15,7 +25,6 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Fixed
 
 - A run waiting at a human gate keeps its worktree, so the approved push no longer fails with a missing worktree. (#185)
-- Worktree confinement now denies an anchored path that contains a space, so a quoted or escaped path can no longer escape the worktree.
 
 ## [0.4.0] - 2026-08-06
 
@@ -613,7 +622,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/dahrkai/dahrk-node/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/dahrkai/dahrk-node/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dahrkai/dahrk-node/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/dahrkai/dahrk-node/compare/v0.3.6...v0.3.7
