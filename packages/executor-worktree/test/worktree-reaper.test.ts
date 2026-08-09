@@ -8,9 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createGitService } from "../src/git-service.js";
 import { createWorktreeReaper } from "../src/worktree-reaper.js";
 
@@ -34,14 +34,29 @@ function makeBareRemote(): string {
   return remote;
 }
 
-/** Backdate a worktree's durable last-used clock (`.dahrk/scratch/state.json`) by `ms`. */
+/**
+ * Backdate a RUN's durable last-used clock by `ms`, given any of its worktrees.
+ *
+ * The reaper takes the NEWEST clock across a run - the run-level `state.json`, each worktree's, and
+ * both directories' mtimes - because over-estimating recency can only delay a collection, whereas
+ * under-estimating reaps a live run. So ageing one worktree is not enough: the run directory beside it
+ * would still look fresh and the whole run would be skipped. Ageing is a run-level act now, exactly as
+ * collection is.
+ */
 function ageBy(worktreePath: string, ms: number): void {
   const t = (Date.now() - ms) / 1000;
-  const state = join(worktreePath, ".dahrk", "scratch", "state.json");
-  mkdirSync(join(worktreePath, ".dahrk", "scratch"), { recursive: true });
-  if (!existsSync(state)) writeFileSync(state, "{}\n");
-  utimesSync(state, t, t);
-  utimesSync(worktreePath, t, t);
+  const runDir = dirname(worktreePath);
+  const touch = (p: string): void => {
+    if (existsSync(p)) utimesSync(p, t, t);
+  };
+  for (const dir of [runDir, ...readdirSync(runDir).map((d) => join(runDir, d))]) {
+    const state = join(dir, ".dahrk", "scratch", "state.json");
+    mkdirSync(join(dir, ".dahrk", "scratch"), { recursive: true });
+    if (!existsSync(state)) writeFileSync(state, "{}\n");
+    touch(state);
+    touch(dir);
+  }
+  touch(runDir);
 }
 
 const HOUR = 3_600_000;

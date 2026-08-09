@@ -25,7 +25,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { runIdOfWorktreePath } from "./worktree-layout.js";
+import { RUN_SCRATCH_DIR_NAME, runIdOfWorktreePath } from "./worktree-layout.js";
 
 /** Milliseconds. */
 const MINUTE = 60_000;
@@ -276,12 +276,37 @@ export function createWorktreeReaper(opts: ReaperOptions) {
 
       // Candidates = what git still has registered, UNION what is on disk. The union matters: a
       // worktree whose mirror was deleted is invisible to git but still occupies the disk.
+      // Two levels, because a run directory now CONTAINS its repos' worktrees rather than being one
+      // (DHK-358). The discriminator is a `.git` entry: a linked worktree always has one (a FILE
+      // pointing at `<mirror>/worktrees/<id>`), and a run directory never does. That is what lets an
+      // upgraded node read its own legacy flat directories and the new nested ones in the same sweep.
+      const onDiskRunDirs: string[] = [];
       const onDisk = (() => {
+        const out: string[] = [];
+        let top: string[];
         try {
-          return readdirSync(opts.worktreesDir).map((d) => canonical(join(opts.worktreesDir, d)));
+          top = readdirSync(opts.worktreesDir);
         } catch {
-          return [];
+          return out;
         }
+        for (const d of top) {
+          const runDir = join(opts.worktreesDir, d);
+          onDiskRunDirs.push(canonical(runDir));
+          if (existsSync(join(runDir, ".git"))) {
+            out.push(canonical(runDir)); // legacy flat: the run directory IS the worktree
+            continue;
+          }
+          try {
+            for (const child of readdirSync(runDir)) {
+              // `.dahrk` is the run's shared scratch, not a repo.
+              if (child === RUN_SCRATCH_DIR_NAME) continue;
+              out.push(canonical(join(runDir, child)));
+            }
+          } catch {
+            /* unreadable: the run directory still counts, via onDiskRunDirs */
+          }
+        }
+        return out;
       })();
       // Both sides canonicalised, so the same worktree from `readdir` and from git dedupes to one entry.
       const worktreePaths = [...new Set([...onDisk, ...[...registered.values()].flat()])];
@@ -314,7 +339,7 @@ export function createWorktreeReaper(opts: ReaperOptions) {
       }
       // A run directory with no worktree under it at all (the agent's checkout was hand-deleted, or a
       // provisioning failure left the shell) is still a run's worth of disk, and still ours to collect.
-      for (const d of onDisk) {
+      for (const d of onDiskRunDirs) {
         const runId = runIdOfWorktreePath(opts.worktreesDir, d);
         if (runId !== undefined && !byRun.has(runId)) {
           byRun.set(runId, { runDir: canonical(join(opts.worktreesDir, runId)), worktrees: [], legacy: false });
