@@ -12,150 +12,47 @@
  * unit-tested without a network or a specific host; `runDoctor` is the thin IO shell that gathers the
  * inputs, prints the report, and returns the process exit code (non-zero iff any check FAILED - a WARN
  * alone still passes).
+ *
+ * Since DHK-1059 those builders live in `@dahrk/edge` rather than here, because the HUB can now ask the
+ * same question over the socket (`node-health-request`) and `packages/edge` cannot import from this
+ * app. What stays here is what needs a child process - the supervisor probe - plus the terminal
+ * rendering, which is this command's own job.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
-import type { DetectOptions, HubProbeResult, RuntimeStatus } from "@dahrk/edge";
-import { probeHub as realProbeHub, probeRuntimeStatuses } from "@dahrk/edge";
+import type { CheckResult, CheckStatus, DetectOptions, HubProbeResult, RuntimeStatus } from "@dahrk/edge";
+import {
+  checkHub,
+  checkNode,
+  checkRuntimes,
+  checkToken,
+  probeHub as realProbeHub,
+  probeRuntimeStatuses,
+} from "@dahrk/edge";
 import { isAlive, parseLock } from "./lock.js";
 import { detectManager, probeService, unitPath, type ServiceStatus } from "./service.js";
 import { resolvePresence, type NodePresence } from "./status.js";
 import { lockFile, readState, stateFile } from "./state.js";
 import { dim, out as uiOut, symbol, verdict, type Level } from "./ui.js";
 
-/** The minimum Node major this client supports (README: "Requires Node 22+"). */
-export const MIN_NODE_MAJOR = 22;
-
-export type CheckStatus = "pass" | "warn" | "fail";
-export interface CheckResult {
-  status: CheckStatus;
-  label: string;
-  detail?: string;
-}
+// The pure check builders now live in `@dahrk/edge` (DHK-1059), so this command and the hub's
+// `node-health-request` handler answer from ONE implementation. Two copies of a health check is how a
+// node comes to report itself fine to one caller and broken to another. Re-exported rather than merely
+// imported because `preflight.ts` and both test files import them from here.
+export {
+  MIN_NODE_MAJOR,
+  checkNode,
+  checkRuntimes,
+  checkHub,
+  checkToken,
+} from "@dahrk/edge";
+export type { CheckResult, CheckStatus } from "@dahrk/edge";
 
 /** The doctor's own vocabulary, mapped onto the one every command shares. It used to print `[PASS]` /
  *  `[WARN]` / `[FAIL]` tags that existed nowhere else in the tool; now a tick means the same thing here as
  *  it does in `status` and `run preflight`. */
 const LEVEL: Record<CheckStatus, Level> = { pass: "ok", warn: "warn", fail: "fail" };
-
-/** Check the running Node version against the supported floor. */
-export function checkNode(nodeVersion: string): CheckResult {
-  const major = Number.parseInt(nodeVersion.replace(/^v/, "").split(".")[0] ?? "", 10);
-  if (Number.isNaN(major)) {
-    return { status: "warn", label: "Node version", detail: `could not parse "${nodeVersion}"` };
-  }
-  return major >= MIN_NODE_MAJOR
-    ? { status: "pass", label: "Node version", detail: `v${major} (>= ${MIN_NODE_MAJOR})` }
-    : {
-        status: "fail",
-        label: "Node version",
-        detail: `v${major} is too old; Dahrk needs Node ${MIN_NODE_MAJOR}+`,
-      };
-}
-
-/**
- * Check which agent runtimes this node can actually serve. None is a warning (the node boots but
- * serves nothing).
- *
- * Every runtime is listed, available or not, each with the reason from the probe. Reporting only the
- * good ones is what made the old output unactionable: an operator saw "none detected" and went
- * looking for software to install, when the answer is now usually credentials.
- */
-export function checkRuntimes(statuses: RuntimeStatus[]): CheckResult {
-  const available = statuses.filter((s) => s.available);
-  const describe = (s: RuntimeStatus) =>
-    `${s.runtime} ${s.available ? "" : "unavailable "}(${s.detail})`.replace("  ", " ");
-  if (available.length === 0) {
-    return {
-      status: "warn",
-      label: "Agent runtimes",
-      detail: `none available, so the node will serve no Jobs. ${statuses.map(describe).join("; ")}`,
-    };
-  }
-  return { status: "pass", label: "Agent runtimes", detail: statuses.map(describe).join(", ") };
-}
-
-/** Hub reachability. An enrolment rejection still counts as REACHED (the token, not the hub, is the
- *  problem - reported separately by {@link checkToken}). */
-export function checkHub(hubUrl: string | undefined, probe: HubProbeResult | undefined): CheckResult {
-  if (!hubUrl) {
-    return {
-      status: "fail",
-      label: "Hub reachability",
-      detail: "no hub URL configured (set DAHRK_HUB_URL or pass --hub-url)",
-    };
-  }
-  if (!probe) {
-    return { status: "warn", label: "Hub reachability", detail: `not checked (${hubUrl})` };
-  }
-  if (probe.ok) {
-    return { status: "pass", label: "Hub reachability", detail: `connected to ${hubUrl}` };
-  }
-  switch (probe.reason) {
-    case "rejected":
-      return {
-        status: "pass",
-        label: "Hub reachability",
-        detail: `reachable at ${hubUrl} (enrolment rejected - see token check)`,
-      };
-    case "unreachable":
-      return { status: "fail", label: "Hub reachability", detail: `cannot reach ${hubUrl}: ${probe.detail}` };
-    case "timeout":
-      return {
-        status: "fail",
-        label: "Hub reachability",
-        detail: `${hubUrl} connected but sent no welcome: ${probe.detail}`,
-      };
-    case "closed":
-      return {
-        status: "fail",
-        label: "Hub reachability",
-        detail: `${hubUrl} closed the socket (${probe.code}): ${probe.detail}`,
-      };
-  }
-}
-
-/** Enrolment-token presence + validity. Presence is known locally; validity comes from the probe. */
-export function checkToken(
-  tokenPresent: boolean,
-  hubUrl: string | undefined,
-  probe: HubProbeResult | undefined,
-): CheckResult {
-  if (!tokenPresent) {
-    return {
-      status: "fail",
-      label: "Enrolment token",
-      detail: "no token (pass --token or set DAHRK_ENROL_TOKEN)",
-    };
-  }
-  if (!hubUrl || !probe) {
-    return { status: "warn", label: "Enrolment token", detail: "present but not verified (no hub to check against)" };
-  }
-  if (probe.ok) {
-    return { status: "pass", label: "Enrolment token", detail: `valid (tenant ${probe.tenantId})` };
-  }
-  if (probe.reason === "rejected") {
-    switch (probe.code) {
-      case 4400:
-        return { status: "fail", label: "Enrolment token", detail: `hub saw no token: ${probe.detail}` };
-      case 4401:
-        return { status: "fail", label: "Enrolment token", detail: "invalid, expired, or revoked" };
-      case 4404:
-        return { status: "fail", label: "Enrolment token", detail: "the token's pool no longer exists" };
-      case 4503:
-        return {
-          status: "warn",
-          label: "Enrolment token",
-          detail: "cannot verify: the hub has no enrolment secret configured",
-        };
-      default:
-        return { status: "fail", label: "Enrolment token", detail: probe.detail };
-    }
-  }
-  // Hub unreachable/timeout/closed: we have a token but could not put it to the test.
-  return { status: "warn", label: "Enrolment token", detail: "present but unverified (hub not reachable)" };
-}
 
 /**
  * Is anything on this host actually going to RUN the node?
@@ -234,7 +131,10 @@ export interface DoctorDeps {
 
 /** The real presence gathering: ask the supervisor, ask the pidfile, and let `resolvePresence` - the same
  *  function `status` uses - decide what the two of them mean together. */
-function hostPresence(): { presence: NodePresence; service?: ServiceStatus } {
+/** The supervisor's view of this node. Exported since DHK-1059: the socket's `probeHostChecks` needs
+ *  exactly this, and a second copy of the manager/unit/lock/state resolution is precisely how
+ *  `service.ts` and `status.ts` once came to disagree about where the logs lived. */
+export function hostPresence(): { presence: NodePresence; service?: ServiceStatus } {
   const manager = detectManager(osPlatform());
   let service: ServiceStatus | undefined;
   if (manager !== "unsupported") {

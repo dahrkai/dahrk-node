@@ -28,6 +28,22 @@ export type {
 export { evaluatePolicies, denyToolRule } from "./policy.js";
 export type { PolicyEvent, PolicyRule } from "./policy.js";
 export { detectRuntimes, probeRuntimeStatuses } from "./detect-runtimes.js";
+export {
+  buildNodeHealthReport,
+  checkDiskSpace,
+  checkHub,
+  checkNode,
+  checkRuntimes,
+  checkToken,
+  checkTools,
+  checkWorktreeRoot,
+  isWritable,
+  nearestExisting,
+  synthesise,
+  LOW_DISK_BYTES,
+  MIN_NODE_MAJOR,
+} from "./node-health.js";
+export type { CheckResult, CheckStatus, ToolPresence } from "./node-health.js";
 export type { CredentialSource, DetectOptions, RuntimeStatus } from "./detect-runtimes.js";
 /** This node's memory of a credential the provider refused, so detection stops advertising a runtime
  *  whose credential the provider has refused (DHK-998). */

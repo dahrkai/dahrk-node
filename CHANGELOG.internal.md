@@ -24,9 +24,63 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- **Live node health over the socket (DHK-1059).** New `node-health-request` / `node-health-report`
+  frame pair, the first request/response pair on this socket - `upgrade`, `policy` and `cancel` are
+  all fire-and-forget. `ws-client.ts` answers in-process: Node version, runtime resolution, disk and
+  worktree writability, plus whatever the injected `probeHostChecks` adds. Advertised as the
+  `health-probe` capability on `hello`, which is what the hub gates on rather than a client version,
+  so an un-upgraded fleet is answered "your client is too old" instantly instead of eating the hub's
+  timeout.
+
+  Two facts are synthesised rather than probed: hub reachability and token validity. The request
+  arrived on a live, welcomed socket, so that IS the evidence - and re-probing would open a second
+  WebSocket and risk spending a one-shot enrolment token (the DHK-1041 shape).
+
+  The repo checks (`checkRepo`/`probeRepo`) are deliberately excluded and stay in the CLI. That is
+  structural, not stylistic: the hub summarises this report into a durable node event, and the repo
+  checks are the only ones whose `detail` strings can carry a customer path. A gatherer that takes no
+  repo path cannot leak one. "Can this node reach my repo" needs a clone and a credential, so it stays
+  a preflight run - now pinnable to a chosen node via `JobRequest.pinnedNodeId`.
+
 ### Changed
 
 - `packaging/homebrew/README.md` updated to reflect that `dahrkai/homebrew-tap` exists; removed stale "does not exist yet" bootstrap steps. (DHK-1053)
+
+- **The pure health-check builders moved from `apps/edge-node` into `packages/edge/src/node-health.ts`
+  (DHK-1059).** `packages/edge` cannot import from `apps/edge-node` (the dependency runs the other
+  way), so a socket handler answering "is this node healthy" would have had to reimplement it - and two
+  implementations of a health check is how a node comes to report itself fine to one caller and broken
+  to another. `doctor.ts` and `preflight.ts` re-export them, so their callers and tests are unchanged.
+
+  Anything needing `node:child_process` deliberately did NOT move: this package is the wire client and
+  stays free of it, the same line `onUpgrade` draws. The supervisor and PATH probes are injected as
+  `EdgeOptions.probeHostChecks`, implemented in `apps/edge-node/src/node-health-probe.ts` with async
+  `execFile` rather than the CLI's `execFileSync` - this runs on the socket's event loop, where a
+  synchronous spawn would stall heartbeats and trace streaming for every run sharing the node.
+
+- **The worktree-root probe must judge the nearest EXISTING ancestor, not the root itself.** The root
+  is created on demand, so on a node that has not run a job yet it does not exist - and probing it
+  directly makes `checkWorktreeRoot` fail, which the fold turns into `unsound`: a brand-new, perfectly
+  healthy machine told no stage can run on it. That is the most damaging thing this report can say,
+  and a new node is exactly the one whose health an operator checks first. The CLI's preflight already
+  did this correctly (`nearestExisting`); the socket handler did not, and `nearestExisting` is now
+  shared rather than duplicated. Caught by CI, not locally, because the default worktree root resolves
+  under the author's home directory where it already existed - so `ws-client-health.test.ts` now pins
+  `worktreesDir` to a path that does NOT exist, modelling a fresh node instead of a warm laptop.
+
+- `apps/edge-node/src/doctor.ts` exports `hostPresence` so the socket probe reuses the
+  manager/unit/lock/state resolution rather than copying it (the copy is how `service.ts` and
+  `status.ts` once came to disagree about where the logs lived).
+
+- **Catalog moved to `@dahrk/contracts` `^0.16.0`**, which carries the new wire frames and
+  `NodeHealthReport`. Contracts publishes from `dahrk-harness` `main` on a `package.json` bump
+  (`.github/workflows/publish-contracts.yml`), so that side had to land first: until it did, `^0.16.0`
+  did not resolve and pnpm failed at INSTALL rather than at typecheck, which blocks `pnpm lint` and
+  `pnpm test` outright. Hence the bump is the last commit on this branch rather than the first - worth
+  remembering for the next cross-repo wire change, because the obvious ordering (bump first, then
+  write the code) makes the whole branch unrunnable.
 
 ## [0.4.2] - 2026-08-08
 
