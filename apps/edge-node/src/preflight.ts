@@ -23,20 +23,34 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants as fsConstants, existsSync, statfsSync } from "node:fs";
+import { statfsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HubProbeResult } from "@dahrk/edge";
 import { probeHub as realProbeHub } from "@dahrk/edge";
+import {
+  checkDiskSpace,
+  checkTools,
+  checkWorktreeRoot,
+  synthesise,
+  isWritable,
+  nearestExisting,
+  LOW_DISK_BYTES,
+  type ToolPresence,
+} from "@dahrk/edge";
 import { checkHub, checkNode, checkToken, type CheckResult } from "./doctor.js";
 import { stateDir } from "./state.js";
 import { dim, out as uiOut, symbol } from "./ui.js";
 
+// The pure host checks and the deterministic read now live in `@dahrk/edge` (DHK-1059), so this
+// command and the hub's `node-health-request` handler answer from ONE implementation. Re-exported
+// because the tests and callers import them from here.
+export { checkDiskSpace, checkTools, checkWorktreeRoot, synthesise, LOW_DISK_BYTES } from "@dahrk/edge";
+export type { ToolPresence } from "@dahrk/edge";
+
 /** The public web surface that renders a full run report; the CLI prints a deep link to it. */
 export const REPORT_BASE_URL = "https://app.dahrk.ai/r";
 
-/** Free-space floor below which we raise a finding (a workflow clones a repo and writes a worktree). */
-const LOW_DISK_BYTES = 512 * 1024 * 1024; // 512 MiB
 
 /** The ordered stages of the preflight workflow, matching the CLI-twin mock (`[1/5] check node …
  *  [5/5] report`). The three `check-*` stages each aggregate several deterministic sub-checks; `analyse`
@@ -65,18 +79,6 @@ export interface RepoProbe {
   detail?: string;
 }
 
-/** Which host tools are present. Absence of anything but `git` is a finding, not a floor failure.
- *
- *  The SSH key, `claude` login and `gh` CLI checks are gone (DHK-1006). Every credential is brokered by
- *  the hub, so none of them is consulted at run time: git authenticates with a minted installation
- *  token over HTTPS, the PR is opened hub-side through the GitHub App, and inference authenticates on
- *  the auth profile bound to this node's pool. Warning about their absence taught the operator to look
- *  in exactly the wrong place. */
-export interface ToolPresence {
-  git: boolean;
-  docker: boolean;
-}
-
 /** Host facts the check stages read, gathered by the IO shell (injectable so the sequencer unit-tests
  *  without touching the real host). */
 export interface HostFacts {
@@ -86,26 +88,6 @@ export interface HostFacts {
   freeDiskBytes?: number;
   tools: ToolPresence;
   repo: RepoProbe;
-}
-
-// -- pure sub-checks (host node group) ---------------------------------------
-
-/** The client/worktree floor beyond the Node-version check: is the clone target writable, and is there
- *  enough free space to clone a repo and build a worktree? Unwritable is a hard floor failure. */
-export function checkWorktreeRoot(writable: boolean): CheckResult {
-  return writable
-    ? { status: "pass", label: "Worktree root", detail: "writable" }
-    : { status: "fail", label: "Worktree root", detail: "not writable; the node cannot create worktrees here" };
-}
-
-export function checkDiskSpace(freeBytes: number | undefined): CheckResult {
-  if (freeBytes === undefined) {
-    return { status: "warn", label: "Free space", detail: "could not be determined" };
-  }
-  const gib = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
-  return freeBytes >= LOW_DISK_BYTES
-    ? { status: "pass", label: "Free space", detail: `${gib} GiB` }
-    : { status: "warn", label: "Free space", detail: `only ${gib} GiB free; a clone + worktree may not fit` };
 }
 
 // -- pure sub-checks (repo group) --------------------------------------------
@@ -127,43 +109,12 @@ export function checkRepo(repo: RepoProbe): CheckResult {
   return { status: "pass", label: "Repository", detail: `${repo.path} on ${repo.baseBranch ?? "(detached)"}` };
 }
 
-// -- pure sub-checks (tools group) -------------------------------------------
-
-/** The tool floor. `git` is required (a worktree run cannot happen without it) so its absence fails;
- *  every other tool is a graceful-degradation finding (no ssh key / no claude / no gh / no docker). */
-export function checkTools(tools: ToolPresence): CheckResult[] {
-  const git: CheckResult = tools.git
-    ? { status: "pass", label: "git", detail: "installed" }
-    : { status: "fail", label: "git", detail: "not found; git is required to run a workflow" };
-  const finding = (present: boolean, label: string, missing: string): CheckResult =>
-    present
-      ? { status: "pass", label, detail: "available" }
-      : { status: "warn", label, detail: missing };
-  return [git, finding(tools.docker, "docker", "not present; container stages are unavailable")];
-}
-
 // -- analyse (deterministic plain-English read) ------------------------------
 
 /** Downgrade a hub/token check to a finding: a terminal preflight is issue-less and offline-capable, so
  *  an unreachable hub must never make the *floor* unsound - it is an early warning, not a failure. */
 function asFinding(check: CheckResult): CheckResult {
   return check.status === "fail" ? { ...check, status: "warn" } : check;
-}
-
-/** The `analyse` stage: turn the deterministic findings into the plain-English read the report leads
- *  with. The central workflow runs this on Haiku; the CLI twin synthesises it deterministically so the
- *  run needs no inference and no network. */
-export function synthesise(checks: CheckResult[]): string {
-  const fails = checks.filter((c) => c.status === "fail");
-  const warns = checks.filter((c) => c.status === "warn");
-  const list = (cs: CheckResult[]): string => cs.map((c) => `${c.label.toLowerCase()} (${c.detail ?? "finding"})`).join("; ");
-  if (fails.length > 0) {
-    return `The floor is unsound: ${list(fails)}. Fix ${fails.length === 1 ? "this" : "these"} before running a workflow here.`;
-  }
-  if (warns.length > 0) {
-    return `The floor is sound, with ${warns.length} early warning${warns.length === 1 ? "" : "s"}: ${list(warns)}. ${warns.length === 1 ? "It does" : "These do"} not block a run, but ${warns.length === 1 ? "is" : "are"} worth addressing.`;
-  }
-  return "The floor is sound. Node, repo, and tools all check out - this host is ready to run a workflow.";
 }
 
 // -- orchestration -----------------------------------------------------------
@@ -320,32 +271,12 @@ function commandPresent(cmd: string): boolean {
 }
 
 
-/** Resolve a directory's writability by probing access (W_OK); a missing dir is not writable. */
-function writable(dir: string): boolean {
-  try {
-    accessSync(dir, fsConstants.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** The worktree root the node clones into: `DAHRK_WORKTREES_DIR` or `~/.dahrk/worktrees`. Its *parent*
  *  being writable is what matters (the node mkdirs the root on demand), so probe the nearest existing
  *  ancestor. The state dir comes from `state.ts` rather than a second copy of the fallback chain: that
  *  copy is exactly how `service.ts` and `status.ts` once disagreed about where the logs lived. */
 function worktreeRoot(env: NodeJS.ProcessEnv): string {
   return env.DAHRK_WORKTREES_DIR ?? join(stateDir(env), "worktrees");
-}
-
-function nearestExisting(dir: string): string {
-  let cur = dir;
-  while (!existsSync(cur)) {
-    const parent = join(cur, "..");
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return cur;
 }
 
 function freeDiskBytes(dir: string): number | undefined {
@@ -402,7 +333,7 @@ export function probeRepo(repoPath: string): RepoProbe {
 export function gatherHostFacts(repoPath: string): HostFacts {
   const root = worktreeRoot(process.env);
   return {
-    worktreeRootWritable: writable(nearestExisting(root)),
+    worktreeRootWritable: isWritable(nearestExisting(root)),
     freeDiskBytes: freeDiskBytes(root),
     tools: {
       git: commandPresent("git"),

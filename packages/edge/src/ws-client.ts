@@ -15,9 +15,20 @@ import { randomUUID } from "node:crypto";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
 import type { EdgeToHub, HubToEdge, InstallChannel, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
+import {
+  buildNodeHealthReport,
+  checkDiskSpace,
+  checkNode,
+  checkRuntimes,
+  checkWorktreeRoot,
+  isWritable,
+  nearestExisting,
+  type CheckResult,
+} from "./node-health.js";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { classifyRuntimeError, createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
-import { collectHealth, HealthCounters } from "./health.js";
+import { collectHealth, diskFreeBytes, HealthCounters } from "./health.js";
+import { probeRuntimeStatuses } from "./detect-runtimes.js";
 import { announceableJobs, nullJobLedger, type JobLedger, type JobLedgerEntry } from "./job-ledger.js";
 import { ceilingFromEnv, LogShipper } from "./log-shipper.js";
 import { createNodeLogger, levelFromEnv, type NodeLogger } from "./logger.js";
@@ -47,7 +58,7 @@ const RECONNECT_MAX_MS = 30_000;
 
 /** What this build can do beyond running an agent runtime. Advertised on `hello` so the hub can
  *  default-deny a job kind an older client would silently mishandle. */
-const NODE_CAPABILITIES: NodeCapability[] = ["check"];
+const NODE_CAPABILITIES: NodeCapability[] = ["check", "health-probe"];
 
 /** How often a PARKED node re-reads its token. Slow on purpose: nothing is dialled and no socket is held
  *  while parked, so this is the whole cost of waiting, and re-enrolment is a human-speed act. */
@@ -128,6 +139,21 @@ export interface EdgeOptions {
    *  boot-time token instead meant that the moment a parked node healed, it wrote the REJECTED token
    *  back over the good one, and the next reboot parked forever on a token nothing could refresh. */
   onEnrolled?: (welcome: { name: string; tenantId: string; enrolToken: string }) => void;
+  /**
+   * Gather the health facts that need a CHILD PROCESS: whether a supervisor unit is installed and
+   * running, and whether `git`/`docker` resolve on PATH (DHK-1059).
+   *
+   * Injected for the same reason `onUpgrade` is: this package is the wire client and stays free of
+   * `node:child_process`. Everything else in a health report - Node version, runtime resolution, disk,
+   * worktree writability - is answerable from this process, so only these two need the seam.
+   *
+   * MUST be async and must not block: it runs on the socket's event loop, where a synchronous
+   * `execFileSync` would stall heartbeats and trace streaming for every run sharing this node.
+   *
+   * Omitted (a library embedding, the tests) simply means those sections are absent from the report
+   * rather than wrong - the node still answers, with less.
+   */
+  probeHostChecks?: () => Promise<CheckResult[]>;
   /**
    * Apply a hub-driven self-update (DHK-1001/DHK-341). Called when the hub sends an `upgrade` frame to a
    * node whose operator opted into `portal` upgrades.
@@ -229,6 +255,10 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
    *  accepted upgrade ends in a restart, so a socket that drops mid-upgrade is the expected path and a
    *  frame re-sent across it must not start a second package-manager run against the same install. */
   let upgrading = false;
+  /** Whether a health probe is already running (DHK-1059). Single-flight: unlike `upgrading` this DOES
+   *  clear in a `finally`, because a health check ends in a reply rather than a restart, so the latch is
+   *  only ever held for the milliseconds the probe takes. */
+  let healthInFlight = false;
   /** The poll a parked node runs. Deliberately NOT unref'd: while parked there is no socket and no
    *  heartbeat, so this timer is the only thing holding the event loop open, and it holding the process
    *  alive is the point - an exited node cannot notice that its token was replaced. */
@@ -667,6 +697,63 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
           log.error({ err: e, target: msg.target }, `UPGRADE_FAILED:${msg.target} ${(e as Error).message}`);
           upgrading = false;
         }
+      }
+      return;
+    }
+    if (msg.type === "node-health-request") {
+      // A LIVE health query (DHK-1059). The only request/response frame on this socket: everything else
+      // the hub sends is fire-and-forget, so this is the one place the node must answer.
+      //
+      // Answered entirely in-process, in milliseconds, with no repo and no worktree. Two facts are
+      // SYNTHESISED rather than probed, and deliberately: this request arrived on a live, welcomed
+      // socket, so the hub IS reachable and the token WAS accepted - that is stronger evidence than a
+      // probe would be. Re-probing would open a second WebSocket, blow the budget the hub is waiting
+      // against, and risk spending a one-shot enrolment token (the DHK-1041 shape).
+      //
+      // The repo checks are absent by construction, not omission: the gatherer takes no repo path, so a
+      // node-scoped report cannot carry a customer path into the hub's durable node event.
+      if (healthInFlight) {
+        // A double-click, or a hub re-send. Probing twice concurrently would just contend for the same
+        // child processes; the reply the first one produces answers both.
+        log.warn({ requestId: msg.requestId }, `HEALTH_DUPLICATE:${msg.requestId}`);
+        return;
+      }
+      healthInFlight = true;
+      const startedAt = Date.now();
+      try {
+        const checks: CheckResult[] = [
+          checkNode(process.versions.node),
+          checkRuntimes(await probeRuntimeStatuses({})),
+          // `nearestExisting`, not the dir itself: the worktree root is created on demand, so on a
+          // node that has not run a job yet it does not exist - and probing it directly reports a
+          // perfectly healthy new machine as `unsound`. A new node is exactly who checks health first.
+          checkWorktreeRoot(isWritable(nearestExisting(gitService.worktreesDir))),
+          checkDiskSpace(diskFreeBytes(nearestExisting(gitService.worktreesDir))),
+          { status: "pass", label: "Hub reachability", detail: `connected to ${opts.hubUrl}` },
+          { status: "pass", label: "Enrolment token", detail: "accepted by the hub" },
+          ...(opts.probeHostChecks ? await opts.probeHostChecks() : []),
+        ];
+        send({
+          type: "node-health-report",
+          requestId: msg.requestId,
+          report: buildNodeHealthReport(checks, Date.now() - startedAt, Date.now()),
+        });
+      } catch (e) {
+        // A probe that throws must STILL reply, the same rule the upgrade branch documents. Silence
+        // would make the hub wait out its timeout and report "the node did not answer", which is a
+        // claim about the node being unreachable rather than about a health check that errored.
+        log.error({ err: e, requestId: msg.requestId }, `HEALTH_ERROR:${(e as Error).message}`);
+        send({
+          type: "node-health-report",
+          requestId: msg.requestId,
+          report: buildNodeHealthReport(
+            [{ status: "fail", label: "Health check", detail: `could not run: ${(e as Error).message}` }],
+            Date.now() - startedAt,
+            Date.now(),
+          ),
+        });
+      } finally {
+        healthInFlight = false;
       }
       return;
     }
