@@ -43,12 +43,19 @@
  * model provider-aware (`resolveStageModelId`) and passes it as `--model <id>` on the container command,
  * failing loudly before this session is ever constructed rather than substituting silently.
  *
- * Still unsupported on the container path (DHK-982): brokered MCP. The embedded path's extension bridge
- * (`createBrokeredMcpExtension`) assumes an in-process Pi session it can register tools onto; there is no
- * in-process session here, and threading the gateway over RPC is a larger piece of work. A stage that
- * declares brokered MCP servers gets none of them inside the container - a deliberate gap, no longer a
- * silent one: the class declares `capabilities.brokeredMcp = false` (DHK-968), so the runner emits a
- * `capability-degraded` trace event when a stage needs it rather than dropping the servers unremarked.
+ * Still unsupported on the container path: brokered MCP - a protocol limit of the pinned Pi, not merely
+ * "a larger piece of work" (DHK-1055 confirmed this by inspecting the SDK). The embedded path's extension
+ * bridge (`createBrokeredMcpExtension`) registers each server's tools onto an in-process Pi session;
+ * there is no in-process session here, and Pi 0.84.1's `--mode rpc` protocol offers no substitute. It has
+ * no command to register the brokered tools so the model can call them, and no frame to tunnel an MCP call
+ * back to the host: its only subprocess-initiated host-callbacks are the extension-UI dialogs the gate
+ * and elicitation above ride, and there is no MCP equivalent because Pi ships no built-in MCP concept for
+ * one to hang off. The gate/elicit precedent does not transfer - those piggyback on Pi's NATIVE per-tool
+ * `tool_call` hook and native custom tools; MCP has no native Pi hook to piggyback on. So the gateway
+ * cannot be threaded over this channel at the pin. A stage that declares brokered MCP servers gets none
+ * of them inside the container - a deliberate gap, no longer a silent one: the class declares
+ * `capabilities.brokeredMcp = false` (DHK-968), so the runner emits a `capability-degraded` trace event
+ * when a stage needs it rather than dropping the servers unremarked.
  *
  * Degradation (Open Question 1): the RPC session has no `agent` handle, so `summarise`'s
  * tool-denial (which mutates `s.agent.state.tools`) is a no-op here. Accepted for the first cut

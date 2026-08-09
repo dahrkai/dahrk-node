@@ -24,6 +24,42 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- DHK-1055: investigated threading brokered MCP to the container-isolated Pi over the existing RPC
+  channel and found it not possible against the pinned `@earendil-works/pi-coding-agent@0.84.1`, so
+  `PiRpcSession.capabilities.brokeredMcp` stays `false` and the honest `capability-degraded` path is
+  kept. Only the stale doc comments in `pi-container.ts` and `pi-rpc-client.ts` - which framed the gap
+  as merely "a larger piece of work" pointing at closed tickets (DHK-982/DHK-968) - were corrected to
+  state the concrete protocol limit and cite DHK-1055.
+
+  Findings from inspecting the installed SDK (`node_modules/@earendil-works/pi-coding-agent`):
+    - Pi ships **no built-in MCP at all** (`docs/usage.md`: "It intentionally does not include built-in
+      MCP"). The embedded path implements MCP entirely on the dahrk side, via an in-process extension
+      (`createBrokeredMcpExtension` -> `pi.registerTool`), which a `pi --mode rpc` subprocess has no
+      analogue for: the host cannot inject an in-process extension into the child.
+    - The RPC command surface (`dist/modes/rpc/rpc-mode.js`; `docs/rpc.md`, which never mentions MCP) is
+      a **closed switch** - prompt/steer/abort/get_state/set_model/bash/get_session_stats/fork/… - with
+      no tool- or MCP-registration command. So the host cannot declare the brokered servers' tools into
+      the running agent for the model to call.
+    - The only subprocess-initiated host-callback the protocol emits is `extension_ui_request` (a fixed
+      set of UI dialogs: select/confirm/input/editor/notify/setStatus/setWidget/setTitle). The DHK-981
+      gate and elicitation ride this, but there is **no generic frame to tunnel an MCP call** back to the
+      host. The gate/elicit precedent does not transfer because those piggyback on Pi's native per-tool
+      `tool_call` hook and native custom tools; MCP has no native Pi hook to piggyback on.
+    - `grep -ri mcp` across the whole `dist/` finds only a coincidental match in a vendored syntax
+      highlighter - no MCP implementation anywhere in Pi.
+
+  This is outcome (C) of `.dahrk/scratch/plan.md`: the ticket's approach ("thread the node-local MCP
+  gateway to the containerised agent over the existing RPC channel") cannot be delivered at this pin,
+  and the plan's instruction on (C) is to keep the honest declaration and record the finding rather than
+  weaken the gateway's `127.0.0.1` binding or ship a token into the container to force it. Delivering
+  brokered MCP to the container would require either an upstream Pi RPC MCP/tool-registration surface, or
+  a **new** dahrk protocol (host lists the tools and injects them via a spawn arg, plus an image-side
+  bridge extension emitting an `mcp_request`/`mcp_response` stdio tunnel like the gate's
+  `tool_call_request`) - beyond "the existing RPC channel" the ticket scoped, and unverifiable from this
+  repo since that bridge lives in the `dahrk/pi:latest` image, not here.
+
 ## [0.4.4] - 2026-08-09
 
 ### Changed

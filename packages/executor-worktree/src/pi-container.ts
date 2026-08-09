@@ -17,11 +17,17 @@
  *   - Teardown: `dispose()` -> `docker kill <containerName>`. `--rm` removes the container
  *     automatically on exit.
  *
- * Still unsupported here (DHK-982): brokered MCP. The embedded bridge assumes an in-process session to
- * register tools onto; threading the gateway over RPC is a larger piece of work, so a stage's brokered
- * MCP servers do not reach the containerised agent. No longer a silent gap (DHK-968): `PiRpcSession`
- * declares `capabilities.brokeredMcp = false`, so a stage that needs it gets a loud `capability-degraded`
- * trace event from the runner rather than losing the servers unremarked.
+ * Still unsupported here: brokered MCP. This is a protocol limit of the pinned Pi, not merely "a larger
+ * piece of work" - DHK-1055 established it by inspecting the SDK. Pi 0.84.1 ships no built-in MCP at all
+ * (`docs/usage.md`), and its `--mode rpc` protocol offers no substitute for the embedded in-process
+ * bridge: the command surface (`dist/modes/rpc/rpc-mode.js`; `docs/rpc.md` never mentions MCP) is a
+ * closed switch with no command to register the brokered servers' tools so the model can call them, and
+ * the only subprocess-initiated host-callback it emits is a fixed set of extension-UI dialogs
+ * (select/confirm/input/editor) - which the gate and elicitation ride, but which is no MCP tunnel. So the
+ * node-local gateway cannot be threaded to the container over the existing RPC channel at this pin. No
+ * longer a silent gap (DHK-968): `PiRpcSession` declares `capabilities.brokeredMcp = false`, so a stage
+ * that needs it gets a loud `capability-degraded` trace event from the runner rather than losing the
+ * servers unremarked.
  *
  * Image: `DAHRK_PI_IMAGE` env var (default: `dahrk/pi:latest`). Override per-environment or
  * in tests via the `image` option.
