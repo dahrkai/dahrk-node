@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   ElicitChoice,
   ElicitQuestion,
@@ -296,13 +296,37 @@ const digest = (value: unknown): string =>
   `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16)}`;
 
 /** Merge this stage's progress into the engine-owned scratch state.json. */
-function writeScratchState(ref: WorkspaceRef, job: JobRequest, attempt: number, status: string): void {
+function writeScratchState(
+  ref: WorkspaceRef,
+  job: JobRequest,
+  attempt: number,
+  status: string,
+  worktrees: readonly WorkspaceRef[] = [],
+): void {
   const statePath = join(ref.scratchPath, "state.json");
-  let state: { runId: string; tenantId: string; stages: Record<string, unknown> };
+  let state: {
+    runId: string;
+    tenantId: string;
+    stages: Record<string, unknown>;
+    repos?: Array<{ repo: string; repoId: string; path: string; branch?: string; baseBranch: string }>;
+  };
   try {
     state = JSON.parse(readFileSync(statePath, "utf8"));
   } catch {
     state = { runId: job.runId, tenantId: job.tenantId, stages: {} };
+  }
+  // The run's repo set (DHK-251), so an agent can discover its siblings on disk as well as in the
+  // prompt, and so it survives a stage boundary. Only written for a genuinely multi-repo run, keeping
+  // `state.json` byte-identical for the single-repo runs that are still the norm.
+  if (worktrees.length > 1) {
+    state.repos = worktrees.map((w) => ({
+      repo: w.repo,
+      repoId: w.repoId,
+      // Relative to the primary, which is the agent's working directory - the form it would type.
+      path: w.worktreePath === ref.worktreePath ? "." : `../${basename(w.worktreePath)}`,
+      ...(w.branch ? { branch: w.branch } : {}),
+      baseBranch: w.baseBranch,
+    }));
   }
   state.stages[job.stageId] = { currentAttempt: attempt, status };
   mkdirSync(ref.scratchPath, { recursive: true });
@@ -563,7 +587,18 @@ export function runtimeUsesMcpGateway(runtime: Runner["runtime"]): boolean {
 }
 
 export function createStageRunner(deps: StageRunnerDeps): StageRunner {
+  /** runId -> the run's PRIMARY worktree. Every existing reader wants this one: it is the agent's
+   *  working directory, the repo a check stage runs in, and the repo `deliver` reports on. */
   const worktrees = new Map<string, WorkspaceRef>();
+  /** runId -> the run's SIBLING worktrees (DHK-251/DHK-358), in the order the hub resolved them. Kept
+   *  beside `worktrees` rather than widening it, so the many readers that legitimately want only the
+   *  primary are untouched and only the handful that must see the whole set reach for this. */
+  const runSiblings = new Map<string, WorkspaceRef[]>();
+  /** Every worktree of a run, primary first. The order matters: `[0]` is the cwd and the identity. */
+  const allWorktrees = (runId: string): WorkspaceRef[] => {
+    const primary = worktrees.get(runId);
+    return primary ? [primary, ...(runSiblings.get(runId) ?? [])] : [];
+  };
   /** Silent by default so an embedder (and every existing test) sees no new output. */
   const log = deps.logger ?? createNodeLogger({ level: "silent" });
   /** Defaults to the process-wide latch, which is what the re-detect pass reads. */
@@ -613,14 +648,25 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           log.warn({ err: e, runId, path: ref.worktreePath }, "teardown: could not remove scratch dir");
         }
       } else {
-        await deps.gitService.teardownWorktree(ref).catch((e: unknown) => {
-          // A worktree that will not tear down holds both disk and its branch name, which then wedges
-          // the next run of the same issue. Silent failure here is how a node slowly gums up.
-          log.warn({ err: e, runId, path: ref.worktreePath }, "teardown: could not remove worktree");
-        });
+        // EVERY worktree of the run, not just the primary. One left behind holds both disk and its
+        // branch name, which then wedges the next run of the same issue.
+        for (const w of allWorktrees(runId)) {
+          await deps.gitService.teardownWorktree(w).catch((e: unknown) => {
+            // Silent failure here is how a node slowly gums up.
+            log.warn({ err: e, runId, path: w.worktreePath }, "teardown: could not remove worktree");
+          });
+        }
+        // Then the run directory itself, which takes the shared scratch with it. Removing only the
+        // worktrees would leak the shell and the scratch for ever - indistinguishable from DHK-371.
+        try {
+          rmSync(dirname(ref.worktreePath), { recursive: true, force: true });
+        } catch (e) {
+          log.warn({ err: e, runId }, "teardown: could not remove the run directory");
+        }
       }
     }
     worktrees.delete(runId);
+    runSiblings.delete(runId);
     scratchOnly.delete(runId);
     lastUsed.delete(runId);
     runToolCalls.delete(runId);
@@ -727,24 +773,32 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         let ref = worktrees.get(runId);
         if (!ref) {
           if (job.workspaceRef) {
-            ref = await deps.gitService.createWorktree({
-              repoId: job.workspaceRef.repoId,
-              gitUrl: job.workspaceRef.gitUrl,
-              baseBranch: job.workspaceRef.baseBranch,
+            // The run's whole repo set, primary first. `extraWorkspaces` is read defensively because
+            // this repo pins a published `@dahrk/contracts` that predates the field - the same idiom
+            // `seedRef` and `injectedSkillPaths` already use. Drop the cast at the version bump.
+            const extras = (job as { extraWorkspaces?: WorkspaceRef[] }).extraWorkspaces ?? [];
+            const specOf = (ws: WorkspaceRef) => ({
+              repoId: ws.repoId,
+              gitUrl: ws.gitUrl,
+              baseBranch: ws.baseBranch,
               runId,
-              repo: job.workspaceRef.repo,
+              repo: ws.repo,
               // Stable per-issue branch (continuation); absent = legacy dahrk/<runId>.
-              ...(job.workspaceRef.branch ? { branch: job.workspaceRef.branch } : {}),
+              ...(ws.branch ? { branch: ws.branch } : {}),
               // Re-enter from work a prior backup push preserved, rather than starting over from the base
               // (DHK-264). Carried on the contract but never plumbed through to the git service until now.
-              ...((job.workspaceRef as { seedRef?: string }).seedRef
-                ? { seedRef: (job.workspaceRef as { seedRef?: string }).seedRef }
-                : {}),
-              // The git credential the hub minted for this job.
-              ...(job.workspaceRef.credentialToken
-                ? { credentialToken: job.workspaceRef.credentialToken }
-                : {}),
+              ...((ws as { seedRef?: string }).seedRef ? { seedRef: (ws as { seedRef?: string }).seedRef } : {}),
+              // The git credential the hub minted for this job, per repo.
+              ...(ws.credentialToken ? { credentialToken: ws.credentialToken } : {}),
             });
+            // All-or-nothing: a half-provisioned workspace would let the agent produce a change that
+            // looks complete and is not.
+            const refs = await deps.gitService.createWorktrees([
+              specOf(job.workspaceRef),
+              ...extras.map(specOf),
+            ]);
+            ref = refs[0]!;
+            if (refs.length > 1) runSiblings.set(runId, refs.slice(1));
           } else {
             const base = deps.scratchRoot ?? join(tmpdir(), "dahrk", "scratch");
             const worktreePath = join(base, runId);
@@ -755,7 +809,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           }
           worktrees.set(runId, ref);
         }
-        writeScratchState(ref, job, attempt, "in-flight");
+        writeScratchState(ref, job, attempt, "in-flight", allWorktrees(runId));
         writeIssueContext(ref, job.issueContext);
         writeGuidance(ref, job.guidance);
         writeAttachedDocuments(ref, job.attachedDocuments);
@@ -894,10 +948,21 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // The `typeof` guard is not ceremony either: `finish` is the ONLY path that returns the
           // stage's result, so anything that throws here loses the whole stage, trace and all. A git
           // service predating this method must degrade to "no measurement", not take the result too.
-          const footprint =
+          // One probe per repo (DHK-251). "Each probe supersedes the last" still holds PER REPO - that
+          // was always about stages sharing a worktree - but a run's repos are independent
+          // measurements, so summing or overwriting across them would both be wrong.
+          const probeable =
             ref && !scratchOnly.has(runId) && typeof deps.gitService.probeFootprint === "function"
-              ? deps.gitService.probeFootprint(ref, { base: ref.baseBranch })
-              : undefined;
+              ? allWorktrees(runId)
+              : [];
+          const perRepo = probeable.flatMap((w) => {
+            const fp = deps.gitService.probeFootprint!(w, { base: w.baseBranch });
+            return fp ? [{ repoId: w.repoId, repo: w.repo, ...fp }] : [];
+          });
+          // `footprint` stays the PRIMARY's and stays exactly where it was on the wire, so a hub that
+          // has not shipped its half reads precisely what it reads today.
+          const footprint = perRepo.find((f) => f.repoId === ref?.repoId);
+          const footprints = perRepo.length > 1 ? perRepo : undefined;
           const wantsArtifact = agentConfig?.emitArtifact !== undefined || handedBackDoc !== undefined;
           const resolved =
             status === "ok" && wantsArtifact
@@ -925,6 +990,10 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             // an agent-run gate can populate it too.
             ...(verifications?.length ? { verifications } : {}),
             ...(footprint ? { footprint } : {}),
+            // Per-repo footprints for a multi-repo run, so the hub can tell which repos actually
+            // changed and therefore which deserve a pull request. Absent at N=1, where `footprint`
+            // already says everything there is to say.
+            ...(footprints ? { footprints } : {}),
           };
         };
 
@@ -974,14 +1043,29 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // `undefined?.command` is merely falsy, so setup silently never ran: no trace event, no warning.
         // The `as` cast is what hid it, defeating the compiler on exactly the seam it exists to guard,
         // and the node's own test set `setup` at the root too, so the bug was invisible to CI.
-        const setup = job.workspaceRef?.setup;
-        if (setup?.command && ref) {
-          const outcome = runRepoSetup({ worktreePath: ref.worktreePath, command: setup.command });
+        //
+        // On a multi-repo run this is PER REPO, in order, primary first: each repo declares its own
+        // setup on its own `WorkspaceRef`, and a library usually has to be installed before the
+        // consumer that imports it. The marker `runRepoSetup` caches on is keyed by the repo directory,
+        // so one repo's install can no longer mark another's as done.
+        const setupTargets: Array<{ worktreePath: string; command: string; repo: string }> = ref
+          ? [
+              ...(job.workspaceRef?.setup?.command
+                ? [{ worktreePath: ref.worktreePath, command: job.workspaceRef.setup.command, repo: job.workspaceRef.repo }]
+                : []),
+              ...(runSiblings.get(runId) ?? []).flatMap((w, i) => {
+                const cmd = ((job as { extraWorkspaces?: WorkspaceRef[] }).extraWorkspaces ?? [])[i]?.setup?.command;
+                return cmd ? [{ worktreePath: w.worktreePath, command: cmd, repo: w.repo }] : [];
+              }),
+            ]
+          : [];
+        for (const target of setupTargets) {
+          const outcome = runRepoSetup({ worktreePath: target.worktreePath, command: target.command });
           if (outcome.status === "failed") {
             // Fail closed BEFORE the runner is constructed, so the agent never touches a broken tree.
             // A distinct `setup-failed` kind + `harness` failureClass make it a clean, attributable
             // pre-agent provisioning failure, mirroring the provision-failed path above.
-            const msg = `repo setup failed (exit ${outcome.exitCode ?? "null"})`;
+            const msg = `repo setup for ${target.repo} failed (exit ${outcome.exitCode ?? "null"})`;
             const detail = outcome.output ? `${msg}: ${outcome.output}` : msg;
             writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "setup-failed", message: detail });
             deps.sendProgress({ jobId, kind: "error", ts: nowIso(), text: detail });
@@ -990,8 +1074,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // Fold the outcome into the trace so setup's stdout/exit are observable (acceptance).
           const detail =
             outcome.status === "cached"
-              ? "setup: cached (already installed)"
-              : `setup: ran (exit 0, ${outcome.output.length} bytes)`;
+              ? `setup(${target.repo}): cached (already installed)`
+              : `setup(${target.repo}): ran (exit 0, ${outcome.output.length} bytes)`;
           // `event: "setup"` is not in the pinned `@dahrk/contracts` (^0.6.0) state-event union yet,
           // so cast the frame the same way the Job fields above are read defensively; drop the cast
           // once contracts ships the value. The error `kind` below needs no cast (it is an open string).
@@ -1017,7 +1101,13 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // DHK-392: the stage is confined to the run's worktree (plus its scratch dir, the git object
           // store it depends on, and the toolchain). A node default, not a workflow policy. A run with
           // no repo still gets a box - just a smaller one, around its scratch dir.
-          fsRoots: computeFsRoots({ worktreePath: ref.worktreePath, scratchPath: ref.scratchPath }),
+          fsRoots: computeFsRoots({
+            worktreePath: ref.worktreePath,
+            // Every sibling repo is a writable root of its own, so the agent can read and change them
+            // (DHK-358). Their parent run directory deliberately is NOT a root.
+            extraWorktreePaths: (runSiblings.get(runId) ?? []).map((w) => w.worktreePath),
+            scratchPath: ref.scratchPath,
+          }),
         });
         const rules = [...jobRules, ...deps.rules];
 
@@ -1166,6 +1256,9 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // RunnerContext shape without inventing a runtime the stage does not have.
           config: agentConfig ?? ({ runtime: "claude-code" } as AgentConfig),
           workspace: ref,
+          // The run's whole repo set (DHK-251), primary first, so an adapter can widen its sandbox and
+          // the prompt can name the siblings. Omitted at N=1, so a single-repo context is unchanged.
+          ...(runSiblings.get(runId)?.length ? { workspaces: allWorktrees(runId) } : {}),
           sessionId: job.sessionId,
           ...(job.issueContext !== undefined ? { issueContext: job.issueContext } : {}),
           ...(job.guidance !== undefined ? { guidance: job.guidance } : {}),
@@ -1427,8 +1520,13 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // HEAD) and take the merge-free path - no base integration, no conflict/diverged branch, no PR. If
         // the worktree is already gone the work cannot be preserved, so fail truthfully rather than
         // re-cloning the branch (which would push the base tip and silently lose the run's work).
+        // Which repo THIS push is for. The hub dispatches one push per repo of a multi-repo run
+        // (DHK-251), so falling through to the primary would push the wrong repo's worktree.
+        const worktreeForPush = (): WorkspaceRef | undefined =>
+          allWorktrees(runId).find((w) => w.repoId === job.workspaceRef.repoId);
+
         if (mode === "backup") {
-          const ref = worktrees.get(runId);
+          const ref = worktreeForPush();
           if (!ref) {
             return {
               jobId,
@@ -1454,7 +1552,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // pipeline pushes immediately after the last stage, so retention has not pruned it. Re-create
         // off the stable branch only as a defensive fallback (the branch's prior commits are on the
         // remote; any lost-but-uncommitted stage edits cannot be recovered here - they are gone).
-        let ref = worktrees.get(runId);
+        let ref = worktreeForPush();
         if (!ref) {
           ref = await deps.gitService.createWorktree({
             repoId: job.workspaceRef.repoId,
@@ -1465,7 +1563,15 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             branch: job.branch,
             ...(job.workspaceRef.credentialToken ? { credentialToken: job.workspaceRef.credentialToken } : {}),
           });
-          worktrees.set(runId, ref);
+          // INSERT into the run's set, never replace it. Overwriting `worktrees` here would strand the
+          // run's other repos, so push 2 of a multi-repo deliver would find nothing and re-clone.
+          if (worktrees.has(runId)) {
+            if (worktrees.get(runId)!.repoId !== ref.repoId) {
+              runSiblings.set(runId, [...(runSiblings.get(runId) ?? []), ref]);
+            }
+          } else {
+            worktrees.set(runId, ref);
+          }
         }
 
         try {

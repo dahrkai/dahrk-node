@@ -147,7 +147,16 @@ export function sandboxOptions(ctx: RunnerContext): Partial<Options> {
       autoAllowBashIfSandboxed: false,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowWrite: [ctx.workspace.worktreePath, ctx.workspace.scratchPath, tmpdir()],
+        // EVERY worktree of the run (DHK-251), not just the primary: a sibling the agent cannot write
+        // is a repo it was checked out to change and cannot. `workspaces` is absent at N=1, so this is
+        // the same list it always was for a single-repo run.
+        allowWrite: [
+          ...((ctx as RunnerContext & { workspaces?: Array<{ worktreePath: string }> }).workspaces ?? [
+            ctx.workspace,
+          ]).map((w) => w.worktreePath),
+          ctx.workspace.scratchPath,
+          tmpdir(),
+        ],
         denyRead: [join(home, ".ssh"), join(home, ".aws"), join(home, ".gnupg"), "/Volumes"],
       },
     },

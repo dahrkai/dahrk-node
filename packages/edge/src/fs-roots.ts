@@ -133,15 +133,28 @@ const splitRoots = (v: string | undefined): string[] =>
  * release. This guard is a heuristic that fails CLOSED on machines we cannot hot-patch, so an
  * operator whose legitimate toolchain lives somewhere we did not think of must be able to say so.
  */
-export function computeFsRoots(opts: { worktreePath: string; scratchPath?: string }): FsRoots {
+export function computeFsRoots(opts: {
+  /** The PRIMARY worktree: the agent's working directory, and where a relative path resolves from. */
+  worktreePath: string;
+  /** A multi-repo run's sibling worktrees (DHK-358). Each becomes a writable root of its own; none of
+   *  them becomes the cwd. Deliberately NOT including their parent run directory: adding it would make
+   *  `cd ..` legal and hand the agent every repo plus the engine's scratch as one writable tree. */
+  extraWorktreePaths?: readonly string[];
+  scratchPath?: string;
+}): FsRoots {
   const home = homedir();
   const wt = realish(resolve(opts.worktreePath));
+  const siblings = (opts.extraWorktreePaths ?? []).map((p) => realish(resolve(p)));
 
   const rw = [
     wt,
+    ...siblings,
     ...(opts.scratchPath ? [realish(resolve(opts.scratchPath))] : []),
-    // Every git command in the worktree reads and writes here.
-    ...[gitCommonDir(opts.worktreePath)].filter((p): p is string => Boolean(p)).map(realish),
+    // Every git command in a worktree reads and writes here - one object store per repo.
+    ...[opts.worktreePath, ...(opts.extraWorktreePaths ?? [])]
+      .map(gitCommonDir)
+      .filter((p): p is string => Boolean(p))
+      .map(realish),
     // Scratch space: `mkdtemp`, git's temp files, and an agent tidying a throwaway dir it created.
     ...[tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].map(realish),
     // The safe I/O sinks. `2>/dev/null` is on a third of the shell commands real stages run; treating

@@ -2,16 +2,25 @@
  * Does this shell command reach outside the run's roots? (DHK-392)
  *
  * Deliberately NOT a shell parser. The insight that makes a heuristic sound here: a token can only
- * escape the worktree if it is ANCHORED outside it - it starts at `/`, at `~`/`$HOME`, or climbs out
- * with `..`. Every other operand (a bare name, a glob, a regex, a branch, a URL) resolves inside the
- * worktree by construction and needs no checking. So we look only at anchored tokens, and spend the
- * rest of the effort on not mistaking a PATTERN for a path - which is exactly what a
- * `find / -path <glob>` is made of: the root is the escape, the glob is innocent.
+ * escape if it is ANCHORED outside the roots - it starts at `/`, at `~`/`$HOME`, or climbs out with
+ * `..`. Every other operand (a bare name, a glob, a regex, a branch, a URL) resolves inside the
+ * current directory. So we look only at anchored tokens, and spend the rest of the effort on not
+ * mistaking a PATTERN for a path - which is exactly what a `find / -path <glob>` is made of: the root
+ * is the escape, the glob is innocent.
+ *
+ * That premise rests on a second clause which used to be implemented but never written down, and
+ * which a multi-repo run makes load-bearing rather than incidental: an unanchored token resolves
+ * inside the CURRENT directory, and every directory the scanner can reach is a writable root, BECAUSE
+ * A `cd` IS ITSELF PATH-CHECKED BEFORE THE REBIND. With sibling repos in the roots, `cd ../other-repo`
+ * is a legal move that rebinds the cwd, while `cd ..` lands in the run directory - which is in no root
+ * - and is denied. Writing the clause down is the point: DHK-998 and DHK-999 were both wrong verdicts
+ * at this interface, and a premise recorded wrongly is how the third one arrives.
  *
  * Honest about what it is: a tool-argument guard, not a syscall sandbox. `X=/etc; cat $X/passwd`, or
  * a python script that opens a path never appearing in argv, still get through - the path is not in
  * the command. Closing those needs an OS sandbox (see the Claude adapter), and only on that runtime.
  */
+import { homedir } from "node:os";
 import { expandPath, withinRoots, type Access, type FsRoots } from "./fs-roots.js";
 
 export type ScanResult =
@@ -350,10 +359,24 @@ function scanSimple(tokens: Token[], roots: FsRoots, cwd: string): ScanResult | 
   }
 
   // `cd <x>`: check it, then let the caller rebind cwd so `cd /tmp && rm -rf junk` still works.
+  //
+  // The check demands WRITE, not read, and that is the load-bearing part. `withinRoots` grants reads
+  // on `ro` roots, and `ro` includes `/etc` - so a read-check let `cd /etc` succeed, rebound the cwd
+  // into a read-only root, and every unanchored token after it (`cat shadow`) was then never checked
+  // at all, because `looksLikePath` returns false for a bare name and `deny` is never consulted.
+  // Requiring write means "the target must be an `rw` root", which restores this file's premise
+  // exactly: every cwd the scanner can reach is a writable root, so an unanchored token resolves
+  // inside one. `cd /tmp` still works (tmp is rw); `cd /usr` no longer does, which is correct.
   if (cmdName === "cd") {
     const target = tokens.find((t) => !t.operator && t.value !== argv0 && !t.value.startsWith("-"));
-    if (!target) return { kind: "ok" };
-    const bad = check(target.value, "read");
+    // A bare `cd` sends the real shell to $HOME, and `cd -` to a directory we do not track. Returning
+    // "ok" without rebinding left the scanner judging every later relative path against the wrong
+    // directory - and `builtins.ts` carries that cwd across tool calls, so the mistake compounds.
+    if (!target) {
+      const bad = check(homedir(), "write");
+      return bad ?? { kind: "cd", to: homedir() };
+    }
+    const bad = check(target.value, "write");
     if (bad) return bad;
     return { kind: "cd", to: target.value };
   }
