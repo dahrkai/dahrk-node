@@ -6,8 +6,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Changed
+
+- The installer now detects your operating system and prints the exact Node 22 install commands for it.
+
 ### Fixed
 
+- The installer explains an unwritable global npm prefix and how to fix it, instead of failing with EACCES.
 - A re-run that continues preserved work now starts from that work, and fails loudly rather than silently branching off the base.
 
 ## [0.4.3] - 2026-08-09

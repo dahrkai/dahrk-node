@@ -50,9 +50,11 @@ curl -fsSL https://dahrk.ai/install.sh | sh -s -- --token <connect-token>
 
 `DAHRK_TOKEN=<connect-token>` is the same instruction as an environment variable. Add `--no-service`
 to enrol without installing the always-on service (for a node you supervise yourself), or `--hub-url`
-/ `DAHRK_HUB_URL` to point at a self-hosted hub. It needs **Node 22+** already on PATH (it does not
-install a runtime) and supports macOS and Linux. Re-running it upgrades the client and re-attaches as
-the same node rather than creating a duplicate.
+/ `DAHRK_HUB_URL` to point at a self-hosted hub. It needs **Node 22+** already on PATH and does not
+install a runtime; if Node is missing or too old it detects your platform and prints the commands that
+install it there (apt/NodeSource on Debian and Ubuntu, dnf, apk, pacman, zypper, Homebrew, or nvm).
+macOS and Linux are supported. Re-running it upgrades the client and re-attaches as the same node
+rather than creating a duplicate.
 
 Or get an enrolment token from [app.dahrk.ai](https://app.dahrk.ai), preflight, then start the node by
 hand:

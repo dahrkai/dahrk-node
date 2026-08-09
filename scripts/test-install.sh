@@ -39,9 +39,16 @@ exit 0
 EOF
   fi
 
+  # `npm prefix -g` is consulted before the install to check the global prefix is writable, so the
+  # stub answers it from STUB_NPM_PREFIX and never fails that call - only the install itself honours
+  # STUB_NPM_EXIT. The default prefix is a writable temp dir, i.e. the ordinary case.
   cat >"$dir/npm" <<'EOF'
 #!/bin/sh
 echo "npm $*" >> "$STUB_LOG"
+if [ "$1" = "prefix" ]; then
+  echo "${STUB_NPM_PREFIX:-/tmp}"
+  exit 0
+fi
 exit "${STUB_NPM_EXIT:-0}"
 EOF
 
@@ -57,6 +64,15 @@ EOF
 
   chmod +x "$dir"/*
 }
+
+# Put a package-manager binary on the stub PATH so the platform probe finds it. The script only ever
+# runs `command -v` against these, so an empty executable says everything it needs to.
+add_pkg() {
+  printf '#!/bin/sh\nexit 0\n' >"$WORK/stubs/$1"
+  chmod +x "$WORK/stubs/$1"
+}
+
+FIXTURES="$ROOT/scripts/fixtures/os-release"
 
 # run <case-tag> [env assignments...] -- [install.sh args...]
 # Populates globals: OUT (combined stdout+stderr), CODE (exit status), LOG (stub call log path).
@@ -86,6 +102,9 @@ assert_code_nonzero() { # <label>
 assert_out() { # <regex> <label>
   if echo "$OUT" | grep -Eq "$1"; then ok; else bad "$2: output did not match /$1/ (output: $OUT)"; fi
 }
+assert_not_out() { # <regex> <label>
+  if echo "$OUT" | grep -Eq "$1"; then bad "$2: output unexpectedly matched /$1/ (output: $OUT)"; else ok; fi
+}
 assert_log() { # <regex> <label>
   if grep -Eq "$1" "$LOG"; then ok; else bad "$2: stub log missing /$1/ (log: $(cat "$LOG"))"; fi
 }
@@ -113,6 +132,97 @@ run STUB_NODE_VER=v20.11.0 --
 assert_code_nonzero "old Node fails"
 assert_out "Node 22" "old Node message names the floor"
 assert_no_log "^npm " "old Node does not install"
+
+# --- platform-tailored Node instructions -----------------------------------------------------------
+# The regression these guard: a Debian user was told to run `brew install node` and `nvm install 22`
+# on a box with neither, so every route offered was a dead end. The rule is that the commands printed
+# must be the ones that work on the detected platform, and must not be the ones that do not.
+
+# Debian / Ubuntu -> NodeSource over apt.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_code_nonzero "Debian without Node fails"
+assert_out "Debian GNU/Linux 12" "Debian output names the detected distro"
+assert_out "deb\.nodesource\.com/setup_22\.x" "Debian gets the NodeSource apt route"
+assert_out "sudo apt-get install -y nodejs" "Debian gets the apt install line"
+assert_not_out "brew install" "Debian is not told to use Homebrew"
+
+# Fedora / RHEL -> NodeSource over dnf.
+make_stubs "$WORK/stubs" 0
+add_pkg dnf
+run DAHRK_OS_RELEASE="$FIXTURES/fedora" --
+assert_out "Fedora Linux 41" "Fedora output names the detected distro"
+assert_out "rpm\.nodesource\.com/setup_22\.x" "Fedora gets the NodeSource rpm route"
+assert_out "sudo dnf install -y nodejs" "Fedora gets the dnf install line"
+assert_not_out "apt-get" "Fedora is not told to use apt"
+
+# Alpine -> the distro package, the only route there.
+make_stubs "$WORK/stubs" 0
+add_pkg apk
+run DAHRK_OS_RELEASE="$FIXTURES/alpine" --
+assert_out "Alpine Linux v3\.20" "Alpine output names the detected distro"
+assert_out "apk add --no-cache nodejs npm" "Alpine gets the apk route"
+
+# macOS -> Homebrew, and never a Linux package manager.
+make_stubs "$WORK/stubs" 0
+add_pkg brew
+run STUB_UNAME=Darwin --
+assert_code_nonzero "macOS without Node fails"
+assert_out "Detected: macOS" "macOS is detected as macOS"
+assert_out "brew install node@22" "macOS gets the Homebrew route"
+assert_not_out "apt-get" "macOS is not told to use apt"
+
+# A Linux box with no recognised package manager still gets a route that works.
+make_stubs "$WORK/stubs" 0
+run DAHRK_OS_RELEASE="$WORK/no-such-os-release" --
+assert_code_nonzero "unknown Linux without Node fails"
+assert_out "No supported package manager" "unknown Linux says so plainly"
+assert_out "nvm install 22" "unknown Linux still gets the nvm route"
+
+# The nvm route is offered everywhere, spelled so it works with no nvm already installed.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_out "nvm-sh/nvm/v[0-9.]+/install\.sh" "the nvm route installs nvm first"
+assert_out "nvm install 22" "the nvm route then installs Node 22"
+
+# Too-old Node gets the same tailored commands as no Node at all.
+make_stubs "$WORK/stubs"
+add_pkg apt-get
+run STUB_NODE_VER=v20.11.0 DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_code_nonzero "old Node on Debian fails"
+assert_out "deb\.nodesource\.com" "old Node gets the same platform-tailored commands"
+assert_no_log "^npm " "old Node does not install"
+
+# --- the global npm prefix must be writable --------------------------------------------------------
+# The wall immediately after Node on a stock Debian box: a distro Node's prefix lives under /usr, so
+# `npm install -g` dies with EACCES. The installer must explain that itself, before trying.
+if [ "$(id -u)" = "0" ]; then
+  echo "skip: unwritable-prefix case (running as root, every path is writable)"
+else
+  make_stubs "$WORK/stubs"
+  RO_PREFIX="$WORK/ro-prefix"
+  rm -rf "$RO_PREFIX"
+  mkdir -p "$RO_PREFIX/lib/node_modules"
+  chmod 500 "$RO_PREFIX/lib/node_modules"
+  run STUB_NPM_PREFIX="$RO_PREFIX" --
+  assert_code_nonzero "unwritable npm prefix fails"
+  assert_out "npm config set prefix" "unwritable prefix names the user-owned-prefix fix"
+  assert_out "sudo sh -s" "unwritable prefix names the sudo fallback"
+  assert_no_log "^npm install" "unwritable prefix never attempts the install"
+  chmod 700 "$RO_PREFIX/lib/node_modules"
+fi
+
+# A writable prefix is the ordinary case and must stay invisible.
+make_stubs "$WORK/stubs"
+WRITABLE_PREFIX="$WORK/rw-prefix"
+rm -rf "$WRITABLE_PREFIX"
+mkdir -p "$WRITABLE_PREFIX/lib/node_modules"
+run STUB_NPM_PREFIX="$WRITABLE_PREFIX" --
+assert_code 0 "writable npm prefix installs cleanly"
+assert_log "^npm install -g dahrk-node$" "writable npm prefix reaches the install"
+assert_not_out "EACCES" "writable npm prefix says nothing about permissions"
 
 # --- no token: install only ----------------------------------------------------------------------
 make_stubs "$WORK/stubs"

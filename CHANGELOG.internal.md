@@ -24,7 +24,43 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- `install.sh` detects the platform (`uname -s` plus a built-in parse of `/etc/os-release`) and probes
+  for a package manager, then prints Node 22 install commands for that box; `scripts/test-install.sh`
+  covers Debian/Fedora/Alpine/macOS/no-package-manager from fixtures under
+  `scripts/fixtures/os-release/`, and CI now shellchecks the script.
+
+  A user on Debian 12 hit `error: Node.js is not installed.` and was offered `brew install node` and
+  `nvm install 22` — Homebrew is not on a Debian box and nvm was not installed, so every route the
+  installer named was a dead end and they came back round to us. The advice was a fixed
+  macOS-flavoured list with no idea what it was running on. The fix keeps the no-runtime contract
+  (`testbed/bootstrap.sh:57-63` depends on it, as does `INSTALL_NODE=0`): we still refuse to install
+  Node, we just stop guessing what would install it.
+
+  The package manager is found by probing for the binary rather than matching `ID=` in os-release,
+  because derivatives (Mint, Pop!_OS, Rocky) report their own ID while carrying apt/dnf, and an ID
+  table would need extending forever. `/etc/os-release` is parsed with shell built-ins, never sourced:
+  the script is piped into a shell that may be root, so writing that file must not amount to code
+  execution here. `DAHRK_OS_RELEASE` overrides the path so the tests can use fixtures.
+
+  Everything stays within the four external commands the stub PATH in `scripts/test-install.sh`
+  provides (uname, node, npm, dahrk) — no grep/cut/sed — which is also why it survives a minimal box.
+
 ### Fixed
+
+- `install.sh` checks `npm prefix -g` is writable before installing, and explains the two fixes
+  (user-owned prefix, or sudo) rather than letting npm emit EACCES; it also verifies `dahrk` landed on
+  PATH afterwards.
+
+  This is the very next wall after Node on a stock Debian box, and a known one:
+  `dahrk-harness/testbed/bootstrap.sh:90-97` deliberately declines to pre-configure a user-writable
+  prefix so that onboarding has to answer the question. This is the answer. An nvm-managed Node, a
+  Homebrew Node and root all pass the check trivially, so it is invisible in the ordinary case.
+
+  The PATH check came from the (previously divergent) dahrk-web copy of the script, which had it while
+  the canonical copy did not; it pairs with the user-owned-prefix advice, whose common failure is a
+  prefix that was set but never added to PATH.
 
 - `createWorktree` resolves `WorkspaceRef.seedRef` through the remote-tracking form and, failing
   that, one targeted fetch; an unresolvable seed now throws instead of falling back to the base
