@@ -30,10 +30,15 @@ jobs:
       # PUBLISHED graph (e.g. a dependency shipping uncompiled source) fails here, not in the field.
       - name: Smoke-test the packaged client
         run: bash scripts/smoke-pack.sh
-      # Exercise install.sh against stub node/npm/dahrk so every branch (bad OS, missing/old Node, npm
-      # failure, good/bad/no token, --no-service) is regression-guarded without a network or a real hub.
+      # Exercise install.sh against stub node/npm/dahrk so every branch (bad OS, missing/old Node,
+      # per-platform Node instructions, unwritable npm prefix, npm failure, good/bad/no token,
+      # --no-service) is regression-guarded without a network or a real hub.
       - name: Test install.sh
         run: bash scripts/test-install.sh
+      # install.sh is piped straight into a user's shell, so a POSIX slip ships rather than being
+      # caught in review. Runners carry shellcheck; -s sh holds it to the dialect the script claims.
+      - name: Shellcheck install.sh
+        run: shellcheck -s sh install.sh
       # This node's Pi must not be older than the catalogue the hub offers models from, or the portal
       # advertises ids the node cannot resolve. That drifted unnoticed once (0.80.6 here vs 0.80.10 in
       # the catalogue) because an unresolvable id used to silently fall back to Pi's default model.
