@@ -45,6 +45,7 @@
  * `node:child_process.spawn`.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import { dirname } from "node:path";
 import type { Runner, RunnerContext } from "@dahrk/contracts";
 import { PiRpcSession } from "./pi-rpc-client.js";
 import { createPiRunner, resolveStageModelId } from "./pi-adapter.js";
@@ -107,7 +108,16 @@ export function createContainerPiSession(opts: ContainerPiSessionOpts = {}): PiS
     const containerName = `dahrk-pi-${Date.now()}-${++_seq}`;
     const resolvedScratchDir = optsScratchDir ?? ctx.workspace.scratchPath;
 
+    // The scratch mount is the long-standing contract (`/dahrk/scratch` inside the container). On a
+    // multi-repo run the run DIRECTORY is bound too, at its own path, which brings every repo in with
+    // one mount - and incidentally closes a pre-existing gap where a containerised stage saw no
+    // customer repo at all.
     const mountArgs: string[] = resolvedScratchDir ? ["-v", `${resolvedScratchDir}:/dahrk/scratch`] : [];
+    const workspaces = (ctx as typeof ctx & { workspaces?: Array<{ worktreePath: string }> }).workspaces;
+    if (workspaces && workspaces.length > 1) {
+      const runDir = dirname(workspaces[0]!.worktreePath);
+      mountArgs.push("-v", `${runDir}:${runDir}`);
+    }
 
     const envArgs: string[] = [];
     for (const [k, v] of Object.entries(ctx.runtimeEnv ?? {})) {

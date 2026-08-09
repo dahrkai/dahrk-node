@@ -215,3 +215,32 @@ test("an idle node announces an empty list, which says 'nothing in flight', not 
   // the hub keeps its old re-dispatch behaviour), empty means a positive "I have none". We always know.
   assert.deepEqual(announceableJobs([]), []);
 });
+
+test("DHK-251: a multi-repo entry round-trips its sibling worktrees", () => {
+  // Without these, a node that died mid-run would preserve only the primary's uncommitted tail and
+  // silently strand every other repo's.
+  withDir((dir) => {
+    const ledger = fileJobLedger(jobLedgerFile(dir));
+    ledger.upsert(
+      entry({
+        extraWorktrees: [
+          { worktreePath: "/wt/run-1/other", gitUrl: "https://example.invalid/other.git", branch: "b" },
+        ],
+      }),
+    );
+    const back = fileJobLedger(jobLedgerFile(dir)).all();
+    assert.equal(back[0]?.extraWorktrees?.length, 1);
+    assert.equal(back[0]?.extraWorktrees?.[0]?.worktreePath, "/wt/run-1/other");
+  });
+});
+
+test("DHK-251: an entry written before multi-repo still reads", () => {
+  // The field is additive: an old ledger has no `extraWorktrees` and must load unchanged.
+  withDir((dir) => {
+    const ledger = fileJobLedger(jobLedgerFile(dir));
+    ledger.upsert(entry());
+    const back = fileJobLedger(jobLedgerFile(dir)).all();
+    assert.equal(back.length, 1);
+    assert.equal(back[0]?.extraWorktrees, undefined);
+  });
+});

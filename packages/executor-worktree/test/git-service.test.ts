@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceRef } from "@dahrk/contracts";
@@ -887,7 +887,8 @@ test("createWorktree clones a mirror on first sight, adds a worktree, and teardo
     assert.equal(ref.repoId, "repo-gittest");
     assert.equal(ref.gitUrl, src);
     assert.equal(ref.repo, "repo-gittest");
-    assert.equal(ref.worktreePath, join(worktreesDir, "run-gittest-1"));
+    // Each repo takes a directory inside the run's directory (DHK-358), so the run can hold several.
+    assert.equal(ref.worktreePath, join(worktreesDir, "run-gittest-1", "repo-gittest"));
     assert.ok(existsSync(ref.worktreePath), "worktree dir exists");
     assert.ok(existsSync(ref.scratchPath), "scratch dir exists");
 
@@ -1836,5 +1837,126 @@ test("probeFootprint leaves the worktree committable: intent-to-add does not dis
     assert.match(git(ref.worktreePath, ["show", "HEAD:new.txt"]), /new/);
   } finally {
     cleanup();
+  }
+});
+
+// --- DHK-358: the run-level scratch, and the symlink that must never be committed ---------------
+
+test("DHK-358: a run's repos share one scratch, linked into each worktree, and it never reaches the remote", async () => {
+  const remote = makeBareRemote();
+  const remote2 = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    const refs = await svc.createWorktrees([
+      { repoId: "repo-a", gitUrl: remote, baseBranch: "main", runId: "run-multi", repo: "acme/api" },
+      { repoId: "repo-b", gitUrl: remote2, baseBranch: "main", runId: "run-multi", repo: "acme/web" },
+    ]);
+    assert.equal(refs.length, 2);
+
+    // Side by side under one run directory, named for their repos. The owner slash becomes a dash
+    // rather than a directory level, so `acme/api` is one directory and not two.
+    assert.equal(refs[0]!.worktreePath, join(worktreesDir, "run-multi", "acme-api"));
+    assert.equal(refs[1]!.worktreePath, join(worktreesDir, "run-multi", "acme-web"));
+    assert.ok(existsSync(refs[0]!.worktreePath) && existsSync(refs[1]!.worktreePath));
+
+    // ONE scratch, belonging to the run rather than to either repo.
+    assert.equal(refs[0]!.scratchPath, refs[1]!.scratchPath);
+    assert.equal(refs[0]!.scratchPath, join(worktreesDir, "run-multi", ".dahrk", "scratch"));
+
+    // ...reachable through each worktree at the relative path every workflow and prompt already uses.
+    for (const ref of refs) {
+      const viaWorktree = join(ref.worktreePath, ".dahrk", "scratch");
+      assert.equal(realpathSync(viaWorktree), realpathSync(ref.scratchPath), "the link resolves");
+    }
+    writeFileSync(join(refs[0]!.worktreePath, ".dahrk", "scratch", "shared.txt"), "written via repo A\n");
+    assert.ok(
+      existsSync(join(refs[1]!.worktreePath, ".dahrk", "scratch", "shared.txt")),
+      "what one repo writes to scratch, the other sees",
+    );
+
+    // The regression this guards: git's trailing-slash exclude matches DIRECTORIES only, and a symlink
+    // is a file. Without the slashless form too, `git add -A` stages the link and every pull request
+    // carries a dangling `.dahrk/scratch` blob.
+    writeFileSync(join(refs[0]!.worktreePath, "real-change.txt"), "work\n");
+    const r = await svc.commitAndPush(refs[0]!, { message: "feat: work", branch: "dahrk/run-multi", base: "main" });
+    assert.equal(r.pushed, true, "the deliver push landed");
+    const tree = git(remote, ["ls-tree", "-r", "--name-only", "dahrk/run-multi"]);
+    assert.ok(tree.includes("real-change.txt"), "the actual change is pushed");
+    assert.ok(!tree.includes(".dahrk"), `no .dahrk entry of any kind reaches the remote, got:\n${tree}`);
+  } finally {
+    for (const d of [remote, remote2, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("DHK-358: provisioning is all-or-nothing, and rolls back only what it created", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    await assert.rejects(
+      svc.createWorktrees([
+        { repoId: "repo-a", gitUrl: remote, baseBranch: "main", runId: "run-fail", repo: "api" },
+        { repoId: "repo-b", gitUrl: "/nonexistent/nope.git", baseBranch: "main", runId: "run-fail", repo: "web" },
+      ]),
+      // The error names the repo that actually failed, not the first one.
+      /run-fail: could not provision web/,
+    );
+    // Repo A's worktree is gone with it: half a workspace is worse than none, because an agent handed
+    // one produces a change that looks complete and is not.
+    assert.ok(!existsSync(join(worktreesDir, "run-fail", "api")), "the successful worktree is rolled back");
+    assert.ok(!existsSync(join(worktreesDir, "run-fail")), "and so is the run directory it created");
+  } finally {
+    for (const d of [remote, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("DHK-358: a second stage reuses both worktrees and disturbs neither", async () => {
+  const remote = makeBareRemote();
+  const remote2 = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  const specs = [
+    { repoId: "repo-a", gitUrl: remote, baseBranch: "main", runId: "run-stage2", repo: "api" },
+    { repoId: "repo-b", gitUrl: remote2, baseBranch: "main", runId: "run-stage2", repo: "web" },
+  ];
+  try {
+    const first = await svc.createWorktrees(specs);
+    writeFileSync(join(first[0]!.worktreePath, "stage1.txt"), "from stage 1\n");
+    const second = await svc.createWorktrees(specs);
+    assert.deepEqual(
+      second.map((r) => r.worktreePath),
+      first.map((r) => r.worktreePath),
+      "stage 2 lands on exactly the directories stage 1 created",
+    );
+    assert.ok(existsSync(join(second[0]!.worktreePath, "stage1.txt")), "and stage 1's work survives");
+  } finally {
+    for (const d of [remote, remote2, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("DHK-358: two repos with the same name get distinct, stable directories", async () => {
+  const remote = makeBareRemote();
+  const remote2 = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  const specs = [
+    // Same logical name, different registry rows - which is what two owners' `api` repos look like
+    // once the owner prefix has been sanitised away.
+    { repoId: "repo-acme", gitUrl: remote, baseBranch: "main", runId: "run-dup", repo: "api" },
+    { repoId: "repo-beta", gitUrl: remote2, baseBranch: "main", runId: "run-dup", repo: "api" },
+  ];
+  try {
+    const refs = await svc.createWorktrees(specs);
+    assert.notEqual(refs[0]!.worktreePath, refs[1]!.worktreePath, "they cannot share a directory");
+    // Stable across stages, or stage 2 would clone into fresh directories beside stage 1's work.
+    const again = await svc.createWorktrees(specs);
+    assert.deepEqual(again.map((r) => r.worktreePath), refs.map((r) => r.worktreePath));
+  } finally {
+    for (const d of [remote, remote2, worktreesDir, mirrorsDir]) rmSync(d, { recursive: true, force: true });
   }
 });

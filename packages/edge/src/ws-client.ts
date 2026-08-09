@@ -439,13 +439,31 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         continue;
       }
       try {
-        const r = await gitService.reconcileInterrupted(
+        // Every repo of the run, not just the primary. The wip ref needs no per-repo suffix: each one
+        // lives on a DIFFERENT remote, so the same branch name is unambiguous.
+        const targets = [
           { worktreePath: entry.worktreePath, gitUrl: entry.gitUrl },
-          {
-            message: `wip: work in progress when the node was interrupted (run ${entry.runId})`,
-            branch: `dahrk/wip/${entry.runId}`,
-          },
+          ...(entry.extraWorktrees ?? []).map((w) => ({ worktreePath: w.worktreePath, gitUrl: w.gitUrl })),
+        ];
+        const results = await Promise.all(
+          targets.map((t) =>
+            gitService.reconcileInterrupted(t, {
+              message: `wip: work in progress when the node was interrupted (run ${entry.runId})`,
+              branch: `dahrk/wip/${entry.runId}`,
+            }),
+          ),
         );
+        // Report on the primary as before; a dirty sibling is logged on its own line below.
+        const r = results[0]!;
+        for (let i = 1; i < results.length; i++) {
+          const sib = results[i]!;
+          if (sib.dirty) {
+            entryLog.warn(
+              { worktreePath: targets[i]!.worktreePath, wipRef: sib.wipRef, pushed: sib.pushed },
+              `EDGE_INTERRUPTED_SIBLING_PRESERVED:${entry.jobId} a sibling repo's tail was preserved`,
+            );
+          }
+        }
         if (r.dirty) {
           entryLog.warn(
             { wipRef: r.wipRef, tailSha: r.tailSha, headSha: r.headSha, pushed: r.pushed },
@@ -879,6 +897,21 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       ...(job.workspaceRef?.worktreePath ? { worktreePath: job.workspaceRef.worktreePath } : {}),
       ...(job.workspaceRef?.branch ? { branch: job.workspaceRef.branch } : {}),
       ...(job.workspaceRef?.gitUrl ? { gitUrl: job.workspaceRef.gitUrl } : {}),
+      // The run's sibling repos (DHK-251), so a restart preserves EVERY repo's uncommitted tail. Read
+      // defensively against the pinned contracts version, as the other new Job fields are.
+      ...(() => {
+        const extras = (job as { extraWorkspaces?: Array<{ worktreePath: string; gitUrl: string; branch?: string }> })
+          .extraWorkspaces;
+        return extras?.length
+          ? {
+              extraWorktrees: extras.map((w) => ({
+                worktreePath: w.worktreePath,
+                gitUrl: w.gitUrl,
+                ...(w.branch ? { branch: w.branch } : {}),
+              })),
+            }
+          : {};
+      })(),
       startedAt,
       nodePid: process.pid,
     });

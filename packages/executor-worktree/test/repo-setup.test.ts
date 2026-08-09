@@ -8,12 +8,16 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { runRepoSetup } from "../src/repo-setup.js";
 
-const MARKER = join(".dahrk", "scratch", ".setup-done");
+/** The marker is keyed by the repo's own directory name, because a run's repos share one scratch
+ *  (DHK-358) and a single marker there would make repo A's marker serve repo B - silently skipping
+ *  B's install. */
+const markerFor = (worktreePath: string): string =>
+  join(worktreePath, ".dahrk", "scratch", "setup", `${basename(worktreePath)}.setup-done`);
 
 test("runs the command once, writes the marker, and captures output", () => {
   const wt = mkdtempSync(join(tmpdir(), "dahrk-setup-run-"));
@@ -22,7 +26,7 @@ test("runs the command once, writes the marker, and captures output", () => {
     assert.equal(res.status, "ran");
     assert.match(res.status === "ran" ? res.output : "", /installing/, "combined output is captured");
     assert.equal(readFileSync(join(wt, "out.txt"), "utf8").trim(), "hi", "the command's side effect landed");
-    assert.ok(existsSync(join(wt, MARKER)), "the idempotency marker is written on success");
+    assert.ok(existsSync(markerFor(wt)), "the idempotency marker is written on success");
   } finally {
     rmSync(wt, { recursive: true, force: true });
   }
@@ -50,7 +54,7 @@ test("a non-zero exit reports `failed` and leaves no marker, so a retry re-runs"
     assert.equal(res.status, "failed");
     assert.equal(res.status === "failed" ? res.exitCode : undefined, 3, "the non-zero exit code is surfaced");
     assert.match(res.status === "failed" ? res.output : "", /boom/, "stderr is folded into the captured output");
-    assert.ok(!existsSync(join(wt, MARKER)), "no marker on failure, so the next dispatch re-runs setup");
+    assert.ok(!existsSync(markerFor(wt)), "no marker on failure, so the next dispatch re-runs setup");
   } finally {
     rmSync(wt, { recursive: true, force: true });
   }
@@ -65,5 +69,25 @@ test("a changed command invalidates the marker and re-runs", () => {
     assert.equal(readFileSync(join(wt, "log.txt"), "utf8").trim().split("\n").length, 2, "both distinct commands ran");
   } finally {
     rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("DHK-358: each repo of a run gets its own marker, so a sibling's setup is never skipped", () => {
+  // The shared scratch makes this a real risk: one marker under it would mean the first repo's setup
+  // marks the second's as done, and the agent gets an uninstalled tree with no trace event at all.
+  const runDir = mkdtempSync(join(tmpdir(), "dahrk-setup-run-"));
+  const a = join(runDir, "repo-a");
+  const b = join(runDir, "repo-b");
+  try {
+    for (const wt of [a, b]) mkdirSync(join(wt, ".dahrk", "scratch"), { recursive: true });
+    const cmd = "echo installing > installed.txt";
+    assert.equal(runRepoSetup({ worktreePath: a, command: cmd }).status, "ran");
+    // Same command, different repo: it must still RUN, not report cached.
+    assert.equal(runRepoSetup({ worktreePath: b, command: cmd }).status, "ran");
+    assert.ok(existsSync(join(b, "installed.txt")), "the sibling's setup actually executed");
+    // ...and each repo caches independently thereafter.
+    assert.equal(runRepoSetup({ worktreePath: b, command: cmd }).status, "cached");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
   }
 });

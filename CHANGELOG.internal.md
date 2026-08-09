@@ -26,6 +26,62 @@ this file is left verbatim.
 
 ### Added
 
+- DHK-358: N worktrees for one run. `<worktreesDir>/<runId>/<repoDir>/` for EVERY run, single-repo
+  included, so there is one layout rather than two and a run's repos have somewhere to share a scratch
+  directory that belongs to none of them. `createWorktrees` is all-or-nothing but rolls back only what
+  the call created, because a later stage's failure must not destroy the run's prior work;
+  `createWorktree` is its N=1 case so the single-repo path cannot drift. The hub half is DHK-251
+  (dahrk-harness#646), which resolves the repo set at intake and freezes it into run-state.
+- DHK-358: the shared scratch is linked into each worktree rather than moved, because the relative
+  path is a published contract with the agent - workflows declare `emitArtifact: ".dahrk/scratch/..."`
+  and the prompt promises documents at `.dahrk/scratch/docs/<slug>.md`. Rewriting those would have
+  broken every pinned workflow in the field.
+- DHK-358: the agent learns about its siblings three ways - a `<repos>` prompt block (rendered only
+  above one repo, so single-repo config digests are unchanged), a `repos` array in `state.json`, and
+  `workspaces` on the runner context, which is what widens the Claude sandbox's `allowWrite` and the
+  container mount.
+
+### Fixed
+
+- DHK-1073: `shell-scan.ts` checked a `cd` target for READ, and `withinRoots` grants reads on `ro`
+  roots - which include `/etc`. So `cd /etc` rebound the cwd into a read-only root, and every
+  unanchored token after it was never checked at all: `looksLikePath` returns false for a bare name,
+  so the deny list was never consulted even though `/etc/shadow` is on it. Requiring WRITE means the
+  target must be an `rw` root, which restores the scanner's premise exactly. A bare `cd`, `cd ~` and
+  `cd -` returned `{kind:"ok"}` WITHOUT rebinding, so the scanner judged later relative paths against
+  the wrong directory and `builtins.ts` carried that across tool calls. Found while building DHK-358;
+  live on main independently of it. The header premise is now written down in full, including the
+  clause it always rested on - that a `cd` is itself path-checked before the rebind - because DHK-998
+  and DHK-999 were both wrong verdicts at this interface.
+- DHK-358: `worktree-reaper.ts` and `git-service.ts` both recovered a runId with `basename(path)`.
+  Nested, that basename is the REPO name, so `isBusy`/`isLive` never match: the reaper collects a run
+  parked at a human gate, and the branch-holder guard silently becomes always-false and tears down a
+  live run's worktree. Neither throws. `runIdOfWorktreePath` is the single tested derivation both now
+  use, treating an underivable path as busy; it landed in its own commit BEFORE the layout change, and
+  that ordering is the whole safety argument. The reaper collects by run, and counts a run broken only
+  when EVERY worktree is unusable, so one dud checkout cannot destroy two healthy repos' work.
+- DHK-358: `excludeScratchLocally` wrote only `.dahrk/scratch/`, and a trailing slash matches
+  DIRECTORIES only. With the scratch symlinked into each worktree, `git add -A` would have staged the
+  link and every pull request would have carried a dangling `.dahrk/scratch` blob. Both forms are
+  excluded now, with a test that pushes a real change and asserts no `.dahrk` entry reaches the remote.
+- DHK-358: `repo-setup.ts` kept its marker at `<worktree>/.dahrk/scratch/.setup-done`. Under the
+  shared scratch that made repo A's marker repo B's, so B's install would silently never run - the
+  DHK-729/731 failure mode the marker exists to prevent, reintroduced by the layout. Keyed by repo
+  directory now.
+- DHK-358: boot reconciliation walked one worktree per ledger entry, stranding N-1 repos' uncommitted
+  tails. `JobLedgerEntry.extraWorktrees` is node-local, so no contract change; the wip ref needs no
+  per-repo suffix because each lives on a different remote.
+- DHK-358: `runPush`'s defensive re-create did `worktrees.set(runId, ref)`, which under a set would
+  have replaced the whole entry and stranded the run's other repos on push 2 of a multi-repo deliver.
+
+### Changed
+
+- DHK-358: the node reads `JobRequest.extraWorkspaces` defensively against the pinned
+  `@dahrk/contracts`, the same idiom as `seedRef`/`injectedSkillPaths`, so this landed without waiting
+  on the publish. `RUN_SCRATCH_DIR_NAME` and `worktreeDirName` are duplicated in `worktree-layout.ts`
+  for the same reason and carry a comment saying to replace them with re-exports once the catalog pin
+  moves to >= 0.19.0.
+
 - DHK-1069: `docs/adr/0002-stage-isolation-is-the-node-boundary.md` records the decision that the
   isolation boundary is the node and its host, not a per-stage container. Documents the DHK-1055
   upstream protocol limit on brokered MCP, why the claude-code RPC asymmetry is not simply "no RPC

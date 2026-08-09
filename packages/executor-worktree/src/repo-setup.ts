@@ -17,7 +17,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** Minimal logger; defaults to a no-op so the library is quiet in tests. Mirrors GitLogger. */
 export interface RepoSetupLogger {
@@ -51,6 +51,8 @@ export type RepoSetupResult =
 const SCRATCH_DIR = join(".dahrk", "scratch");
 /** The idempotency sentinel: its content is the digest of the command that last succeeded here. */
 const MARKER_NAME = ".setup-done";
+/** Per-repo markers live here, under the run's SHARED scratch. */
+const MARKER_DIR = "setup";
 /** Default wall-clock cap on the setup subprocess (10 min): long enough for a cold install, bounded. */
 const DEFAULT_TIMEOUT_MS = 600_000;
 /** Cap the captured output folded into the trace so a chatty installer cannot bloat it (tail kept). */
@@ -69,7 +71,11 @@ function tail(output: string): string {
 export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
   const { worktreePath, command } = opts;
   const log = opts.log ?? noopLogger;
-  const markerPath = join(worktreePath, SCRATCH_DIR, MARKER_NAME);
+  // Keyed by the repo's own directory name, because a run's repos now SHARE one scratch (DHK-358).
+  // A single marker under the shared scratch would mean repo A's marker is repo B's, so repo B's
+  // install would silently never run and the agent would get an uninstalled tree with no trace event
+  // and no warning - reintroducing exactly the DHK-729/731 failure this marker exists to prevent.
+  const markerPath = join(worktreePath, SCRATCH_DIR, MARKER_DIR, `${basename(worktreePath)}${MARKER_NAME}`);
   const want = digest(command);
 
   // Cached: the marker exists and records this exact command -> reuse the installed tree.

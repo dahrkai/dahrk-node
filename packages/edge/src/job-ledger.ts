@@ -54,6 +54,12 @@ export interface JobLedgerEntry {
   branch?: string;
   /** The git url, needed to force-push a preserved tail to the real remote. */
   gitUrl?: string;
+  /** The run's OTHER worktrees on a multi-repo run (DHK-251), so boot reconciliation preserves EVERY
+   *  repo's uncommitted tail rather than only the primary's - which would silently strand N-1 repos'
+   *  work whenever a node died mid-run. Node-local, so no contract change; absent on an entry written
+   *  by a build that predates multi-repo, and `isEntry` validates only the load-bearing scalars, so an
+   *  old ledger still reads. */
+  extraWorktrees?: Array<{ worktreePath: string; gitUrl: string; branch?: string }>;
   /** Epoch ms this node started the job. */
   startedAt: number;
   /** The pid of the NODE process that owned this entry. It is how boot tells "a job this process is

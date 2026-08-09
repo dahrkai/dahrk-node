@@ -11,11 +11,23 @@
  * is created here; its `state.json` is written by the edge stage runner (tenant/run/stage context).
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { WorkspaceRef } from "@dahrk/contracts";
 import { parseNumstat, deriveFootprint, type DiffFootprint } from "./footprint.js";
+import { RUN_SCRATCH_DIR_NAME, runIdOfWorktreePath, worktreeDirName } from "./worktree-layout.js";
 
 /** Minimal logger; defaults to a no-op so the library is quiet in tests. */
 export interface GitLogger {
@@ -255,6 +267,14 @@ export interface GitService {
   /** Ensure the repo's mirror (clone-on-demand) and add a per-run worktree off it. */
   createWorktree(spec: WorktreeSpec): Promise<WorkspaceRef>;
   /**
+   * Provision EVERY repository of a run in one all-or-nothing operation (DHK-358).
+   *
+   * `specs[0]` is the primary: its worktree is the agent's working directory and the run's identity.
+   * Each repo takes a directory inside `<worktreesDir>/<runId>/`, and they share the run-level scratch.
+   * `createWorktree` is the N=1 case of this, so the single-repo path cannot drift from the multi one.
+   */
+  createWorktrees(specs: readonly WorktreeSpec[]): Promise<WorkspaceRef[]>;
+  /**
    * Stage and commit the worktree changes (if any) and push HEAD to `opts.branch` on the REAL remote
    * (not `origin`/the local mirror). Deterministic side effect for the `open-pr` action; does no
    * inference. Pushes via the brokered token the hub attached to the job.
@@ -441,7 +461,11 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
    * write failure is non-fatal, the `git rm --cached` untrack still runs).
    */
   const excludeScratchLocally = (worktreePath: string): void => {
-    const entries = [`${SCRATCH_DIR}/`];
+    // BOTH forms. A trailing slash matches directories only, and under the run-level scratch layout
+    // (DHK-358) `<worktree>/.dahrk/scratch` is a SYMLINK - which git treats as a file. Excluding only
+    // the directory form would let `git add -A` stage the link, so every pull request would carry a
+    // dangling `.dahrk/scratch` blob. The slashless form is what actually covers that.
+    const entries = [`${SCRATCH_DIR}/`, SCRATCH_DIR];
     try {
       const rel = git(worktreePath, ["rev-parse", "--git-path", "info/exclude"]).trim();
       const excludePath = isAbsolute(rel) ? rel : join(worktreePath, rel);
@@ -997,6 +1021,62 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     );
   };
 
+  /** A short, stable discriminator for two repos that share a name. Not security-relevant - it only
+   *  has to be deterministic, so stage 2 reproduces stage 1's directory. */
+  const shortHash = (raw: string): string => createHash("sha256").update(raw).digest("hex").slice(0, 8);
+
+  /** The run's shared scratch: `<worktreesDir>/<runId>/.dahrk/scratch`. It belongs to the RUN, not to
+   *  any one repo, which is what lets several repos write one trace and one `state.json`. */
+  const runScratchDir = (runId: string): string =>
+    join(worktreesDir, runId, RUN_SCRATCH_DIR_NAME, "scratch");
+
+  /**
+   * Point `<worktree>/.dahrk/scratch` at the run's shared scratch.
+   *
+   * A symlink rather than a rewrite of every consumer, because the relative path is a PUBLISHED
+   * CONTRACT with the agent: workflows declare `emitArtifact: ".dahrk/scratch/output/..."`, the prompt
+   * tells the agent its documents are at `.dahrk/scratch/docs/<slug>.md`, and the artifact resolver
+   * checks the path stays inside the worktree. All of that keeps working through the link - `resolve`
+   * is lexical, so the containment test still passes, and the read follows the link.
+   *
+   * Best effort: a node whose filesystem refuses symlinks still runs, with a real directory, and only
+   * loses the sharing.
+   */
+  const linkRunScratch = (runId: string, worktreePath: string): void => {
+    const target = runScratchDir(runId);
+    mkdirSync(target, { recursive: true });
+    const linkPath = join(worktreePath, SCRATCH_DIR);
+    try {
+      if (lstatSync(linkPath, { throwIfNoEntry: false })) {
+        // Already a link to the right place: leave it. Anything else (a real directory from the old
+        // layout, or a stale link) is replaced, so a reused worktree converges on the shared scratch.
+        if (realpathSync(linkPath) === realpathSync(target)) return;
+        rmSync(linkPath, { recursive: true, force: true });
+      }
+      mkdirSync(dirname(linkPath), { recursive: true });
+      symlinkSync(target, linkPath, "dir");
+    } catch (e) {
+      log.warn(`could not link run scratch into ${worktreePath}: ${(e as Error).message}`);
+      mkdirSync(linkPath, { recursive: true });
+    }
+  };
+
+  /**
+   * The directory name each repo takes inside the run directory, disambiguated across the SET.
+   *
+   * `worktreeDirName` is shared with the hub so both sides agree, but it is not collision-free on its
+   * own: `acme/api` and `beta/api` are different repos with the same name. Only the caller can see the
+   * whole set, so the tie-break lives here - and it must be a pure function of the set, because stage 2
+   * has to land on the same directories stage 1 created.
+   */
+  const dirNamesFor = (specs: readonly WorktreeSpec[]): string[] => {
+    const names = specs.map((spec) => worktreeDirName({ repoId: spec.repoId, repo: spec.repo ?? spec.repoId }));
+    return names.map((name, i) => {
+      const collides = names.some((other, j) => j !== i && other === name);
+      return collides ? `${name}-${shortHash(specs[i]!.repoId)}` : name;
+    });
+  };
+
   // `branch` is carried on the ref even though nothing here needs it, because everything DOWNSTREAM
   // does and had no way to get it: the ref is the only handle the stage runner and the ws client hold
   // on a live run, so a ref without a branch left the node unable to say which branch it was working on
@@ -1009,99 +1089,166 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     baseBranch: spec.baseBranch,
     branch: sanitizeBranchName(spec.branch ?? `dahrk/${spec.runId}`),
     worktreePath,
-    scratchPath: join(worktreePath, SCRATCH_DIR),
+    // The RUN's scratch, not this worktree's. It is run-scoped data - the trace, `state.json`, the
+    // issue brief, the Pi session - so on a multi-repo run it belongs to the run directory rather than
+    // to whichever repo happens to be primary. A symlink inside each worktree keeps every relative
+    // `.dahrk/scratch/...` path the agent has ever been told about working unchanged.
+    scratchPath: runScratchDir(spec.runId),
   });
+
+  const buildOne = async (spec: WorktreeSpec, worktreePath: string): Promise<{ ref: WorkspaceRef; created: boolean }> => {
+    const { repoId, gitUrl, baseBranch, runId } = spec;
+    const branchName = sanitizeBranchName(spec.branch ?? `dahrk/${runId}`);
+    mkdirSync(dirname(worktreePath), { recursive: true });
+
+    // Reuse an existing, still-valid worktree for this run (re-dispatch / sticky owner). No clone
+    // needed: the worktree already exists from an earlier stage of the same run.
+    if (existsSync(worktreePath) && gitOk(worktreePath, ["rev-parse", "--git-dir"])) {
+      log.info(`reusing existing worktree at ${worktreePath}`);
+      linkRunScratch(runId, worktreePath);
+      excludeScratchLocally(worktreePath);
+      return { ref: refFor(spec, worktreePath), created: false };
+    }
+
+    // Brokered token (if any) authorises the clone/fetch only; it stays set up through the worktree
+    // build (a possible base-branch fetch below needs it) and is torn down in the finally - the
+    // local `worktree add` itself needs no credential.
+    const auth = spec.credentialToken ? setupAuth(spec.credentialToken) : undefined;
+    try {
+      const { mirror, refreshed } = ensureMirror(repoId, gitUrl, auth?.env);
+
+      // Clear any stale claim on this branch BEFORE adding. A worktree that was never torn down keeps
+      // claiming its branch for ever - even after the ref itself is gone - and git's `die_if_checked_out`
+      // then refuses the add ("'<branch>' is already used by worktree at ..."). That wedged every re-run
+      // of an issue (DHK-371). Prune first (drops entries whose dir has vanished), then evict whatever
+      // still holds the name. A holder belonging to a run that is genuinely in flight is NOT evicted:
+      // two live runs on one issue is a routing bug, and a truthful error beats stomping a live worktree.
+      gitOk(mirror, ["worktree", "prune"]);
+      for (const w of listWorktrees(mirror)) {
+        if (w.branch !== branchName || w.path === worktreePath) continue;
+        // The holder's runId comes from the shared layout helper, never from `basename`. Under the
+        // nested layout the basename is the REPO name, so `isBusy` would never match and this guard
+        // would silently become always-false - tearing down a live run's worktree the moment another
+        // run wanted the same branch. An underivable path is treated as BUSY: refusing to evict
+        // something we cannot identify costs a loud error, evicting it costs the run's work.
+        const holder = runIdOfWorktreePath(worktreesDir, w.path);
+        if (holder === undefined) {
+          throw new Error(
+            `branch ${branchName} is held by an unrecognised worktree at ${w.path}; refusing to evict it`,
+          );
+        }
+        if (isBusy?.(holder)) {
+          throw new Error(`branch ${branchName} is held by in-flight run ${holder} (${w.path})`);
+        }
+        log.warn(`clearing stale worktree ${w.path} which still claims ${branchName}`);
+        teardownWorktreePath(mirror, w.path);
+      }
+
+      // Pick the start point deterministically. A leftover LOCAL `refs/heads/<branch>` is never a start
+      // point: it may be a corpse from a killed run, or a ref the previously-failing `add -b` re-created
+      // moments before it aborted, and branching off it silently bases the run on a stale commit instead
+      // of the base. Continuation is expressed by the REMOTE branch (a prior session that delivered),
+      // which is exactly what `WorkspaceRef.branch` documents.
+      const remoteBranch = `refs/remotes/origin/${branchName}`;
+      const remoteBase = `refs/remotes/origin/${baseBranch}`;
+      if (!refreshed) {
+        // A NEW run branches from the base, which MUST be current. Branching off a stale cached base
+        // silently produces work against an old tree: a run once re-implemented an already-merged fix
+        // because its mirror lagged the remote. If the refresh did not land, fetch the base
+        // authoritatively now; if that also fails we throw rather than branch from a base we cannot
+        // confirm is fresh (truthful failure over a phantom-stale run).
+        log.info(`mirror refresh failed; fetching base ${baseBranch} before branching ${branchName}`);
+        git(mirror, ["fetch", "origin", `+refs/heads/${baseBranch}:${remoteBase}`], netEnv(auth?.env));
+      }
+      const seed = spec.seedRef ? resolveSeedRef(mirror, repoId, spec.seedRef, auth?.env) : undefined;
+      const start = seed ?? (gitOk(mirror, ["rev-parse", "--verify", "-q", remoteBranch]) ? remoteBranch : remoteBase);
+      if (!gitOk(mirror, ["rev-parse", "--verify", "-q", start])) {
+        throw new Error(`start point '${start}' does not resolve in mirror ${repoId}`);
+      }
+
+      // Park any local tip we are about to discard, so `-B` can never silently destroy work. Only when
+      // the existing head is NOT already contained in the start point (i.e. it holds unique commits).
+      salvageOrphanedTip(mirror, branchName, start);
+
+      // `-B` is create-or-reset and is transactional with the checkout, so a branch ref left behind by a
+      // previously failed `add -b` is harmless. `--force` is the belt, not the mechanism: the stale
+      // claims were already cleared above, and this only covers a race.
+      log.info(`creating worktree at ${worktreePath} from ${start} on ${branchName}`);
+      git(mirror, ["worktree", "add", "--force", "-B", branchName, worktreePath, start]);
+    } finally {
+      auth?.cleanup();
+    }
+
+    // Fail fast on an unborn worktree. If the base did not materialise (empty/unresolvable ref), the
+    // worktree checks out with no commit and HEAD does not resolve - every later `git ... HEAD` throws
+    // `ambiguous argument 'HEAD'`, and the run limps to deliver where the first commit lands on a
+    // history unrelated to the base. Refuse to hand back a broken worktree; a truthful intake error
+    // beats a run that fails opaquely three stages later.
+    if (!gitOk(worktreePath, ["rev-parse", "--verify", "-q", "HEAD"])) {
+      throw new Error(`base '${baseBranch}' did not materialise into ${worktreePath} (unborn HEAD)`);
+    }
+
+    // A symlink, not a directory: the run's repos SHARE one scratch, and every relative
+    // `.dahrk/scratch/...` path the agent and the workflows already use keeps resolving.
+    linkRunScratch(runId, worktreePath);
+    excludeScratchLocally(worktreePath);
+    return { ref: refFor(spec, worktreePath), created: true };
+  };
+
+  /** The single-repo case is literally the N=1 case, so the two paths cannot drift. */
+  const createWorktree = async (spec: WorktreeSpec): Promise<WorkspaceRef> => (await createWorktrees([spec]))[0]!;
+
+  /**
+   * Provision every repository of a run in one all-or-nothing operation (DHK-358).
+   *
+   * `specs[0]` is the PRIMARY: its worktree is the agent's working directory and the run's identity.
+   * Every repo gets a directory inside the run's directory, and they share the run-level scratch.
+   */
+  const createWorktrees = async (specs: readonly WorktreeSpec[]): Promise<WorkspaceRef[]> => {
+    if (specs.length === 0) throw new Error("createWorktrees: no repositories to provision");
+    const first = specs[0]!;
+    const runDir = join(worktreesDir, first.runId);
+    const dirNames = dirNamesFor(specs);
+    // Sampled BEFORE the mkdir, or it is always true and the rollback never removes a run directory
+    // this call created.
+    const runDirExisted = existsSync(runDir);
+    mkdirSync(runScratchDir(first.runId), { recursive: true });
+
+    const built: Array<{ ref: WorkspaceRef; created: boolean }> = [];
+    try {
+      for (let i = 0; i < specs.length; i++) {
+        const spec = specs[i]!;
+        built.push(await buildOne(spec, join(runDir, dirNames[i]!)));
+      }
+      return built.map((b) => b.ref);
+    } catch (e) {
+      // All-or-nothing, but roll back ONLY what this call created. On a later stage some worktrees
+      // already exist and take the reuse path; tearing those down because a different repo failed
+      // would destroy the run's prior work, which is worse than the failure being rolled back.
+      for (const b of [...built].reverse()) {
+        if (!b.created) continue;
+        try {
+          teardownWorktreePath(mirrorPathFor(b.ref.repoId), b.ref.worktreePath);
+        } catch {
+          /* best effort: the throw below is the real signal */
+        }
+      }
+      if (!runDirExisted && built.every((b) => b.created)) {
+        rmSync(runDir, { recursive: true, force: true });
+      }
+      const failed = specs[built.length];
+      throw new Error(
+        `run ${first.runId}: could not provision ${failed?.repo ?? failed?.repoId ?? "a repository"}: ${(e as Error).message}`,
+      );
+    }
+  };
+
 
   return {
     worktreesDir,
     probeFootprint,
-    async createWorktree(spec) {
-      const { repoId, gitUrl, baseBranch, runId } = spec;
-      const branchName = sanitizeBranchName(spec.branch ?? `dahrk/${runId}`);
-      const worktreePath = join(worktreesDir, runId);
-      mkdirSync(worktreesDir, { recursive: true });
-
-      // Reuse an existing, still-valid worktree for this run (re-dispatch / sticky owner). No clone
-      // needed: the worktree already exists from an earlier stage of the same run.
-      if (existsSync(worktreePath) && gitOk(worktreePath, ["rev-parse", "--git-dir"])) {
-        log.info(`reusing existing worktree at ${worktreePath}`);
-        mkdirSync(join(worktreePath, SCRATCH_DIR), { recursive: true });
-        excludeScratchLocally(worktreePath);
-        return refFor(spec, worktreePath);
-      }
-
-      // Brokered token (if any) authorises the clone/fetch only; it stays set up through the worktree
-      // build (a possible base-branch fetch below needs it) and is torn down in the finally - the
-      // local `worktree add` itself needs no credential.
-      const auth = spec.credentialToken ? setupAuth(spec.credentialToken) : undefined;
-      try {
-        const { mirror, refreshed } = ensureMirror(repoId, gitUrl, auth?.env);
-
-        // Clear any stale claim on this branch BEFORE adding. A worktree that was never torn down keeps
-        // claiming its branch for ever - even after the ref itself is gone - and git's `die_if_checked_out`
-        // then refuses the add ("'<branch>' is already used by worktree at ..."). That wedged every re-run
-        // of an issue (DHK-371). Prune first (drops entries whose dir has vanished), then evict whatever
-        // still holds the name. A holder belonging to a run that is genuinely in flight is NOT evicted:
-        // two live runs on one issue is a routing bug, and a truthful error beats stomping a live worktree.
-        gitOk(mirror, ["worktree", "prune"]);
-        for (const w of listWorktrees(mirror)) {
-          if (w.branch !== branchName || w.path === worktreePath) continue;
-          const holder = basename(w.path);
-          if (isBusy?.(holder)) {
-            throw new Error(`branch ${branchName} is held by in-flight run ${holder} (${w.path})`);
-          }
-          log.warn(`clearing stale worktree ${w.path} which still claims ${branchName}`);
-          teardownWorktreePath(mirror, w.path);
-        }
-
-        // Pick the start point deterministically. A leftover LOCAL `refs/heads/<branch>` is never a start
-        // point: it may be a corpse from a killed run, or a ref the previously-failing `add -b` re-created
-        // moments before it aborted, and branching off it silently bases the run on a stale commit instead
-        // of the base. Continuation is expressed by the REMOTE branch (a prior session that delivered),
-        // which is exactly what `WorkspaceRef.branch` documents.
-        const remoteBranch = `refs/remotes/origin/${branchName}`;
-        const remoteBase = `refs/remotes/origin/${baseBranch}`;
-        if (!refreshed) {
-          // A NEW run branches from the base, which MUST be current. Branching off a stale cached base
-          // silently produces work against an old tree: a run once re-implemented an already-merged fix
-          // because its mirror lagged the remote. If the refresh did not land, fetch the base
-          // authoritatively now; if that also fails we throw rather than branch from a base we cannot
-          // confirm is fresh (truthful failure over a phantom-stale run).
-          log.info(`mirror refresh failed; fetching base ${baseBranch} before branching ${branchName}`);
-          git(mirror, ["fetch", "origin", `+refs/heads/${baseBranch}:${remoteBase}`], netEnv(auth?.env));
-        }
-        const seed = spec.seedRef ? resolveSeedRef(mirror, repoId, spec.seedRef, auth?.env) : undefined;
-        const start = seed ?? (gitOk(mirror, ["rev-parse", "--verify", "-q", remoteBranch]) ? remoteBranch : remoteBase);
-        if (!gitOk(mirror, ["rev-parse", "--verify", "-q", start])) {
-          throw new Error(`start point '${start}' does not resolve in mirror ${repoId}`);
-        }
-
-        // Park any local tip we are about to discard, so `-B` can never silently destroy work. Only when
-        // the existing head is NOT already contained in the start point (i.e. it holds unique commits).
-        salvageOrphanedTip(mirror, branchName, start);
-
-        // `-B` is create-or-reset and is transactional with the checkout, so a branch ref left behind by a
-        // previously failed `add -b` is harmless. `--force` is the belt, not the mechanism: the stale
-        // claims were already cleared above, and this only covers a race.
-        log.info(`creating worktree at ${worktreePath} from ${start} on ${branchName}`);
-        git(mirror, ["worktree", "add", "--force", "-B", branchName, worktreePath, start]);
-      } finally {
-        auth?.cleanup();
-      }
-
-      // Fail fast on an unborn worktree. If the base did not materialise (empty/unresolvable ref), the
-      // worktree checks out with no commit and HEAD does not resolve - every later `git ... HEAD` throws
-      // `ambiguous argument 'HEAD'`, and the run limps to deliver where the first commit lands on a
-      // history unrelated to the base. Refuse to hand back a broken worktree; a truthful intake error
-      // beats a run that fails opaquely three stages later.
-      if (!gitOk(worktreePath, ["rev-parse", "--verify", "-q", "HEAD"])) {
-        throw new Error(`base '${baseBranch}' did not materialise into ${worktreePath} (unborn HEAD)`);
-      }
-
-      mkdirSync(join(worktreePath, SCRATCH_DIR), { recursive: true });
-      excludeScratchLocally(worktreePath);
-      return refFor(spec, worktreePath);
-    },
+    createWorktree,
+    createWorktrees,
 
     async commitAndPush(ref, opts) {
       const { worktreePath } = ref;

@@ -1163,7 +1163,9 @@ forBothRuntimes("DHK-371: a job that throws before `finish` must not leave the r
   const gitService = createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") });
   const exploding = {
     ...gitService,
-    createWorktree: async () => {
+    // Provisioning goes through `createWorktrees` now (DHK-358); `createWorktree` is its N=1 case, so
+    // stubbing the plural entry point is what actually intercepts the run's provisioning.
+    createWorktrees: async () => {
       throw new Error("fatal: 'dahrk/issue-DHK-1' is already used by worktree at /somewhere/stale");
     },
   };
@@ -1327,7 +1329,7 @@ forBothRuntimes("a repo `setup` step runs in the worktree before the agent, and 
     const result = await runner.runJob(job);
     assert.equal(result.status, "ok", "the stage succeeds with a buildable tree");
     assert.ok(
-      existsSync(join(worktrees, "run-setup-ok", "node_modules", ".installed")),
+      existsSync(join(worktrees, "run-setup-ok", "repo", "node_modules", ".installed")),
       "setup ran in the worktree before the agent, so node_modules is present",
     );
     assert.ok(
@@ -1407,10 +1409,10 @@ forBothRuntimes("a failing repo `setup` fails the stage cleanly before the agent
     assert.equal(ranAgent, false, "the agent runner is never constructed on a broken tree");
     // The distinct `setup-failed` error frame is recorded in the trace archive (like provision-failed /
     // hook-failed), and surfaced to the hub as a legible progress error - not stumbled into by the agent.
-    const traceLines = execFileSync("grep", ["-rh", "setup-failed", join(worktrees, "run-setup-fail", ".dahrk", "scratch", "traces")], { encoding: "utf8" });
+    const traceLines = execFileSync("grep", ["-rh", "setup-failed", join(worktrees, "run-setup-fail")], { encoding: "utf8" });
     assert.match(traceLines, /"kind":"setup-failed"/, "the trace carries a distinct `setup-failed` error kind");
     assert.ok(
-      progress.some((p) => p.kind === "error" && /repo setup failed/.test(p.text ?? "")),
+      progress.some((p) => p.kind === "error" && /repo setup for .* failed/.test(p.text ?? "")),
       "the failure is surfaced to the hub as a legible progress error",
     );
   } finally {

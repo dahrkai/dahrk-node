@@ -25,6 +25,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { RUN_SCRATCH_DIR_NAME, runIdOfWorktreePath } from "./worktree-layout.js";
 
 /** Milliseconds. */
 const MINUTE = 60_000;
@@ -54,7 +55,14 @@ export interface ReapPolicy {
   dryRun?: boolean;
 }
 
-export type ReapReason = "broken" | "idle" | "over-count";
+export type ReapReason =
+  | "broken"
+  | "idle"
+  | "over-count"
+  /** An idle run left in the pre-DHK-358 flat layout (`<worktreesDir>/<runId>` with no repo
+   *  subdirectory). Collected on exactly the same terms as any other idle run - this reason exists so
+   *  an upgraded node's first sweeps say WHY, not to change what happens. */
+  | "legacy-layout";
 
 export interface ReapedWorktree {
   runId: string;
@@ -131,10 +139,20 @@ const canonical = (p: string): string => {
 /**
  * The last time a run actually did anything, as a durable on-disk clock. `.dahrk/scratch/state.json`
  * is rewritten by the stage runner on every stage entry and exit, so its mtime survives a process
- * restart (which the in-memory map did not). Falls back to the worktree dir's own mtime.
+ * restart (which the in-memory map did not).
+ *
+ * Takes the NEWEST of every candidate - the run-level scratch, each worktree's own (the legacy layout
+ * kept it inside the worktree), the run directory and the worktrees themselves. Over-estimating
+ * recency is the safe direction: it can delay a collection, never cause one. Under-estimating reaps a
+ * live run.
  */
-function lastUsedMs(worktreePath: string): number {
-  const candidates = [join(worktreePath, ".dahrk", "scratch", "state.json"), worktreePath];
+function lastUsedMs(runDir: string, worktrees: readonly string[]): number {
+  const candidates = [
+    join(runDir, ".dahrk", "scratch", "state.json"),
+    ...worktrees.map((w) => join(w, ".dahrk", "scratch", "state.json")),
+    runDir,
+    ...worktrees,
+  ];
   let newest = 0;
   for (const p of candidates) {
     try {
@@ -258,41 +276,108 @@ export function createWorktreeReaper(opts: ReaperOptions) {
 
       // Candidates = what git still has registered, UNION what is on disk. The union matters: a
       // worktree whose mirror was deleted is invisible to git but still occupies the disk.
+      // Two levels, because a run directory now CONTAINS its repos' worktrees rather than being one
+      // (DHK-358). The discriminator is a `.git` entry: a linked worktree always has one (a FILE
+      // pointing at `<mirror>/worktrees/<id>`), and a run directory never does. That is what lets an
+      // upgraded node read its own legacy flat directories and the new nested ones in the same sweep.
+      const onDiskRunDirs: string[] = [];
       const onDisk = (() => {
+        const out: string[] = [];
+        let top: string[];
         try {
-          return readdirSync(opts.worktreesDir).map((d) => canonical(join(opts.worktreesDir, d)));
+          top = readdirSync(opts.worktreesDir);
         } catch {
-          return [];
+          return out;
         }
+        for (const d of top) {
+          const runDir = join(opts.worktreesDir, d);
+          onDiskRunDirs.push(canonical(runDir));
+          if (existsSync(join(runDir, ".git"))) {
+            out.push(canonical(runDir)); // legacy flat: the run directory IS the worktree
+            continue;
+          }
+          try {
+            for (const child of readdirSync(runDir)) {
+              // `.dahrk` is the run's shared scratch, not a repo.
+              if (child === RUN_SCRATCH_DIR_NAME) continue;
+              out.push(canonical(join(runDir, child)));
+            }
+          } catch {
+            /* unreadable: the run directory still counts, via onDiskRunDirs */
+          }
+        }
+        return out;
       })();
       // Both sides canonicalised, so the same worktree from `readdir` and from git dedupes to one entry.
-      const candidates = [...new Set([...onDisk, ...[...registered.values()].flat()])];
+      const worktreePaths = [...new Set([...onDisk, ...[...registered.values()].flat()])];
 
-      type Entry = { path: string; runId: string; idleMs: number; live: boolean; broken: boolean; mirror?: string };
-      const entries: Entry[] = [];
-      for (const path of candidates) {
+      // Group every worktree by the RUN it belongs to (DHK-251/DHK-358). A run is the unit of
+      // collection now: its repos share a directory and a scratch, so they live and die together.
+      // Anything whose runId cannot be derived is not ours - leave it, never guess.
+      type Entry = {
+        runId: string;
+        runDir: string;
+        worktrees: Array<{ path: string; mirror?: string }>;
+        idleMs: number;
+        live: boolean;
+        broken: boolean;
+        legacy: boolean;
+      };
+      const byRun = new Map<string, { runDir: string; worktrees: Array<{ path: string; mirror?: string }>; legacy: boolean }>();
+      for (const path of worktreePaths) {
         report.scanned++;
-        const runId = path.split("/").pop() ?? path;
+        const runId = runIdOfWorktreePath(opts.worktreesDir, path);
+        if (runId === undefined) continue;
+        const runDir = canonical(join(opts.worktreesDir, runId));
+        // Flat = the worktree IS the run directory, which is what the pre-DHK-358 layout produced.
+        const legacy = canonical(path) === runDir;
+        const mirror = ownerOf(path, registered);
+        const entry = byRun.get(runId) ?? { runDir, worktrees: [], legacy };
+        entry.legacy = entry.legacy || legacy;
+        entry.worktrees.push({ path, ...(mirror ? { mirror } : {}) });
+        byRun.set(runId, entry);
+      }
+      // A run directory with no worktree under it at all (the agent's checkout was hand-deleted, or a
+      // provisioning failure left the shell) is still a run's worth of disk, and still ours to collect.
+      for (const d of onDiskRunDirs) {
+        const runId = runIdOfWorktreePath(opts.worktreesDir, d);
+        if (runId !== undefined && !byRun.has(runId)) {
+          byRun.set(runId, { runDir: canonical(join(opts.worktreesDir, runId)), worktrees: [], legacy: false });
+        }
+      }
+
+      const entries: Entry[] = [];
+      for (const [runId, r] of byRun) {
         if (opts.isBusy?.(runId)) {
           report.skipped++;
           continue;
         }
-        const idleMs = now - lastUsedMs(path);
+        const idleMs = now - lastUsedMs(r.runDir, r.worktrees.map((w) => w.path));
         if (idleMs < graceMs) {
           // Might belong to a live run in another process. Never touch it.
           report.skipped++;
           continue;
         }
-        // Broken = the worktree cannot resolve HEAD (its branch ref was deleted under it). It is
-        // unusable for any future run and only serves to hold its branch name hostage.
-        const broken = !existsSync(path) || !gitOk(path, ["rev-parse", "--verify", "-q", "HEAD"]);
+        // Broken = the run has no usable worktree left: none of them can resolve HEAD. Deliberately
+        // "every", not "any" - collecting a three-repo run because ONE worktree lost its branch ref
+        // would destroy the other two repos' uncommitted work, which is worse than leaving one dud
+        // directory on disk until the idle sweep takes the whole run.
+        const usable = r.worktrees.filter(
+          (w) => existsSync(w.path) && gitOk(w.path, ["rev-parse", "--verify", "-q", "HEAD"]),
+        );
+        const broken = usable.length === 0;
+        if (r.worktrees.length > 0 && usable.length > 0 && usable.length < r.worktrees.length) {
+          log.warn(
+            `reaper: run ${runId} has ${r.worktrees.length - usable.length} unusable worktree(s) of ` +
+              `${r.worktrees.length}; keeping the run so the healthy ones are not destroyed with it`,
+          );
+        }
         // A run this node has not seen finish is EXEMPT FROM IDLENESS ENTIRELY, because idleness cannot
         // distinguish it from a finished one: it is idle between every pair of stages and for the whole
         // of a human gate. No ceiling is guessed here - a longer one would only move the cliff, not
-        // remove it. `broken` and the count cap still apply: a worktree that cannot resolve HEAD is
-        // useless to the run anyway, and `maxRuns` is what keeps the disk bounded meanwhile.
+        // remove it. `broken` and the count cap still apply.
         const live = opts.isLive?.(runId) ?? false;
-        entries.push({ path, runId, idleMs, live, broken, ...(ownerOf(path, registered) ? { mirror: ownerOf(path, registered)! } : {}) });
+        entries.push({ runId, runDir: r.runDir, worktrees: r.worktrees, idleMs, live, broken, legacy: r.legacy });
       }
 
       // Idlest first, so the over-count sweep evicts the least recently useful.
@@ -304,26 +389,36 @@ export function createWorktreeReaper(opts: ReaperOptions) {
         else if (!e.live && e.idleMs > maxIdleMs) doomed.push({ ...e, reason: "idle" });
       }
       // Then trim whatever survives down to maxRuns, idlest first.
-      const survivors = keep.filter((e) => !doomed.some((d) => d.path === e.path));
+      const survivors = keep.filter((e) => !doomed.some((d) => d.runId === e.runId));
       for (const e of survivors.slice(0, Math.max(0, survivors.length - maxRuns))) {
         doomed.push({ ...e, reason: "over-count" });
       }
 
       for (const d of doomed) {
+        // A legacy flat directory is named in the log so an upgraded node's first sweeps are readable;
+        // it is otherwise collected on exactly the same terms as any other run. Deliberately NOT
+        // force-deleted at boot regardless of age: a node upgraded while a run sat at a human gate
+        // would lose that run's work, and the grace window plus the idle threshold already gate this
+        // correctly.
+        const reason: ReapReason = d.legacy && d.reason === "idle" ? "legacy-layout" : d.reason;
         if (dryRun) {
-          log.info(`reaper (dry-run): would reap ${d.runId} (${d.reason}, idle ${Math.round(d.idleMs / MINUTE)}m)`);
-          report.reaped.push({ runId: d.runId, path: d.path, reason: d.reason });
+          log.info(`reaper (dry-run): would reap ${d.runId} (${reason}, idle ${Math.round(d.idleMs / MINUTE)}m)`);
+          for (const w of d.worktrees) report.reaped.push({ runId: d.runId, path: w.path, reason });
           continue;
         }
         try {
           // Remove via the owning mirror where known, so the ADMIN ENTRY goes too (an `rm -rf` alone
           // leaves the registration, and the registration is what blocks the next run of that issue).
-          if (d.mirror) {
-            gitOk(d.mirror, ["worktree", "remove", "--force", d.path]);
+          for (const w of d.worktrees) {
+            if (w.mirror) gitOk(w.mirror, ["worktree", "remove", "--force", w.path]);
+            rmSync(w.path, { recursive: true, force: true });
+            if (w.mirror) gitOk(w.mirror, ["worktree", "prune"]);
+            report.reaped.push({ runId: d.runId, path: w.path, reason });
           }
-          rmSync(d.path, { recursive: true, force: true });
-          if (d.mirror) gitOk(d.mirror, ["worktree", "prune"]);
-          report.reaped.push({ runId: d.runId, path: d.path, reason: d.reason });
+          // ONE delete for the whole run, which takes the shared scratch with it. This is what makes
+          // teardown a run-level operation rather than N worktree-level ones that leave the shell.
+          rmSync(d.runDir, { recursive: true, force: true });
+          if (d.worktrees.length === 0) report.reaped.push({ runId: d.runId, path: d.runDir, reason });
         } catch (e) {
           report.errors.push(`${d.runId}: ${(e as Error).message}`);
         }

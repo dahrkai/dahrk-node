@@ -6,8 +6,8 @@
  * Runtime-agnostic and side-effect-free apart from reading a configured prompt file off the worktree.
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import type { RunnerContext } from "@dahrk/contracts";
+import { basename, join } from "node:path";
+import type { RunnerContext, WorkspaceRef } from "@dahrk/contracts";
 import { attachedDocBasename } from "@dahrk/contracts";
 
 /** Strip a leading YAML frontmatter block (`---` ... `---`) from a prompt-file body, so a
@@ -272,6 +272,37 @@ function checkFailuresBlock(ctx: RunnerContext): string {
  * adapters (and the batch and interactive paths) build the stage prompt, so the ticket, guidance, and
  * documents reach the agent uniformly.
  */
+/**
+ * The `<repos>` manifest for a MULTI-REPO run (DHK-251): every repository checked out for this run,
+ * and where it is relative to the agent's working directory.
+ *
+ * Rendered only when there is more than one, so a single-repo prompt is byte-identical. That is not
+ * only tidiness: the assembled prompt feeds the stage's config digest, so a block that said nothing
+ * would invalidate every existing single-repo digest for no gain.
+ *
+ * Paths are RELATIVE, because that is what the agent types and what path confinement judges. The
+ * working directory is the primary repo, and the siblings are `../<name>` beside it.
+ */
+function reposBlock(ctx: RunnerContext): string {
+  const workspaces = (ctx as RunnerContext & { workspaces?: WorkspaceRef[] }).workspaces ?? [];
+  if (workspaces.length < 2) return "";
+  const rows = workspaces.map((w, i) => {
+    const path = i === 0 ? "." : `../${basename(w.worktreePath)}`;
+    return `| ${w.repo} | ${path} | ${w.branch ?? ""} | ${w.baseBranch} |`;
+  });
+  return [
+    "<repos>",
+    "This run has more than one repository checked out side by side. You are in the first one; the",
+    "others are directories beside it, and you may read and change them. Commit nothing: each repo is",
+    "committed and pushed for you at the end of the run.",
+    "",
+    "| Repo | Path | Branch | Base |",
+    "|---|---|---|---|",
+    ...rows,
+    "</repos>",
+  ].join("\n");
+}
+
 export function resolveStagePrompt(ctx: RunnerContext): string {
   const instruction = stageInstruction(ctx);
   const ticket = ctx.issueContext?.trim()
@@ -289,7 +320,10 @@ export function resolveStagePrompt(ctx: RunnerContext): string {
   // it is the most immediate, most actionable context the agent has, and it is the reason this stage
   // is running at all.
   const checkFailures = checkFailuresBlock(ctx);
-  const preamble = [ticket, guidance, gateFeedback, docs, comments, related, checkFailures]
+  // The repo manifest sits with the ticket: it is a fact about the workspace the agent is standing in,
+  // so it belongs before any of the narrative context.
+  const repos = reposBlock(ctx);
+  const preamble = [ticket, repos, guidance, gateFeedback, docs, comments, related, checkFailures]
     .filter(Boolean)
     .join("\n\n");
   return preamble ? `${preamble}\n\n${instruction}` : instruction;

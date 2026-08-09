@@ -28,7 +28,7 @@ import { scanCommand } from "../src/shell-scan.js";
 /**
  * A synthetic root set with the same SHAPE `computeFsRoots` produces, minus the machine probing.
  *
- * The worktree is nested as production nests it (`<state>/worktrees/<runId>`), because DEPTH is
+ * The worktree is nested as production nests it (`<state>/worktrees/<runId>/<repo>`), because DEPTH is
  * load-bearing: from a worktree one level below `/`, `cat ../../etc/passwd` resolves to `/etc/passwd`
  * and is a legitimate toolchain read, so a shallow fixture would quietly assert the wrong thing. It
  * sits under neither `$HOME` (whose config paths are readable) nor tmp (itself an rw root, which
@@ -38,14 +38,20 @@ import { scanCommand } from "../src/shell-scan.js";
  * The `~`-derived roots use the REAL `homedir()` because `expandPath` does - a test that invented a
  * home would not exercise the deny list at all. `driftGuard` below pins this shape to production.
  */
-const WT = realish("/dahrk-test-wt/worktrees/run-1");
-const SCRATCH = join(WT, ".dahrk", "scratch");
+const RUN_DIR = "/dahrk-test-wt/worktrees/run-1";
+const WT = realish(join(RUN_DIR, "primary-repo"));
+/** A second repo of the same run (DHK-251): a writable root, one level up and across. */
+const SIBLING = realish(join(RUN_DIR, "other-repo"));
+/** The run directory itself is deliberately NOT a root: it holds every repo plus the engine's
+ *  scratch, so making it writable would hand the agent the lot as one tree. `cd ..` must deny. */
+const SCRATCH = realish(join(RUN_DIR, ".dahrk", "scratch"));
 /** Anchored outside every root: the canonical escape target for this file. */
 const OUT = "/dahrk-test-outside";
 
 const roots = (): FsRoots => ({
   rw: [
     WT,
+    SIBLING,
     SCRATCH,
     ...[tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].map(realish),
     "/dev/null",
@@ -310,4 +316,61 @@ test("the synthetic roots have the same shape computeFsRoots produces", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- DHK-358: sibling repos are roots; their parent is not ---------------------------------------
+
+const scanFrom = (cmd: string, cwd = WT) => scanCommand(cmd, roots(), cwd);
+
+test("DHK-358: a sibling repo of the same run is reachable and writable", () => {
+  // The whole point of a multi-repo run: change a contract and its consumer in one stage.
+  for (const cmd of [
+    "cd ../other-repo && pnpm test",
+    "git -C ../other-repo status",
+    "cat ../other-repo/package.json",
+    "mkdir -p ../other-repo/dist",
+  ]) {
+    assert.equal(scanFrom(cmd).kind, "ok", cmd);
+  }
+});
+
+test("DHK-358: an unanchored token after a legal `cd` resolves inside the sibling, and is allowed", () => {
+  // This is the premise the header states: every cwd the scanner can reach is a writable root, so a
+  // bare name after a rebind cannot escape.
+  const out = scanFrom("cd ../other-repo && cat package.json");
+  assert.equal(out.kind, "ok");
+  assert.equal(out.kind === "ok" ? out.cwd : "", SIBLING, "and the cwd really did rebind");
+});
+
+test("DHK-358: the run directory holding both repos is NOT a root", () => {
+  // It contains every repo plus the engine's scratch. Making it writable would hand the agent the lot.
+  assert.equal(scanFrom("cd ..").kind, "escape");
+  assert.equal(scanFrom("cat ../secret.txt").kind, "escape");
+  assert.equal(scanFrom("cat ../../other-run/repo/x").kind, "escape", "nor is another run's directory");
+});
+
+test("DHK-358: escaping is still denied from EVERY worktree root, not only the primary", () => {
+  for (const cwd of [WT, SIBLING]) {
+    assert.equal(scanFrom(`cat ${OUT}/secret`, cwd).kind, "escape", `anchored escape from ${cwd}`);
+    assert.equal(scanFrom("cat ~/.ssh/id_rsa", cwd).kind, "escape", `deny-listed read from ${cwd}`);
+  }
+});
+
+test("a `cd` into a read-only root is refused, so an unanchored read cannot follow it", () => {
+  // The escape this closes: `cd` used to be checked for READ, and `withinRoots` grants reads on `ro`
+  // roots - which include `/etc`. So the cwd rebound into `/etc`, and `cat shadow` was then never
+  // checked at all: `looksLikePath` returns false for a bare name, so `deny` was never consulted.
+  assert.equal(scanFrom("cd /etc && cat shadow").kind, "escape");
+  assert.equal(scanFrom("cd /usr/local").kind, "escape");
+  // A writable root is still a legal destination, which is what `cd` is for.
+  assert.equal(scanFrom("cd /tmp && rm -rf junk").kind, "ok");
+});
+
+test("a bare `cd`, `cd ~` and `cd -` do not silently leave the cwd behind", () => {
+  // Returning "ok" without rebinding sent the real shell to $HOME while the scanner went on judging
+  // relative paths against the worktree - and `builtins.ts` carries that cwd across tool calls, so the
+  // mistake compounds for the rest of the session.
+  assert.equal(scanFrom("cd").kind, "escape");
+  assert.equal(scanFrom("cd ~").kind, "escape");
+  assert.equal(scanFrom("cd -").kind, "escape");
 });
