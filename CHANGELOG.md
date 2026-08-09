@@ -6,8 +6,20 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Added
+
+- A run can check out several repositories side by side, so one stage can change both. (#201)
+
+### Changed
+
+- A run's worktrees now sit in a directory of their own, one level deeper than before. (#201)
+- A command that changes directory into a read-only location, such as `/etc` or `/usr`, is now refused. (#201)
+
 ### Fixed
 
+- A stage can no longer read files outside its worktree by changing directory first. (#201)
+- A node that dies mid-run preserves the uncommitted work in every repository of that run. (#201)
+- Each repository of a run runs its own setup command. (#201)
 - The installer's instructions now suit a box with no `sudo`, using `su` or dropping the privileged route entirely. (#199)
 - The apt and dnf recipes are a single command, so a partial paste can no longer install an older distro Node. (#199)
 - The installer no longer rejects an npm prefix that is configured but not yet created. (#199)
