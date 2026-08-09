@@ -87,6 +87,23 @@ function pushUnrelatedBranch(remote: string, branch: string): void {
   }
 }
 
+/** Push `branch` to the bare remote carrying `file`, branched off main. Stands in for the hub's
+ *  DHK-264 backup push, which preserves a conflicted run's committed HEAD on `dahrk/wip/<runId>`. */
+function pushBranchWithFile(remote: string, branch: string, file: string, content: string): void {
+  const seed = mkdtempSync(join(tmpdir(), "dahrk-wip-"));
+  try {
+    git(seed, ["clone", remote, "."]);
+    git(seed, ["config", "user.email", "harness@dahrk.test"]);
+    git(seed, ["config", "user.name", "Dahrk"]);
+    writeFileSync(join(seed, file), content);
+    git(seed, ["add", "."]);
+    git(seed, ["commit", "-m", `wip: ${file}`]);
+    git(seed, ["push", "origin", `HEAD:refs/heads/${branch}`]);
+  } finally {
+    rmSync(seed, { recursive: true, force: true });
+  }
+}
+
 test("sanitizeBranchName produces a valid ref", () => {
   assert.equal(sanitizeBranchName("dahrk/run A..b"), "dahrk/run-A.b");
 });
@@ -1748,6 +1765,61 @@ test("probeFootprint never throws: a measurement must not be able to fail a stag
     assert.doesNotThrow(() => svc.probeFootprint(ref, { base: "no-such-base" }));
   } finally {
     cleanup();
+  }
+});
+
+test("createWorktree seeds from the preserved WIP ref, which the mirror only holds as a remote-tracking ref", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  // The hub names the seed by its BRANCH name (`wipRefFor`), but the mirror's tracking refspec files it
+  // under `refs/remotes/origin/*`, where an unqualified `rev-parse` never finds it (DHK-1057).
+  const wipRef = "dahrk/wip/run-conflicted";
+  try {
+    pushBranchWithFile(remote, wipRef, "wip.txt", "the work the conflicted run committed\n");
+    const ref = await svc.createWorktree({
+      repoId: "repo-seed",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-resolve-1",
+      branch: "dahrk/issue-TEST-seed",
+      seedRef: wipRef,
+    });
+    assert.ok(
+      existsSync(join(ref.worktreePath, "wip.txt")),
+      "the resolve pass starts from the preserved work, not from base",
+    );
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+  }
+});
+
+test("createWorktree refuses to fall back to base when the requested seed does not resolve", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    // Silently branching off main here is what billed an empty conflict-resolution pass: the stage
+    // finds no conflict because the work it was sent to resolve is simply absent.
+    await assert.rejects(
+      svc.createWorktree({
+        repoId: "repo-seed-missing",
+        gitUrl: remote,
+        baseBranch: "main",
+        runId: "run-resolve-2",
+        branch: "dahrk/issue-TEST-seed-missing",
+        seedRef: "dahrk/wip/run-vanished",
+      }),
+      /seed ref 'dahrk\/wip\/run-vanished' does not resolve/,
+    );
+  } finally {
+    rmSync(remote, { recursive: true, force: true });
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
   }
 });
 

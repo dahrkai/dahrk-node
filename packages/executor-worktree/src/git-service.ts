@@ -956,6 +956,47 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
     return { mirror, refreshed: true };
   };
 
+  /**
+   * Resolve the hub-supplied `seedRef` to a ref the mirror can branch from, or throw (DHK-1057).
+   *
+   * The hub names the preserved WIP ref by its BRANCH name (`dahrk/wip/<runId>`, see the hub's
+   * `wipRefFor`), because that is what the backup push targeted on the real remote. The mirror,
+   * though, fetches with the tracking refspec (`TRACKING_REFSPEC`), so that branch only ever exists
+   * here as `refs/remotes/origin/dahrk/wip/<runId>`. Git's ref-resolution ladder never reaches a
+   * remote-tracking ref from an unqualified name (`refs/remotes/<name>` is tried, `refs/remotes/
+   * origin/<name>` is not), so the old bare `rev-parse --verify` ALWAYS failed and the seed was
+   * silently dropped - a conflict-resolution re-entry then branched off the base with none of the
+   * work it was sent to resolve, found no conflict, and delivered nothing.
+   *
+   * So: try the candidate forms, and if none resolve, fetch that one branch directly (the mirror may
+   * have been refreshed before the backup push landed) before giving up.
+   *
+   * Throws when it still does not resolve. A seed the hub explicitly asked for is load-bearing:
+   * falling back to the base branch is precisely the silent failure above, and a resolve pass with
+   * nothing to resolve is a billed no-op. A truthful error beats an empty run.
+   */
+  const resolveSeedRef = (mirror: string, repoId: string, seedRef: string, authEnv?: NodeJS.ProcessEnv): string => {
+    const candidates = [seedRef, `refs/remotes/origin/${seedRef}`, `refs/heads/${seedRef}`];
+    const resolved = (): string | undefined =>
+      candidates.find((c) => gitOk(mirror, ["rev-parse", "--verify", "-q", c]));
+    const hit = resolved();
+    if (hit) return hit;
+    // Not in the mirror yet. The backup push may have landed after this mirror's last refresh, so ask
+    // the remote for that single branch rather than declaring the work lost. Best-effort: a failure
+    // here falls through to the throw below, which names the ref.
+    try {
+      log.info(`seed ${seedRef} not in mirror ${repoId}; fetching it directly`);
+      git(mirror, ["fetch", "origin", `+refs/heads/${seedRef}:refs/remotes/origin/${seedRef}`], netEnv(authEnv));
+    } catch (e) {
+      log.warn(`seed fetch failed for ${seedRef}: ${(e as Error).message}`);
+    }
+    const afterFetch = resolved();
+    if (afterFetch) return afterFetch;
+    throw new Error(
+      `seed ref '${seedRef}' does not resolve in mirror ${repoId} (the preserved work this run was sent to continue is not on the remote)`,
+    );
+  };
+
   // `branch` is carried on the ref even though nothing here needs it, because everything DOWNSTREAM
   // does and had no way to get it: the ref is the only handle the stage runner and the ws client hold
   // on a live run, so a ref without a branch left the node unable to say which branch it was working on
@@ -1029,9 +1070,7 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
           log.info(`mirror refresh failed; fetching base ${baseBranch} before branching ${branchName}`);
           git(mirror, ["fetch", "origin", `+refs/heads/${baseBranch}:${remoteBase}`], netEnv(auth?.env));
         }
-        const seed = spec.seedRef && gitOk(mirror, ["rev-parse", "--verify", "-q", spec.seedRef])
-          ? spec.seedRef
-          : undefined;
+        const seed = spec.seedRef ? resolveSeedRef(mirror, repoId, spec.seedRef, auth?.env) : undefined;
         const start = seed ?? (gitOk(mirror, ["rev-parse", "--verify", "-q", remoteBranch]) ? remoteBranch : remoteBase);
         if (!gitOk(mirror, ["rev-parse", "--verify", "-q", start])) {
           throw new Error(`start point '${start}' does not resolve in mirror ${repoId}`);

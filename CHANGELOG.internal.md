@@ -24,6 +24,30 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- `createWorktree` resolves `WorkspaceRef.seedRef` through the remote-tracking form and, failing
+  that, one targeted fetch; an unresolvable seed now throws instead of falling back to the base
+  branch (DHK-1057).
+
+  The seed had never once resolved in production. The hub names the preserved WIP ref by its BRANCH
+  name (`dahrk/wip/<runId>`, the hub's `wipRefFor`), because that is what the DHK-264 backup push
+  targets on the real remote. The mirror, though, fetches with `+refs/heads/*:refs/remotes/origin/*`,
+  so the branch lands only as `refs/remotes/origin/dahrk/wip/<runId>`, and git's ref-resolution ladder
+  cannot reach that from an unqualified name (it tries `refs/remotes/<name>`, never
+  `refs/remotes/origin/<name>`). The old `gitOk(mirror, ["rev-parse", "--verify", "-q", seedRef])`
+  therefore returned false every time, and the `? :` around it dropped the seed WITHOUT A WORD.
+
+  The consequence was a billed no-op. A `conflict-resolution` re-entry branched off `origin/main`
+  with none of the work it was sent to resolve, the resolve stage correctly reported "there is in fact
+  no conflict to resolve", and `deliver` then had an empty delta — which on DHK-1057 surfaced to the
+  user as a GitHub 422 (`PullRequest.head invalid`) from the hub opening a PR for a branch that was
+  never pushed.
+
+  The throw is the other half of the fix: a seed the hub explicitly asked for is load-bearing, so
+  silently substituting the base is never an acceptable degradation. Absent `seedRef` keeps the old
+  behaviour exactly (remote branch, else base).
+
 ## [0.4.3] - 2026-08-09
 
 ### Added

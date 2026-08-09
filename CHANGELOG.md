@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A re-run that continues preserved work now starts from that work, and fails loudly rather than silently branching off the base.
+
 ## [0.4.3] - 2026-08-09
 
 ### Added
