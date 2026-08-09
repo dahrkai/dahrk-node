@@ -55,11 +55,11 @@ export interface PreExecutionCapability {
  * the interactive gate-exit path.
  */
 export const SUMMARISE_PROMPT =
-  "This stage is ending. In ONE concise sentence for a human reviewer reading the Linear ticket, " +
-  "state concretely what you DID or FOUND in this stage and the result (for example which " +
-  "functions or files changed, whether the tests pass, or what a review flagged). Be specific and " +
-  "lead with the outcome. Do not mention internal scratch files or a next-stage entry point. Reply " +
-  "with only that sentence.";
+  "This stage is ending. In ONE plain sentence of at most 30 words, for a human reviewer reading the " +
+  "Linear ticket who may not be an engineer, say what you DID or FOUND and how it turned out. Lead " +
+  "with the outcome. Do NOT list command names, flags, file paths, or counts of files, tests or " +
+  "lines: those are shown separately, and repeating them here crowds out the point. Do not mention " +
+  "internal scratch files or a next-stage entry point. Reply with only that sentence.";
 
 /**
  * Build the per-event emit function an adapter calls for each mapped event. It stamps

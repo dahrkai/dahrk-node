@@ -1602,3 +1602,167 @@ test("fetchProbe on a missing worktree fails cleanly rather than throwing", asyn
   assert.match(result.output, /worktree missing/);
   rmSync(worktreesDir, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// DHK-1053: `probeFootprint` - measuring the change BEFORE it is committed or pushed.
+//
+// A deliver gate opens before the push runs, so `commitAndPush` (the only thing that had ever
+// measured a diff) has not happened when a human is asked to approve one. Stage output also sits
+// uncommitted, and usually untracked, in the shared worktree until deliver squashes it. So these
+// cover the cases that actually occur on the stage-end path, not just the committed one.
+// ---------------------------------------------------------------------------
+
+/** A worktree off a fresh bare remote, ready to be dirtied. */
+async function probeFixture(gitignore?: string) {
+  const remote = makeBareRemote(gitignore);
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  const ref = await svc.createWorktree({
+    repoId: "repo-probe",
+    gitUrl: remote,
+    baseBranch: "main",
+    runId: `run-probe-${Math.floor(process.hrtime()[1])}`,
+    branch: "dahrk/issue-TEST-probe",
+  });
+  const cleanup = () => {
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  };
+  return { svc, ref, cleanup };
+}
+
+test("probeFootprint counts UNTRACKED new files: the common case for a docs or scaffold stage", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    // Never added, never committed - exactly how a stage leaves its output.
+    writeFileSync(join(ref.worktreePath, "NOTES.md"), "one\ntwo\nthree\n");
+    const fp = svc.probeFootprint(ref, { base: "main" });
+    assert.equal(fp?.numstat.files, 1);
+    assert.equal(fp?.numstat.added, 3);
+    assert.equal(fp?.numstat.removed, 0);
+    assert.deepEqual(fp?.changedPaths, ["NOTES.md"]);
+    assert.equal(fp?.changedPathsTruncated, false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint counts uncommitted edits to TRACKED files", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    writeFileSync(join(ref.worktreePath, "README.md"), "# fixture\nextra line\n");
+    const fp = svc.probeFootprint(ref, { base: "main" });
+    assert.equal(fp?.numstat.files, 1);
+    assert.equal(fp?.numstat.added, 1);
+    assert.deepEqual(fp?.changedPaths, ["README.md"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint counts committed and uncommitted work together, as one change over base", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    writeFileSync(join(ref.worktreePath, "a.txt"), "a\n");
+    git(ref.worktreePath, ["add", "-A"]);
+    git(ref.worktreePath, ["-c", "user.email=t@t.test", "-c", "user.name=T", "commit", "-m", "stage 1"]);
+    // A later stage adds more, uncommitted. The gate must see BOTH.
+    writeFileSync(join(ref.worktreePath, "b.txt"), "b\n");
+    const fp = svc.probeFootprint(ref, { base: "main" });
+    assert.equal(fp?.numstat.files, 2);
+    assert.deepEqual(fp?.changedPaths.sort(), ["a.txt", "b.txt"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint ignores engine scratch: internal state never inflates the blast radius", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    writeFileSync(join(ref.scratchPath, "state.json"), "{}\n");
+    // Scratch is the ONLY change, so there is nothing to report at all.
+    assert.equal(svc.probeFootprint(ref, { base: "main" }), undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint ignores gitignored files, which the push would not have carried either", async () => {
+  const { svc, ref, cleanup } = await probeFixture("build/\n");
+  try {
+    mkdirSync(join(ref.worktreePath, "build"), { recursive: true });
+    writeFileSync(join(ref.worktreePath, "build", "out.js"), "compiled\n");
+    writeFileSync(join(ref.worktreePath, "src.txt"), "source\n");
+    const fp = svc.probeFootprint(ref, { base: "main" });
+    assert.deepEqual(fp?.changedPaths, ["src.txt"], "only the file that would actually ship");
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint returns undefined on a clean worktree, so the gate shows no change block", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    assert.equal(svc.probeFootprint(ref, { base: "main" }), undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint measures from the MERGE BASE, so commits the base gained are not counted as ours", async () => {
+  const remote = makeBareRemote();
+  const worktreesDir = mkdtempSync(join(tmpdir(), "dahrk-wt-"));
+  const mirrorsDir = mkdtempSync(join(tmpdir(), "dahrk-mir-"));
+  const svc = createGitService({ worktreesDir, mirrorsDir });
+  try {
+    const ref = await svc.createWorktree({
+      repoId: "repo-mb",
+      gitUrl: remote,
+      baseBranch: "main",
+      runId: "run-mb-1",
+      branch: "dahrk/issue-TEST-mb",
+    });
+    writeFileSync(join(ref.worktreePath, "ours.txt"), "ours\n");
+    // Someone else lands on main after we branched. Diffing the base ref directly would report their
+    // file as something WE deleted; measuring from the merge base does not.
+    advanceRemoteMain(remote, "theirs.txt", "theirs\n", "a parallel run");
+    git(ref.worktreePath, ["fetch", "origin", "main"]);
+    const fp = svc.probeFootprint(ref, { base: "main" });
+    assert.deepEqual(fp?.changedPaths, ["ours.txt"]);
+    assert.equal(fp?.numstat.removed, 0, "nothing is reported as deleted");
+  } finally {
+    rmSync(worktreesDir, { recursive: true, force: true });
+    rmSync(mirrorsDir, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("probeFootprint never throws: a measurement must not be able to fail a stage", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    rmSync(ref.worktreePath, { recursive: true, force: true });
+    assert.equal(svc.probeFootprint(ref, { base: "main" }), undefined);
+    // An unresolvable base is a degradation, not an error, either.
+    assert.doesNotThrow(() => svc.probeFootprint(ref, { base: "no-such-base" }));
+  } finally {
+    cleanup();
+  }
+});
+
+test("probeFootprint leaves the worktree committable: intent-to-add does not disturb the later push", async () => {
+  const { svc, ref, cleanup } = await probeFixture();
+  try {
+    writeFileSync(join(ref.worktreePath, "new.txt"), "new\n");
+    svc.probeFootprint(ref, { base: "main" });
+    // The index now holds an intent-to-add entry. The deliver push must still commit real content,
+    // not the empty blob that `--intent-to-add` staged.
+    const r = await svc.commitAndPush(ref, { message: "deliver", branch: "dahrk/issue-TEST-probe" });
+    assert.equal(r.pushed, true);
+    assert.equal(r.nothingToCommit, false);
+    assert.match(git(ref.worktreePath, ["show", "HEAD:new.txt"]), /new/);
+  } finally {
+    cleanup();
+  }
+});

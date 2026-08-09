@@ -26,6 +26,49 @@ this file is left verbatim.
 
 ### Added
 
+- `GitService.probeFootprint(ref, { base })` measures the worktree against the run's merge base
+  without committing or pushing, and `stage-runner`'s `finish` attaches the result to
+  `JobResult.footprint` (DHK-1053).
+
+  The point is a sequencing problem, not a rendering one. A deliver gate opens BEFORE the deliver
+  action runs (`host-run-object.ts` appends `gate-opened` and returns; the action only runs once the
+  gate resolves), so `projection.push` — the only thing that had ever measured a diff — is always
+  absent at the moment a human is asked to approve one. Stages never commit either: their output
+  accumulates uncommitted in the shared worktree until `commitPending` squashes the lot during
+  deliver. So nothing in the system had ever measured the change at the point of approval, and the
+  gate comment could show no file count at all.
+
+  Three details in the probe carry the correctness:
+
+  - `git add -A --intent-to-add` first, or a stage that only ADDS files (the common docs/scaffold
+    case) measures as zero. It stages empty blobs only, and the next git operation of the run is
+    `commitPending`'s plain `add -A`, so the index mutation is inert — covered by a test that probes
+    and then pushes real content.
+  - The comparison point is `merge-base(base, HEAD)`, not the base ref. Diffing the base directly
+    would report commits the base gained since the run branched as deletions the run had made.
+  - Scratch and gitignored paths are filtered, so engine state never inflates the blast radius.
+
+  `isScratchPath` and the base-ref ladder were hoisted out of `commitAndPush` into shared closures
+  (`isScratchPath(worktreePath, p)`, `resolveBaseRef`) so the probe and the push cannot drift on what
+  "base" or "a change" means; `commitAndPush` now calls `resolveBaseRef` for its `commitsAhead`.
+
+  The stage-runner call site is doubly guarded: it skips scratch-only (telemetry) runs, whose `ref`
+  is a bare non-git directory with an empty base, and `typeof`-checks the method so a git service
+  predating it degrades to "no measurement". `finish` is the only path that returns a stage result,
+  so a throw there would lose the whole stage and its trace.
+
+- Requires `@dahrk/contracts` 0.17.0 for `DiffFootprint` and `JobResult.footprint`.
+
+### Changed
+
+- `SUMMARISE_PROMPT` now asks for one plain sentence of at most 30 words and explicitly forbids
+  command names, flags, paths and counts (DHK-1053). The old prompt invited "which functions or files
+  changed, whether the tests pass", and models answered with a command transcript that then hit the
+  280-char recap cap and clipped mid-sentence. The counts it used to solicit are now rendered
+  separately from measured data, so asking the model for them was both redundant and unreliable.
+
+### Added
+
 - **Live node health over the socket (DHK-1059).** New `node-health-request` / `node-health-report`
   frame pair, the first request/response pair on this socket - `upgrade`, `policy` and `cancel` are
   all fire-and-forget. `ws-client.ts` answers in-process: Node version, runtime resolution, disk and

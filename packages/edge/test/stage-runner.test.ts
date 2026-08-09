@@ -1729,3 +1729,122 @@ test("runtime-detect treats a runtime it does not know as missing", async () => 
   assert.equal(r.ok, false);
   assert.match(r.output, /does not know this runtime/);
 });
+
+// DHK-1053: the stage-end footprint probe. The gate that asks a human to approve a change opens
+// before the push, so the measurement has to ride the ordinary stage result. These cover the wiring
+// (a real worktree yields a real measurement) and the two ways it must degrade rather than break.
+
+/** A runner that writes real files into the worktree, so there is an actual diff to measure. */
+const writingRunner =
+  (files: Record<string, string>) =>
+  (runtime: Runtime) => {
+    const inner = createMockRunner(runtime);
+    return {
+      ...inner,
+      async runBatch(ctx: Parameters<typeof inner.runBatch>[0], onTrace: Parameters<typeof inner.runBatch>[1]) {
+        for (const [name, body] of Object.entries(files)) {
+          writeFileSync(join(ctx.workspace.worktreePath, name), body);
+        }
+        return inner.runBatch(ctx, onTrace);
+      },
+    };
+  };
+
+forBothRuntimes("a stage reports what it changed, so the deliver gate can quantify it before the push", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-fp-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+    makeRunner: writingRunner({ "NOTES.md": "one\ntwo\n" }),
+    rules: [],
+    sendProgress: () => undefined,
+  });
+
+  try {
+    const result = await runner.runJob({
+      tenantId: "t_default",
+      runId: "run-fp-1",
+      stageId: "build",
+      jobId: "job-fp-1",
+      awakeableId: "awk-fp-1",
+      executorType: "worktree",
+      agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+      workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+      timeout: 60,
+    });
+    assert.equal(result.status, "ok");
+    // The file was never committed - it is exactly the uncommitted state a deliver gate sees.
+    assert.equal(result.footprint?.numstat.files, 1);
+    assert.equal(result.footprint?.numstat.added, 2);
+    assert.deepEqual(result.footprint?.changedPaths, ["NOTES.md"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("a stage that changed nothing reports no footprint, rather than a zeroed one", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-fp0-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const runner = createStageRunner({
+    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+    makeRunner: createMockRunner,
+    rules: [],
+    sendProgress: () => undefined,
+  });
+
+  try {
+    const result = await runner.runJob({
+      tenantId: "t_default",
+      runId: "run-fp-2",
+      stageId: "review",
+      jobId: "job-fp-2",
+      awakeableId: "awk-fp-2",
+      executorType: "worktree",
+      agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+      workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+      timeout: 60,
+    });
+    assert.equal(result.status, "ok");
+    assert.equal(result.footprint, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("a git service with no probe still returns the stage result: a measurement cannot fail a stage", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-fp3-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const real = createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") });
+  // An older node's service: every other method present, `probeFootprint` absent entirely.
+  const { probeFootprint: _omitted, ...withoutProbe } = real;
+  const runner = createStageRunner({
+    gitService: withoutProbe as never,
+    makeRunner: writingRunner({ "NOTES.md": "one\n" }),
+    rules: [],
+    sendProgress: () => undefined,
+  });
+
+  try {
+    const result = await runner.runJob({
+      tenantId: "t_default",
+      runId: "run-fp-3",
+      stageId: "build",
+      jobId: "job-fp-3",
+      awakeableId: "awk-fp-3",
+      executorType: "worktree",
+      agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+      workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+      timeout: 60,
+    });
+    assert.equal(result.status, "ok", "the stage still succeeds");
+    assert.equal(result.footprint, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
