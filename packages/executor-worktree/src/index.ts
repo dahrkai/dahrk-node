@@ -114,11 +114,9 @@ export type { PiAuthHint, ProviderHint, ApiKeyProviderHint, OAuthProviderHint } 
  * selects the deterministic, credential-free mock (set by the offline hub harness so its
  * scenarios stay green without Claude/Pi auth).
  *
- * A managed node that requires container isolation sets `DAHRK_PI_ISOLATION=container` to run
- * each Pi stage in a fresh per-job Docker container (`pi --mode rpc`) instead of the embedded
- * in-process session. Known degradation on that path: `PiRpcSession` has no `agent` handle, so
- * `summarise`'s tool-denial is a no-op there (see `pi-rpc-client.ts`); meta-loop stages are
- * telemetry-only, so this is accepted.
+ * Stage isolation is the node boundary, not a per-stage container — see
+ * `docs/adr/0002-stage-isolation-is-the-node-boundary.md`. The `DAHRK_PI_ISOLATION=container`
+ * flag is an internal escape hatch for meta-loop Pi stages only; see `piContainerIsolationRequired`.
  */
 export function makeRunner(runtime: Runner["runtime"]): Runner {
   if ((process.env.DAHRK_RUNNER ?? "real") === "mock") return createMockRunner(runtime);
@@ -134,7 +132,17 @@ export function makeRunner(runtime: Runner["runtime"]): Runner {
   );
 }
 
-/** Whether Pi stages must run container-isolated; a managed node sets `DAHRK_PI_ISOLATION=container`. */
+/**
+ * INTERNAL — UNSUPPORTED — PI-ONLY — IMAGELESS.
+ *
+ * Reads `DAHRK_PI_ISOLATION=container` to activate the container Pi path. This flag is not a
+ * self-hoster feature: it is scoped to telemetry-only meta-loop Pi stages, the image it names
+ * (`dahrk/pi:latest`) is not built in this repository, and it has never run against a real Docker
+ * daemon in production. `claude-code` stages are unaffected regardless of this flag — there is no
+ * equivalent container path for that runtime (see ADR 0002).
+ *
+ * See `docs/adr/0002-stage-isolation-is-the-node-boundary.md` for the full rationale.
+ */
 function piContainerIsolationRequired(): boolean {
   return process.env.DAHRK_PI_ISOLATION === "container";
 }

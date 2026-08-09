@@ -24,6 +24,15 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- DHK-1069: `docs/adr/0002-stage-isolation-is-the-node-boundary.md` records the decision that the
+  isolation boundary is the node and its host, not a per-stage container. Documents the DHK-1055
+  upstream protocol limit on brokered MCP, why the claude-code RPC asymmetry is not simply "no RPC
+  mode", the RPC fidelity trade-off, and the ADR 0005 corollary on explicit-vs-detected isolation.
+  Comments at `piContainerIsolationRequired()` and the `pi-container.ts` module header now name the
+  ADR and state clearly that the escape hatch is internal/unsupported/Pi-only/imageless.
+
 ### Fixed
 
 - `install.sh` renders every privileged instruction through `as_root()`, driven by a `PRIV`

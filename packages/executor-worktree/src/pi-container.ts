@@ -1,7 +1,16 @@
 /**
- * The container Pi session factory: spawns `pi --mode rpc` inside
- * a Docker container and wraps the child in `PiRpcSession`, so the T6 adapter's orchestration
- * runs unchanged against a containerised Pi.
+ * INTERNAL — UNSUPPORTED — PI-ONLY — IMAGELESS.
+ *
+ * The container Pi session factory: spawns `pi --mode rpc` inside a Docker container and wraps
+ * the child in `PiRpcSession`, so the Pi adapter's orchestration runs unchanged against a
+ * containerised Pi. This module is an internal escape hatch; it is NOT a self-hoster feature.
+ *
+ * Status (see `docs/adr/0002-stage-isolation-is-the-node-boundary.md`):
+ *   - Scoped to telemetry-only meta-loop Pi stages. No customer worktree is mounted; only
+ *     `.dahrk/scratch` is available inside the container.
+ *   - The image it names (`dahrk/pi:latest`, or `DAHRK_PI_IMAGE`) is **not built** anywhere in this
+ *     repository and has never run against a real Docker daemon in production.
+ *   - `claude-code` stages have no equivalent path and are unaffected by `DAHRK_PI_ISOLATION`.
  *
  * Container lifecycle:
  *   - One container per stage job: the runner memoises the session, so `runBatch` + `summarise`
