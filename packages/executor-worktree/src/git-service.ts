@@ -16,6 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { WorkspaceRef } from "@dahrk/contracts";
 import { parseNumstat, deriveFootprint, type DiffFootprint } from "./footprint.js";
+import { runIdOfWorktreePath } from "./worktree-layout.js";
 
 /** Minimal logger; defaults to a no-op so the library is quiet in tests. */
 export interface GitLogger {
@@ -1046,7 +1047,17 @@ export function createGitService(opts: GitServiceOptions = {}): GitService {
         gitOk(mirror, ["worktree", "prune"]);
         for (const w of listWorktrees(mirror)) {
           if (w.branch !== branchName || w.path === worktreePath) continue;
-          const holder = basename(w.path);
+          // The holder's runId comes from the shared layout helper, never from `basename`. Under the
+          // nested layout the basename is the REPO name, so `isBusy` would never match and this guard
+          // would silently become always-false - tearing down a live run's worktree the moment another
+          // run wanted the same branch. An underivable path is treated as BUSY: refusing to evict
+          // something we cannot identify costs a loud error, evicting it costs the run's work.
+          const holder = runIdOfWorktreePath(worktreesDir, w.path);
+          if (holder === undefined) {
+            throw new Error(
+              `branch ${branchName} is held by an unrecognised worktree at ${w.path}; refusing to evict it`,
+            );
+          }
           if (isBusy?.(holder)) {
             throw new Error(`branch ${branchName} is held by in-flight run ${holder} (${w.path})`);
           }
