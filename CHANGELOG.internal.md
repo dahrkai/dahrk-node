@@ -24,6 +24,39 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` renders every privileged instruction through `as_root()`, driven by a `PRIV`
+  (root/sudo/su/none) probe; the apt and dnf recipes became one `&&` command; the npm-prefix check
+  walks to the nearest existing ancestor; a missing npm on apt/dnf points at NodeSource; the nvm
+  route states which user it installs for. `scripts/test-install.sh` covers all four privilege
+  shapes (95 assertions).
+
+  Six defects, all found in one session on one real box (Debian 12, DHK follow-up to #196):
+
+  1. **sudo was assumed.** A stock Debian has no sudo at all - `debian:12` confirms it - so
+     `sudo -E bash -` failed with `sudo: command not found` and every instruction we printed was
+     unusable. The box did have a root password, so `su -c` is the answer there, and where neither
+     exists we now print no privileged command at all rather than one we know cannot work.
+  2. **The apt recipe was two separable lines.** The user's first line failed (no sudo) and they ran
+     the second alone: `apt-get install -y nodejs` installs Debian's nodejs 18. That is strictly
+     worse than nothing - `node` now exists, so the error changes from "not installed" to "too old",
+     and Debian's package ships no npm. Joined with `&&` it cannot half-apply.
+  3. **Node without npm was called a broken install.** Debian's `nodejs` only Suggests npm, so
+     node-and-no-npm is a normal shape there; "reinstall Node" was the wrong instruction.
+  4. **The nvm route did not say whose home it uses.** Run under `su -`, it installed to
+     `/root/.nvm`, and the invoking user was still without Node - a silent no-op that reads as "I
+     installed Node and the installer still says it is missing".
+  5. **The EACCES message also hardcoded sudo**, the same defect as (1) in a second place.
+  6. **Our own prefix check false-positived.** `npm config set prefix ~/.npm-global` without a mkdir
+     is a very common setup; npm creates the directory, but `-w` on the missing path is false, so we
+     blocked an install that would have worked. Verified in a container.
+
+  The service side was checked before recommending nvm: the systemd unit is a *user* unit and
+  `ExecStart` uses `process.execPath` (service.ts), an absolute path, so an nvm Node does start
+  under it. Worth knowing that an `nvm install` of a newer patch moves that path and the unit needs
+  re-installing - which is why the system-wide route is offered first wherever root is reachable.
+
 ### Changed
 
 - DHK-1055: investigated threading brokered MCP to the container-isolated Pi over the existing RPC

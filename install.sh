@@ -72,6 +72,12 @@ done
 # dahrk-harness/testbed/bootstrap.sh.
 PLATFORM_LABEL=unknown
 PKG=none
+# How this user can reach root, if at all: root | sudo | su | none. Every instruction that needs
+# privilege is rendered through this, because a box without sudo is not exotic - a stock Debian has
+# none, and telling such a user to run `sudo apt-get` is the same dead end as telling them to run
+# brew. `su` is the fallback there (it asks for the root password rather than theirs), and when
+# there is no route at all we must not print a privileged command we know cannot work.
+PRIV=none
 
 # Read one KEY=value from an os-release file using only shell built-ins. That file is designed to be
 # sourced, but this script may be piped into a root shell, so it is parsed rather than executed: a
@@ -95,6 +101,33 @@ os_release_field() {
     esac
   done < "$OS_RELEASE"
   return 1
+}
+
+detect_privilege() {
+  if [ "$(id -u 2>/dev/null || echo 1000)" = "0" ]; then
+    PRIV=root
+  elif command -v sudo >/dev/null 2>&1; then
+    PRIV=sudo
+  elif command -v su >/dev/null 2>&1; then
+    PRIV=su
+  fi
+}
+
+# Render a command so it runs as root on THIS box, as a single unsplittable line. Empty output means
+# there is no route to root, and the caller must offer something else instead.
+#
+# One command, not two. The apt recipe used to print as two lines - add the NodeSource repo, then
+# `apt-get install -y nodejs` - and a user whose first line failed ran the second on its own. That
+# installs Debian's own nodejs, which is 18 and ships no npm: strictly worse than nothing, because
+# `node` now exists and the failure changes from "not installed" to "too old". Joined with && it
+# cannot half-apply.
+as_root() {
+  case "$PRIV" in
+    root) printf '%s' "$1" ;;
+    sudo) printf "sudo -E sh -c '%s'" "$1" ;;
+    su) printf "su -c '%s'" "$1" ;;
+    *) printf '' ;;
+  esac
 }
 
 detect_platform() {
@@ -127,54 +160,83 @@ detect_platform() {
 # and it is spelled out in full: "nvm install 22" on a machine with no nvm is the advice that sent a
 # real user round in a circle.
 node_install_hint() {
+  # The system-wide recipe for this package manager, as ONE command, without any privilege prefix.
+  sys_label=""
+  sys_cmd=""
+  case "$PKG" in
+    apt)
+      sys_label="Debian / Ubuntu (NodeSource)"
+      sys_cmd="curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x | bash - && apt-get install -y nodejs"
+      ;;
+    dnf)
+      sys_label="Fedora / RHEL (NodeSource)"
+      sys_cmd="curl -fsSL https://rpm.nodesource.com/setup_${NODE_MIN_MAJOR}.x | bash - && dnf install -y nodejs"
+      ;;
+    apk)
+      sys_label="Alpine"
+      sys_cmd="apk add --no-cache nodejs npm"
+      ;;
+    pacman)
+      sys_label="Arch"
+      sys_cmd="pacman -S --noconfirm nodejs npm"
+      ;;
+    zypper)
+      sys_label="openSUSE"
+      sys_cmd="zypper install -y nodejs${NODE_MIN_MAJOR}"
+      ;;
+  esac
+
   echo ""
-  echo "Detected: $PLATFORM_LABEL"
+  echo "Detected: $PLATFORM_LABEL, running as $(whoami 2>/dev/null || echo "this user")"
   echo ""
   echo "Install Node ${NODE_MIN_MAJOR}, then re-run this command."
   echo ""
-  case "$PKG" in
-    apt)
-      echo "  Debian / Ubuntu (NodeSource):"
-      echo "    curl -fsSL https://deb.nodesource.com/setup_${NODE_MIN_MAJOR}.x | sudo -E bash -"
-      echo "    sudo apt-get install -y nodejs"
-      ;;
-    dnf)
-      echo "  Fedora / RHEL (NodeSource):"
-      echo "    curl -fsSL https://rpm.nodesource.com/setup_${NODE_MIN_MAJOR}.x | sudo -E bash -"
-      echo "    sudo dnf install -y nodejs"
-      ;;
-    apk)
-      echo "  Alpine:"
-      echo "    sudo apk add --no-cache nodejs npm"
-      echo "    (check 'node -v' afterwards: only Alpine 3.20+ carries Node ${NODE_MIN_MAJOR}.)"
-      ;;
-    pacman)
-      echo "  Arch:"
-      echo "    sudo pacman -S nodejs npm"
-      ;;
-    zypper)
-      echo "  openSUSE:"
-      echo "    sudo zypper install -y nodejs${NODE_MIN_MAJOR}"
-      ;;
-    brew)
-      echo "  macOS (Homebrew):"
-      echo "    brew install node@${NODE_MIN_MAJOR}"
-      echo "    brew link --overwrite node@${NODE_MIN_MAJOR}"
-      ;;
-    none)
-      if [ "$PLATFORM_OS" = "Darwin" ]; then
-        echo "  macOS: install Homebrew (https://brew.sh), then:"
-        echo "    brew install node@${NODE_MIN_MAJOR}"
-      else
-        echo "  No supported package manager found (apt-get, dnf, apk, pacman, zypper)."
-        echo "  Use nvm below, or the official builds at https://nodejs.org/en/download."
+
+  # Homebrew is never run as root, so it does not go through as_root at all.
+  if [ "$PKG" = brew ]; then
+    echo "  macOS (Homebrew):"
+    echo "    brew install node@${NODE_MIN_MAJOR} && brew link --overwrite node@${NODE_MIN_MAJOR}"
+    echo ""
+  elif [ -n "$sys_cmd" ]; then
+    sys_rooted=$(as_root "$sys_cmd")
+    if [ -n "$sys_rooted" ]; then
+      echo "  $sys_label:"
+      echo "    $sys_rooted"
+      case "$PRIV" in
+        su) echo "    (this box has no sudo, so su asks for the ROOT password, not yours.)" ;;
+      esac
+      if [ "$PKG" = apk ]; then
+        echo "    (check 'node -v' afterwards: only Alpine 3.20+ carries Node ${NODE_MIN_MAJOR}.)"
       fi
-      ;;
-  esac
-  echo ""
-  echo "  Or with nvm, which needs no sudo:"
+      echo ""
+    else
+      echo "  This box has no sudo and no su, so there is no way to install Node system-wide."
+      echo "  Use the nvm route below, which installs into your home directory."
+      echo ""
+    fi
+  elif [ "$PLATFORM_OS" = "Darwin" ]; then
+    echo "  macOS: install Homebrew (https://brew.sh), then:"
+    echo "    brew install node@${NODE_MIN_MAJOR}"
+    echo ""
+  else
+    echo "  No supported package manager found (apt-get, dnf, apk, pacman, zypper)."
+    echo "  Use the nvm route below, or the official builds at https://nodejs.org/en/download."
+    echo ""
+  fi
+
+  # nvm installs into $HOME, so WHICH user runs it is the whole point. Running it under `su -` puts
+  # Node in /root/.nvm, where the account that will actually run the node cannot see it - a silent
+  # no-op that reads as "I installed Node and the installer still says it is missing".
+  echo "  Or with nvm, which needs no root at all:"
   echo "    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh | bash"
   echo "    . \"\$HOME/.nvm/nvm.sh\" && nvm install ${NODE_MIN_MAJOR}"
+  if [ "$PRIV" = root ]; then
+    echo "    (you are root: nvm would install into /root. Run these as the user that will run"
+    echo "     the node, or use the system-wide route above.)"
+  else
+    echo "    (installs into \$HOME for $(whoami 2>/dev/null || echo "this user") only - run it as"
+    echo "     the same user that will run the node, never under su or sudo.)"
+  fi
   echo ""
   echo "  Official builds: https://nodejs.org/en/download"
   echo ""
@@ -192,6 +254,7 @@ case "$PLATFORM_OS" in
     fail "unsupported operating system: $PLATFORM_OS. dahrk-node supports macOS and Linux." ;;
 esac
 
+detect_privilege
 detect_platform
 
 # --- Node 22+ ------------------------------------------------------------------------------------
@@ -216,8 +279,21 @@ if [ "$node_major" -lt "$NODE_MIN_MAJOR" ]; then
   exit 1
 fi
 
-command -v npm >/dev/null 2>&1 ||
-  fail "npm was not found alongside Node. Reinstall Node ${NODE_MIN_MAJOR}+ so npm is on your PATH, then re-run."
+# Node without npm is a real Debian/Ubuntu shape, not a broken install: their `nodejs` package
+# only SUGGESTS npm, so `apt-get install nodejs` leaves you with node and no npm. "Reinstall Node"
+# is the wrong instruction there, which is why this branch takes the platform into account too.
+if ! command -v npm >/dev/null 2>&1; then
+  echo "dahrk install: Node is present (${node_version}) but npm is not on PATH." >&2
+  if [ "$PKG" = apt ] || [ "$PKG" = dnf ]; then
+    echo "" >&2
+    echo "Your distro's nodejs package ships without npm. The NodeSource build includes it:" >&2
+    echo "" >&2
+    node_install_hint >&2
+  else
+    echo "Reinstall Node ${NODE_MIN_MAJOR}+ so npm comes with it, then re-run." >&2
+  fi
+  exit 1
+fi
 
 # --- the global npm prefix must be writable --------------------------------------------------------
 # A distro Node puts its global prefix under /usr, which an ordinary user cannot write, so
@@ -232,6 +308,15 @@ if [ -n "$npm_prefix" ]; then
   if [ -d "$npm_prefix/lib/node_modules" ]; then
     prefix_target=$npm_prefix/lib/node_modules
   fi
+  # A prefix that does not exist yet is not a failure - npm creates it. `npm config set prefix
+  # ~/.npm-global` without a mkdir is an extremely common setup, and testing -w on the missing
+  # directory rejected it out of hand. The real question is whether the nearest EXISTING ancestor is
+  # writable, i.e. whether npm will be able to create what is missing.
+  while [ ! -e "$prefix_target" ] && [ "$prefix_target" != "/" ]; do
+    prefix_parent=${prefix_target%/*}
+    [ -n "$prefix_parent" ] || prefix_parent=/
+    prefix_target=$prefix_parent
+  done
   if [ ! -w "$prefix_target" ]; then
     echo "dahrk install: the global npm prefix ($prefix_target) is not writable, so" >&2
     echo "'npm install -g dahrk-node' would fail with EACCES." >&2
@@ -243,10 +328,21 @@ if [ -n "$npm_prefix" ]; then
     echo "  echo 'export PATH=\"\$HOME/.npm-global/bin:\$PATH\"' >> \"\$HOME/.profile\"" >&2
     echo "  export PATH=\"\$HOME/.npm-global/bin:\$PATH\"" >&2
     echo "" >&2
-    echo "or re-run this installer with sudo:" >&2
-    echo "" >&2
-    echo "  curl -fsSL https://dahrk.ai/install.sh | sudo sh -s -- --token <connect-token>" >&2
-    echo "" >&2
+    # Same rule as the Node hint: only offer a privileged command this box can actually run.
+    case "$PRIV" in
+      sudo)
+        echo "or install it as root instead:" >&2
+        echo "" >&2
+        echo "  curl -fsSL https://dahrk.ai/install.sh | sudo sh -s -- --token <connect-token>" >&2
+        echo "" >&2
+        ;;
+      su)
+        echo "or install it as root instead (su asks for the ROOT password; this box has no sudo):" >&2
+        echo "" >&2
+        echo "  su -c 'curl -fsSL https://dahrk.ai/install.sh | sh -s -- --token <connect-token>'" >&2
+        echo "" >&2
+        ;;
+    esac
     exit 1
   fi
 fi

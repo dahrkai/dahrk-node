@@ -6,6 +6,14 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- The installer's instructions now suit a box with no `sudo`, using `su` or dropping the privileged route entirely. (#199)
+- The apt and dnf recipes are a single command, so a partial paste can no longer install an older distro Node. (#199)
+- The installer no longer rejects an npm prefix that is configured but not yet created. (#199)
+- Node without npm, the shape Debian's own package leaves you in, is explained instead of being called a broken install. (#199)
+- The nvm route says to run it as the user that will run the node, not as root. (#199)
+
 ## [0.4.4] - 2026-08-09
 
 ### Changed

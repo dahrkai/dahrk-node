@@ -30,6 +30,17 @@ make_stubs() {
 echo "${STUB_UNAME:-Linux}"
 EOF
 
+  # Who we are drives every privileged instruction, so both are stubbed and driven from STUB_UID.
+  cat >"$dir/id" <<'EOF'
+#!/bin/sh
+echo "${STUB_UID:-1000}"
+EOF
+
+  cat >"$dir/whoami" <<'EOF'
+#!/bin/sh
+[ "${STUB_UID:-1000}" = "0" ] && echo root || echo tester
+EOF
+
   if [ "$with_node" = "1" ]; then
     cat >"$dir/node" <<'EOF'
 #!/bin/sh
@@ -71,6 +82,12 @@ add_pkg() {
   printf '#!/bin/sh\nexit 0\n' >"$WORK/stubs/$1"
   chmod +x "$WORK/stubs/$1"
 }
+
+# Give the box a route to root. Same mechanism as add_pkg - the script only probes with `command -v`
+# - but named apart because privilege, not packaging, is what it decides. With neither `sudo` nor
+# `su` present the box has NO route to root, which is a real Debian shape and the one that produced
+# the "sudo: command not found" dead end.
+add_priv() { add_pkg "$1"; }
 
 FIXTURES="$ROOT/scripts/fixtures/os-release"
 
@@ -138,31 +155,90 @@ assert_no_log "^npm " "old Node does not install"
 # on a box with neither, so every route offered was a dead end. The rule is that the commands printed
 # must be the ones that work on the detected platform, and must not be the ones that do not.
 
-# Debian / Ubuntu -> NodeSource over apt.
+# Debian / Ubuntu with sudo -> NodeSource over apt, as one command.
 make_stubs "$WORK/stubs" 0
 add_pkg apt-get
+add_priv sudo
 run DAHRK_OS_RELEASE="$FIXTURES/debian" --
 assert_code_nonzero "Debian without Node fails"
 assert_out "Debian GNU/Linux 12" "Debian output names the detected distro"
 assert_out "deb\.nodesource\.com/setup_22\.x" "Debian gets the NodeSource apt route"
-assert_out "sudo apt-get install -y nodejs" "Debian gets the apt install line"
+assert_out "sudo -E sh -c" "Debian with sudo runs the recipe through sudo"
 assert_not_out "brew install" "Debian is not told to use Homebrew"
+
+# The apt recipe must be ONE command. Two lines let a user whose first line failed run the second
+# alone, which installs Debian's nodejs 18 - `node` then exists, is too old, and has no npm.
+assert_out "bash - && apt-get install -y nodejs" "the apt recipe is a single && command"
+assert_not_out "^ *(sudo )?apt-get install -y nodejs *$" "apt-get install never stands on its own line"
 
 # Fedora / RHEL -> NodeSource over dnf.
 make_stubs "$WORK/stubs" 0
 add_pkg dnf
+add_priv sudo
 run DAHRK_OS_RELEASE="$FIXTURES/fedora" --
 assert_out "Fedora Linux 41" "Fedora output names the detected distro"
 assert_out "rpm\.nodesource\.com/setup_22\.x" "Fedora gets the NodeSource rpm route"
-assert_out "sudo dnf install -y nodejs" "Fedora gets the dnf install line"
+assert_out "dnf install -y nodejs" "Fedora gets the dnf install line"
 assert_not_out "apt-get" "Fedora is not told to use apt"
 
 # Alpine -> the distro package, the only route there.
 make_stubs "$WORK/stubs" 0
 add_pkg apk
+add_priv sudo
 run DAHRK_OS_RELEASE="$FIXTURES/alpine" --
 assert_out "Alpine Linux v3\.20" "Alpine output names the detected distro"
 assert_out "apk add --no-cache nodejs npm" "Alpine gets the apk route"
+
+# --- privilege: the box may have no sudo -------------------------------------------------------
+# The reported dead end. A stock Debian has no sudo at all, so `sudo -E bash -` fails with
+# "sudo: command not found" and every instruction we printed was unusable.
+
+# No sudo, but su exists -> su -c, and say whose password it wants.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+add_priv su
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_out "su -c '.*deb\.nodesource\.com.*apt-get install -y nodejs'" "no sudo falls back to su -c"
+assert_not_out "sudo -E sh -c" "a box without sudo is never told to run sudo"
+assert_out "ROOT password" "the su route says whose password it needs"
+
+# Neither sudo nor su -> do not print a privileged command at all; send them to nvm.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_not_out "sudo -E sh -c" "no route to root means no sudo command"
+assert_not_out "su -c" "no route to root means no su command"
+assert_out "no sudo and no su" "no route to root is stated plainly"
+assert_out "nvm install 22" "no route to root still offers the nvm route"
+
+# Already root -> no privilege prefix at all.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+run STUB_UID=0 DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_out "^ +curl -fsSL https://deb\.nodesource\.com" "root gets the bare command"
+assert_not_out "sudo -E|su -c" "root is not told to escalate"
+# nvm as root installs into /root, which is not where the node will run from.
+assert_out "you are root" "root is warned that nvm would install into /root"
+
+# A non-root user is told nvm is per-user, because running it under su put Node in /root/.nvm and
+# left the invoking user still without Node.
+make_stubs "$WORK/stubs" 0
+add_pkg apt-get
+add_priv su
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_out "never under su or sudo" "the nvm route says to run it as yourself"
+
+# --- Node present but npm missing ----------------------------------------------------------------
+# Debian's nodejs package only SUGGESTS npm, so this is a normal shape there, not a broken install.
+make_stubs "$WORK/stubs"
+rm -f "$WORK/stubs/npm"
+add_pkg apt-get
+add_priv sudo
+run DAHRK_OS_RELEASE="$FIXTURES/debian" --
+assert_code_nonzero "Node without npm fails"
+assert_out "npm is not on PATH" "missing npm is named"
+assert_out "ships without npm" "missing npm on apt explains the distro package"
+assert_out "deb\.nodesource\.com" "missing npm on apt points at NodeSource, not a Node reinstall"
 
 # macOS -> Homebrew, and never a Linux package manager.
 make_stubs "$WORK/stubs" 0
@@ -190,6 +266,7 @@ assert_out "nvm install 22" "the nvm route then installs Node 22"
 # Too-old Node gets the same tailored commands as no Node at all.
 make_stubs "$WORK/stubs"
 add_pkg apt-get
+add_priv sudo
 run STUB_NODE_VER=v20.11.0 DAHRK_OS_RELEASE="$FIXTURES/debian" --
 assert_code_nonzero "old Node on Debian fails"
 assert_out "deb\.nodesource\.com" "old Node gets the same platform-tailored commands"
@@ -206,13 +283,36 @@ else
   rm -rf "$RO_PREFIX"
   mkdir -p "$RO_PREFIX/lib/node_modules"
   chmod 500 "$RO_PREFIX/lib/node_modules"
+  add_priv sudo
   run STUB_NPM_PREFIX="$RO_PREFIX" --
   assert_code_nonzero "unwritable npm prefix fails"
   assert_out "npm config set prefix" "unwritable prefix names the user-owned-prefix fix"
   assert_out "sudo sh -s" "unwritable prefix names the sudo fallback"
   assert_no_log "^npm install" "unwritable prefix never attempts the install"
+
+  # Same box without sudo: the EACCES advice must not name sudo either. It did.
+  make_stubs "$WORK/stubs"
+  add_priv su
+  run STUB_NPM_PREFIX="$RO_PREFIX" --
+  assert_out "npm config set prefix" "no-sudo box still gets the user-prefix fix"
+  assert_out "su -c 'curl" "no-sudo box gets the su form of the root route"
+  assert_not_out "sudo sh -s" "no-sudo box is never told to run sudo for the prefix"
+
+  # No route to root at all: offer only the user-owned prefix, and nothing that cannot work.
+  make_stubs "$WORK/stubs"
+  run STUB_NPM_PREFIX="$RO_PREFIX" --
+  assert_out "npm config set prefix" "no-root box gets the user-prefix fix"
+  assert_not_out "sudo sh -s|su -c" "no-root box is offered no privileged command"
+
   chmod 700 "$RO_PREFIX/lib/node_modules"
 fi
+
+# A prefix that does not exist yet is FINE - npm creates it. `npm config set prefix ~/.npm-global`
+# with no mkdir is a very common setup, and testing -w on the missing directory rejected it.
+make_stubs "$WORK/stubs"
+run STUB_NPM_PREFIX="$WORK/not-created-yet" --
+assert_code 0 "a not-yet-created prefix under a writable parent installs cleanly"
+assert_log "^npm install -g dahrk-node$" "a not-yet-created prefix reaches the install"
 
 # A writable prefix is the ordinary case and must stay invisible.
 make_stubs "$WORK/stubs"
