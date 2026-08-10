@@ -897,21 +897,16 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       ...(job.workspaceRef?.worktreePath ? { worktreePath: job.workspaceRef.worktreePath } : {}),
       ...(job.workspaceRef?.branch ? { branch: job.workspaceRef.branch } : {}),
       ...(job.workspaceRef?.gitUrl ? { gitUrl: job.workspaceRef.gitUrl } : {}),
-      // The run's sibling repos (DHK-251), so a restart preserves EVERY repo's uncommitted tail. Read
-      // defensively against the pinned contracts version, as the other new Job fields are.
-      ...(() => {
-        const extras = (job as { extraWorkspaces?: Array<{ worktreePath: string; gitUrl: string; branch?: string }> })
-          .extraWorkspaces;
-        return extras?.length
-          ? {
-              extraWorktrees: extras.map((w) => ({
-                worktreePath: w.worktreePath,
-                gitUrl: w.gitUrl,
-                ...(w.branch ? { branch: w.branch } : {}),
-              })),
-            }
-          : {};
-      })(),
+      // The run's sibling repos (DHK-251), so a restart preserves EVERY repo's uncommitted tail.
+      ...(job.extraWorkspaces?.length
+        ? {
+            extraWorktrees: job.extraWorkspaces.map((w) => ({
+              worktreePath: w.worktreePath,
+              gitUrl: w.gitUrl,
+              ...(w.branch ? { branch: w.branch } : {}),
+            })),
+          }
+        : {}),
       startedAt,
       nodePid: process.pid,
     });

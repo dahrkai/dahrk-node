@@ -773,10 +773,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         let ref = worktrees.get(runId);
         if (!ref) {
           if (job.workspaceRef) {
-            // The run's whole repo set, primary first. `extraWorkspaces` is read defensively because
-            // this repo pins a published `@dahrk/contracts` that predates the field - the same idiom
-            // `seedRef` and `injectedSkillPaths` already use. Drop the cast at the version bump.
-            const extras = (job as { extraWorkspaces?: WorkspaceRef[] }).extraWorkspaces ?? [];
+            // The run's whole repo set, primary first.
+            const extras = job.extraWorkspaces ?? [];
             const specOf = (ws: WorkspaceRef) => ({
               repoId: ws.repoId,
               gitUrl: ws.gitUrl,
@@ -1054,7 +1052,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
                 ? [{ worktreePath: ref.worktreePath, command: job.workspaceRef.setup.command, repo: job.workspaceRef.repo }]
                 : []),
               ...(runSiblings.get(runId) ?? []).flatMap((w, i) => {
-                const cmd = ((job as { extraWorkspaces?: WorkspaceRef[] }).extraWorkspaces ?? [])[i]?.setup?.command;
+                const cmd = (job.extraWorkspaces ?? [])[i]?.setup?.command;
                 return cmd ? [{ worktreePath: w.worktreePath, command: cmd, repo: w.repo }] : [];
               }),
             ]
