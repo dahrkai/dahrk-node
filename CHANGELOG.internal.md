@@ -24,6 +24,26 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- DHK-1099: a process a stage backgrounds (`npm run dev &`, `nohup`, a watcher) no longer outlives the
+  run and the node. Root cause: there was no process-group kill anywhere on the node - no node-owned
+  `spawn` passed `detached: true`, so every child joined the node's own process group, and a kill of a
+  `sh -c "cmd &"` shell signalled only the shell while the backgrounded grandchild was reparented to
+  init and kept running until the node itself died. Fix: a shared `killProcessGroup`/`detachedGroup`
+  helper (`packages/executor-worktree/src/process-group.ts`); every node-owned `sh -c` (check commands,
+  `repo-setup`, the R4 stage-exit hooks) is spawned `detached: true` so it leads its own group, and is
+  reaped by signalling the negative pid - which reaches its descendants - on every settle path, on the
+  per-check timeout, and now on `cancel()` (which killed the in-flight group at once rather than only
+  setting a flag for the next check boundary). `repo-setup` and the hooks moved from `execFileSync` to
+  `spawnSync` purely to obtain the pid the reap needs; their success/failure semantics are unchanged.
+  Regression tests in `check-runner.test.ts` background a real child, settle/cancel/time-out the stage,
+  and assert the grandchild is dead. This is Case 1 of the ticket (processes the node owns). Case 2 -
+  a process the agent backgrounds through the vendored SDK's own shell tool - is left open and needs a
+  follow-up filed: the SDK (`query()` / `createAgentSession`) surfaces no pid (see
+  `ws-client.ts:424-428`), so there is nothing for the node to signal, and re-execing the node as a
+  session leader would put the node in the very group a reap would kill. Documented in ADR 0003.
+
 ### Changed
 
 - DHK-358 follow-up: the `@dahrk/contracts` catalog pin moves to `^0.19.0`, now that the hub half

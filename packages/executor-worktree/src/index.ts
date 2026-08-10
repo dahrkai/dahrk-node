@@ -74,6 +74,10 @@ export type { OverlayResult, OverlayOptions } from "./overlay.js";
 export { runRepoSetup } from "./repo-setup.js";
 export type { RepoSetupOpts, RepoSetupResult, RepoSetupLogger } from "./repo-setup.js";
 
+// Reap a node-owned subprocess and everything it backgrounded, by process group (DHK-1099), so a stage's
+// backgrounded child cannot outlive the stage.
+export { detachedGroup, killProcessGroup } from "./process-group.js";
+
 export { createMockRunner } from "./mock-runner.js";
 
 // The deterministic quality gate: named commands in the worktree, exit code as the verdict.
