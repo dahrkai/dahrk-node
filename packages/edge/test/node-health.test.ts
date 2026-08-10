@@ -35,17 +35,17 @@ test("all passing is `ok`, with every row rendered", () => {
 // A warn is a limitation the node still runs with, so it maps to `skipped` rather than `finding`. That
 // keeps the shared card honest: an amber row here means the same thing an amber row means in preflight.
 test("a warn is a limitation, not a fault: `skipped`, verdict `findings`", () => {
-  const report = buildNodeHealthReport([pass("Node version"), warn("docker")], 5, 0);
+  const report = buildNodeHealthReport([pass("Node version"), warn("Free space")], 5, 0);
 
   assert.equal(report.verdict, "findings");
-  assert.equal(report.sections.find((s) => s.label === "docker")?.status, "skipped");
+  assert.equal(report.sections.find((s) => s.label === "Free space")?.status, "skipped");
 });
 
 // `unsound` is the state preflight has no equivalent for, and the whole reason `NodeHealthReport` is a
 // separate type rather than a reuse of `PreflightReport`. A node with too old a runtime or an
 // unwritable worktree root is not "healthy with findings" - no stage can run on it at all.
 test("any fail makes the node `unsound`, even alongside passes and warns", () => {
-  const report = buildNodeHealthReport([pass("Node version"), warn("docker"), fail("Worktree root")], 5, 0);
+  const report = buildNodeHealthReport([pass("Node version"), warn("Free space"), fail("Worktree root")], 5, 0);
 
   assert.equal(report.verdict, "unsound");
   assert.equal(report.sections.find((s) => s.label === "Worktree root")?.status, "finding");
@@ -81,6 +81,15 @@ test("the read is the deterministic synthesis, and names what is wrong", () => {
 
   const clean = buildNodeHealthReport([pass("Node version")], 0, 0);
   assert.match(clean.readMarkdown, /floor is sound/);
+});
+
+// The node health check takes no repo path (see the module header), so its all-green read must not
+// claim a repo was checked - unlike the CLI preflight's default all-clear, which genuinely checks one.
+// Attesting to something unmeasured is the exact defect DHK-1070 removed.
+test("the all-green read names only what a node check measures, never a repo", () => {
+  const clean = buildNodeHealthReport([pass("Node version"), pass("git")], 0, 0);
+  assert.match(clean.readMarkdown, /floor is sound/i);
+  assert.doesNotMatch(clean.readMarkdown, /repo/i);
 });
 
 // The gatherer takes no repo path, so there is nothing to leak - but the hub summarises this report

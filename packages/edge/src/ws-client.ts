@@ -141,7 +141,7 @@ export interface EdgeOptions {
   onEnrolled?: (welcome: { name: string; tenantId: string; enrolToken: string }) => void;
   /**
    * Gather the health facts that need a CHILD PROCESS: whether a supervisor unit is installed and
-   * running, and whether `git`/`docker` resolve on PATH (DHK-1059).
+   * running, and whether `git` resolves on PATH (DHK-1059).
    *
    * Injected for the same reason `onUpgrade` is: this package is the wire client and stays free of
    * `node:child_process`. Everything else in a health report - Node version, runtime resolution, disk,

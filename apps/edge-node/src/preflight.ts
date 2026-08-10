@@ -210,7 +210,7 @@ export async function runPreflight(inputs: PreflightInputs, deps: Partial<Prefli
   // [2/5] check repo - the target is a git repo the node can build a worktree from.
   const repoChecks: CheckResult[] = [checkRepo(host.repo)];
 
-  // [3/5] check tools - git (required) + ssh key / claude / gh / docker (findings).
+  // [3/5] check tools - git (required); the optional-tool rows have all been removed (DHK-1006, DHK-1070).
   const toolChecks: CheckResult[] = checkTools(host.tools);
 
   const stageVerdicts: StageVerdict[] = [
@@ -335,10 +335,7 @@ export function gatherHostFacts(repoPath: string): HostFacts {
   return {
     worktreeRootWritable: isWritable(nearestExisting(root)),
     freeDiskBytes: freeDiskBytes(root),
-    tools: {
-      git: commandPresent("git"),
-      docker: commandPresent("docker"),
-    },
+    tools: { git: commandPresent("git") },
     repo: probeRepo(repoPath),
   };
 }

@@ -4,8 +4,8 @@
  * `packages/edge` answers a `node-health-request` from its own process - Node version, runtime
  * resolution, disk, worktree writability - and stays free of `node:child_process`, the same line
  * `onUpgrade` draws. Two facts fall outside that: whether a supervisor unit is installed and running,
- * and whether `git` and `docker` resolve on PATH. Both need a shell, so they live here and are injected
- * as `EdgeOptions.probeHostChecks`.
+ * and whether `git` resolves on PATH. Both need a shell, so they live here and are injected as
+ * `EdgeOptions.probeHostChecks`.
  *
  * ASYNC THROUGHOUT, unlike the `execFileSync` the CLI's own `doctor` uses. This runs on the socket's
  * event loop: a synchronous spawn here would stall heartbeats, trace streaming and every run sharing
@@ -42,10 +42,9 @@ async function commandPresent(cmd: string): Promise<boolean> {
 export async function probeHostChecks(): Promise<CheckResult[]> {
   const checks: CheckResult[] = [];
 
-  // Both tools in parallel: two `sh -c` spawns run in the time of one, and this path is on the socket.
+  // Just git now: the docker probe went in DHK-1070 (see `ToolPresence`), so this collapses to one spawn.
   try {
-    const [git, docker] = await Promise.all([commandPresent("git"), commandPresent("docker")]);
-    checks.push(...checkTools({ git, docker }));
+    checks.push(...checkTools({ git: await commandPresent("git") }));
   } catch {
     // Deliberately silent: `commandPresent` already swallows a miss, so reaching here means the spawn
     // machinery itself is unusable, and inventing "git is missing" from that would send an operator to

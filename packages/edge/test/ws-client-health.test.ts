@@ -165,15 +165,33 @@ test("an injected host probe's checks are folded into the report", async () => {
       assert.ok(sections.some((s) => s.label === "git" && s.status === "ok"));
       // A `warn` is a limitation the node runs with, so it maps to `skipped` and only ever moves the
       // verdict as far as `findings`.
-      assert.ok(sections.some((s) => s.label === "docker" && s.status === "skipped"));
+      assert.ok(sections.some((s) => s.label === "Service" && s.status === "skipped"));
       assert.equal(verdict, "findings");
     },
     {
       probeHostChecks: async () => [
         { status: "pass", label: "git", detail: "installed" },
-        { status: "warn", label: "docker", detail: "not present; container stages are unavailable" },
+        { status: "warn", label: "Service", detail: "no launchd or systemd here; run `dahrk start --foreground`" },
       ],
     },
+  );
+});
+
+// Docker was removed from the tool check (DHK-1070): a node with git present and no Docker is healthy,
+// and no docker row may ever appear. Before, Docker's absence rendered a `warn`/`skipped` that dragged
+// an otherwise-healthy node's verdict to `findings` for a tool it will never use.
+test("a node with git and no docker is `ok`, and no docker row is ever emitted", async () => {
+  await withEdge(
+    async (ctx) => {
+      ctx.toEdge(request());
+      await waitFor(() => reports(ctx.inbound).length === 1);
+
+      const { sections, verdict } = reports(ctx.inbound)[0]!.report;
+      assert.ok(sections.some((s) => s.label === "git" && s.status === "ok"));
+      assert.ok(!sections.some((s) => s.label === "docker"), "the docker row must not return");
+      assert.equal(verdict, "ok", "a node with no Docker is healthy, not 'healthy with findings'");
+    },
+    { probeHostChecks: async () => [{ status: "pass", label: "git", detail: "installed" }] },
   );
 });
 
