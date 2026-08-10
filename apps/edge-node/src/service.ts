@@ -31,6 +31,7 @@
  * IO shells that write the file, run the loader, and print the result.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform as osPlatform, userInfo } from "node:os";
 import { join } from "node:path";
@@ -47,9 +48,49 @@ export const UNIT_FILE_MODE = 0o600;
  *  print how to run under pm2 instead rather than pretend. */
 export type Manager = "launchd" | "systemd" | "unsupported";
 
-/** launchd label / systemd unit name. The plist filename is `${LABEL}.plist`; the unit is `${UNIT}`. */
+/** launchd label / systemd unit name for the DEFAULT install. The plist filename is `${LABEL}.plist`;
+ *  the unit is `${UNIT}`. A node with a non-default state dir gets suffixed variants - see
+ *  {@link resolveServiceNames}. */
 export const LAUNCHD_LABEL = "ai.dahrk.node";
 export const SYSTEMD_UNIT = "dahrk-node.service";
+
+/** The launchd label and systemd unit name a node registers under. Both derive from the node's state dir
+ *  ({@link resolveServiceNames}), so two nodes isolated by `DAHRK_STATE_DIR` install DISTINCT services and
+ *  neither overwrites the other's unit (nor does the self-heal rewrite it, nor `dahrk update` kickstart
+ *  the wrong one). */
+export interface ServiceNames {
+  /** launchd label; the plist is `${launchdLabel}.plist`. */
+  launchdLabel: string;
+  /** systemd unit name, including the `.service` suffix. */
+  systemdUnit: string;
+}
+
+/** The historical names, used for the default install (`~/.dahrk`) and as the fallback anywhere a pure
+ *  function is called without an explicit set - so an existing single-node install is byte-for-byte
+ *  unchanged across the upgrade. */
+export const DEFAULT_SERVICE_NAMES: ServiceNames = {
+  launchdLabel: LAUNCHD_LABEL,
+  systemdUnit: SYSTEMD_UNIT,
+};
+
+/**
+ * Derive the service names for a node from its state dir. The DEFAULT state dir (`~/.dahrk`) yields
+ * exactly the historical `ai.dahrk.node` / `dahrk-node.service`, so nothing about a single-node install
+ * changes. Any other state dir appends a short deterministic suffix hashed from the resolved state-dir
+ * path, so two nodes with distinct state dirs get two labels, two plist paths and two unit files - the
+ * one thing that makes two nodes on one host safe by default (DHK-1100). The suffix is a pure function of
+ * the path, so the same node re-renders the same name every time (which is what keeps the self-heal a
+ * repair rather than a rewrite war).
+ */
+export function resolveServiceNames(env: NodeJS.ProcessEnv = process.env): ServiceNames {
+  const dir = resolveStateDir(env);
+  if (dir === join(homedir(), ".dahrk")) return DEFAULT_SERVICE_NAMES;
+  const suffix = createHash("sha256").update(dir).digest("hex").slice(0, 8);
+  return {
+    launchdLabel: `${LAUNCHD_LABEL}.${suffix}`,
+    systemdUnit: `dahrk-node-${suffix}.service`,
+  };
+}
 
 /** Map a Node platform string to the supervisor we drive. */
 export function detectManager(plat: NodeJS.Platform): Manager {
@@ -87,6 +128,9 @@ export interface PlanInputs {
   nodeBin: string;
   /** This client's entry script, resolved through any symlink (`realpath(process.argv[1])`). */
   scriptPath: string;
+  /** The launchd label / systemd unit this node registers under. Omitted falls back to
+   *  {@link DEFAULT_SERVICE_NAMES}, so a caller that does not isolate by state dir is unchanged. */
+  names?: ServiceNames;
   /** Optional display-name override (DAHRK_NODE_NAME). */
   name?: string;
   /** Optional hub URL override (DAHRK_HUB_URL); unset lets the client default to wss://api.dahrk.ai. */
@@ -198,6 +242,7 @@ function xmlEscape(s: string): string {
 export function renderLaunchdPlist(inputs: PlanInputs): string {
   const argv = serviceArgv(inputs);
   const env = serviceEnv(inputs);
+  const label = (inputs.names ?? DEFAULT_SERVICE_NAMES).launchdLabel;
   const progArgs = argv.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
   const envEntries = Object.entries(env)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
@@ -207,7 +252,7 @@ export function renderLaunchdPlist(inputs: PlanInputs): string {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LAUNCHD_LABEL}</string>
+  <string>${xmlEscape(label)}</string>
   <key>ProgramArguments</key>
   <array>
 ${progArgs}
@@ -281,11 +326,13 @@ WantedBy=default.target
 /** Build the full registration plan for the resolved inputs: the file path, its rendered content, and
  *  the loader / unloader commands for the target supervisor. Pure - no disk, no spawn. */
 export function buildPlan(inputs: PlanInputs): ServicePlan {
+  const names = inputs.names ?? DEFAULT_SERVICE_NAMES;
   if (inputs.manager === "launchd") {
-    const filePath = join(inputs.homeDir, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+    const label = names.launchdLabel;
+    const filePath = join(inputs.homeDir, "Library", "LaunchAgents", `${label}.plist`);
     return {
       manager: "launchd",
-      label: LAUNCHD_LABEL,
+      label,
       filePath,
       content: renderLaunchdPlist(inputs),
       // Unload first so a re-install picks up the rewritten plist; a not-loaded unload is a no-op. The
@@ -304,7 +351,7 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
             "launchctl",
             "kickstart",
             "-k",
-            `gui/${inputs.uid ?? process.getuid?.() ?? ""}/${LAUNCHD_LABEL}`,
+            `gui/${inputs.uid ?? process.getuid?.() ?? ""}/${label}`,
           ],
         },
       ],
@@ -314,34 +361,35 @@ export function buildPlan(inputs: PlanInputs): ServicePlan {
       logHint: "dahrk logs -f",
     };
   }
-  const filePath = join(inputs.homeDir, ".config", "systemd", "user", SYSTEMD_UNIT);
+  const unit = names.systemdUnit;
+  const filePath = join(inputs.homeDir, ".config", "systemd", "user", unit);
   const user = userInfo().username;
   return {
     manager: "systemd",
-    label: SYSTEMD_UNIT,
+    label: unit,
     filePath,
     content: renderSystemdUnit(inputs),
     // Reload to see the new unit, enable+start it, then enable linger so it survives logout / boots
     // headless. Linger can be denied without privilege on some hosts, so it is best-effort.
     installCommands: [
       { argv: ["systemctl", "--user", "daemon-reload"] },
-      { argv: ["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT] },
+      { argv: ["systemctl", "--user", "enable", "--now", unit] },
       { argv: ["loginctl", "enable-linger", user], ignoreFailure: true },
     ],
     // `disable`, not `stop`: a stopped-but-enabled unit comes straight back at the next boot, which is not
     // what anyone means by `dahrk stop`. `dahrk start` re-enables it (`enable --now` above).
     stopCommands: [
-      { argv: ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], ignoreFailure: true },
+      { argv: ["systemctl", "--user", "disable", "--now", unit], ignoreFailure: true },
     ],
     // `restart`, not `disable --now` then `enable --now`: same reason as launchd. The unit stays
     // enabled throughout, and systemd owns the kill so the process running this command may be the one
     // being replaced.
-    restartCommands: [{ argv: ["systemctl", "--user", "restart", SYSTEMD_UNIT] }],
+    restartCommands: [{ argv: ["systemctl", "--user", "restart", unit] }],
     // `stop`, not `disable --now`: a restart must leave the unit enabled, so a boot or a login brings the
     // node back even if this process does not live to start it. See `restartStopCommands`.
-    restartStopCommands: [{ argv: ["systemctl", "--user", "stop", SYSTEMD_UNIT], ignoreFailure: true }],
+    restartStopCommands: [{ argv: ["systemctl", "--user", "stop", unit], ignoreFailure: true }],
     uninstallCommands: [
-      { argv: ["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], ignoreFailure: true },
+      { argv: ["systemctl", "--user", "disable", "--now", unit], ignoreFailure: true },
       { argv: ["systemctl", "--user", "daemon-reload"], ignoreFailure: true },
     ],
     logHint: "dahrk logs -f",
@@ -359,11 +407,17 @@ export function unitIsCurrent(plan: ServicePlan, onDisk: string | undefined): bo
   return onDisk === plan.content;
 }
 
-/** Where the unit lives for a manager, without rendering it (`status` needs the path, not the content). */
-export function unitPath(manager: "launchd" | "systemd", homeDir: string): string {
+/** Where the unit lives for a manager, without rendering it (`status` needs the path, not the content).
+ *  `names` defaults to {@link DEFAULT_SERVICE_NAMES}; pass the state-dir-derived set (from
+ *  {@link resolveServiceNames}) so this points at the SAME file `buildPlan` writes for an isolated node. */
+export function unitPath(
+  manager: "launchd" | "systemd",
+  homeDir: string,
+  names: ServiceNames = DEFAULT_SERVICE_NAMES,
+): string {
   return manager === "launchd"
-    ? join(homeDir, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`)
-    : join(homeDir, ".config", "systemd", "user", SYSTEMD_UNIT);
+    ? join(homeDir, "Library", "LaunchAgents", `${names.launchdLabel}.plist`)
+    : join(homeDir, ".config", "systemd", "user", names.systemdUnit);
 }
 
 /** What `dahrk status` reports about the always-on service. `installed` is "the unit file is on disk";
@@ -399,14 +453,17 @@ export interface ServiceStatus {
  *  systemd is also asked for `UnitFileState` and `Result`, which is where its answers to "is this job
  *  registered at all?" and "how did it last die?" live. launchd answers the first by exiting non-zero and
  *  needs a second probe to name a disable; see {@link disabledCommand}. */
-export function statusCommand(manager: "launchd" | "systemd"): string[] {
+export function statusCommand(
+  manager: "launchd" | "systemd",
+  names: ServiceNames = DEFAULT_SERVICE_NAMES,
+): string[] {
   return manager === "launchd"
-    ? ["launchctl", "list", LAUNCHD_LABEL]
+    ? ["launchctl", "list", names.launchdLabel]
     : [
         "systemctl",
         "--user",
         "show",
-        SYSTEMD_UNIT,
+        names.systemdUnit,
         "-p",
         "ActiveState",
         "-p",
@@ -507,16 +564,17 @@ export function probeService(
   unitExists: boolean,
   capture: (argv: string[]) => { code: number; stdout: string },
   opts: { uid?: number; disabled?: boolean } = {},
+  names: ServiceNames = DEFAULT_SERVICE_NAMES,
 ): ServiceStatus {
   // No unit means nothing to ask about: spawning to be told so is wasted work, and `launchctl list` on an
   // unknown label is a non-zero exit we would only have to special-case anyway.
   if (!unitExists) return parseServiceStatus(manager, false, { code: 1, stdout: "" });
-  const status = parseServiceStatus(manager, true, capture(statusCommand(manager)));
+  const status = parseServiceStatus(manager, true, capture(statusCommand(manager, names)));
   if (status.loaded || opts.disabled === false) return status;
   const argv = disabledCommand(manager, opts.uid);
   if (!argv) return status;
   const probe = capture(argv);
-  const disabled = probe.code === 0 ? parseDisabled(probe.stdout, LAUNCHD_LABEL) : undefined;
+  const disabled = probe.code === 0 ? parseDisabled(probe.stdout, names.launchdLabel) : undefined;
   return disabled === undefined ? status : { ...status, disabled };
 }
 
@@ -524,6 +582,10 @@ export function probeService(
 export interface ServiceDeps {
   platform: NodeJS.Platform;
   homeDir: string;
+  /** The launchd label / systemd unit this node registers under, derived from its state dir
+   *  ({@link resolveServiceNames}). Threaded through every plan build and probe so a node with a custom
+   *  `DAHRK_STATE_DIR` targets its OWN service, not whichever node holds the default label. */
+  names: ServiceNames;
   /** The Node binary to exec in the service (`process.execPath`). */
   nodeBin: string;
   /** This client's entry script (`process.argv[1]`), resolved through symlinks before use. */
@@ -618,6 +680,7 @@ export async function runServiceInstall(
 
   const plan = buildPlan({
     manager,
+    names: d.names,
     nodeBin: d.nodeBin,
     scriptPath: d.scriptPath,
     ...(inputs.name ? { name: inputs.name } : {}),
@@ -689,11 +752,11 @@ export type StartOutcome =
 export function liveNodePid(d: ServiceDeps): number | undefined {
   const manager = detectManager(d.platform);
   if (manager !== "unsupported") {
-    const unit = unitPath(manager, d.homeDir);
+    const unit = unitPath(manager, d.homeDir, d.names);
     if (d.fileExists(unit)) {
       // `disabled: false`: this is a liveness question, and the answer to it does not depend on whether a
       // down job was switched off or merely died. One spawn, as before.
-      const status = probeService(manager, true, d.capture, { disabled: false });
+      const status = probeService(manager, true, d.capture, { disabled: false }, d.names);
       if (status.running && status.pid) return status.pid;
     }
   }
@@ -739,7 +802,7 @@ export async function runNodeStart(
     return { kind: "foreground", reason: "no systemd user session on this host (a container, typically)" };
   }
 
-  const filePath = unitPath(manager, d.homeDir);
+  const filePath = unitPath(manager, d.homeDir, d.names);
   const unitExists = d.fileExists(filePath);
 
   // No token anywhere and no unit to fall back on: there is nothing to enrol with. Say so, exactly once,
@@ -758,6 +821,7 @@ export async function runNodeStart(
   // and the stale token it was shadowing the disk with goes away with it.
   const plan = buildPlan({
     manager,
+    names: d.names,
     nodeBin: d.nodeBin,
     scriptPath: d.scriptPath,
     ...(inputs.name ? { name: inputs.name } : {}),
@@ -778,7 +842,7 @@ export async function runNodeStart(
   // "is it running?" here would then make the start half a no-op and leave the node DOWN, which is the one
   // thing a restart may never do. A restart has already decided; it does not ask again.
   if (!opts.alwaysLoad) {
-    const probe = unitExists ? d.capture(statusCommand(manager)) : { code: 1, stdout: "" };
+    const probe = unitExists ? d.capture(statusCommand(manager, d.names)) : { code: 1, stdout: "" };
     const status = parseServiceStatus(manager, unitExists, probe);
     if (current && status.running) return { kind: "running", code: 0, already: true };
   }
@@ -834,6 +898,7 @@ export async function runNodeRestart(
 
   const plan = buildPlan({
     manager,
+    names: d.names,
     nodeBin: d.nodeBin,
     scriptPath: d.scriptPath,
     homeDir: d.homeDir,
@@ -976,6 +1041,7 @@ export async function runNodeStop(
 
   const plan = buildPlan({
     manager,
+    names: d.names,
     nodeBin: d.nodeBin,
     scriptPath: d.scriptPath,
     homeDir: d.homeDir,
@@ -992,7 +1058,7 @@ export async function runNodeStop(
   // Ask the supervisor for its pid BEFORE we stop it, so that the node the pidfile names can be told apart
   // from a node somebody else supervises. Without this the check cannot distinguish "still shutting down"
   // from "never ours in the first place".
-  const servicePid = parseServiceStatus(manager, true, d.capture(statusCommand(manager))).pid;
+  const servicePid = parseServiceStatus(manager, true, d.capture(statusCommand(manager, d.names))).pid;
 
   runCommands(plan.stopCommands, d);
   d.out(verdict("ok", "Node stopped."));
@@ -1030,6 +1096,7 @@ export async function runServiceUninstall(deps: Partial<ServiceDeps> = {}): Prom
   // Token is irrelevant to removal; a placeholder keeps the plan builder's shape without leaking a real one.
   const plan = buildPlan({
     manager,
+    names: d.names,
     nodeBin: d.nodeBin,
     scriptPath: d.scriptPath,
     homeDir: d.homeDir,
@@ -1104,6 +1171,9 @@ const realpathOrUndefined = (p: string): string | undefined => {
 const defaultDeps = (): ServiceDeps => ({
   platform: osPlatform(),
   homeDir: homedir(),
+  // Derived from this process's state dir, so a node started with a custom DAHRK_STATE_DIR installs,
+  // probes and restarts its OWN launchd label / systemd unit rather than the shared default (DHK-1100).
+  names: resolveServiceNames(process.env),
   // Not `process.execPath` raw: that is the versioned Homebrew Cellar path, which the next
   // `brew upgrade node` deletes out from under the unit. See `stableNodeBin`.
   nodeBin: stableNodeBin(process.execPath, realpathOrUndefined),
