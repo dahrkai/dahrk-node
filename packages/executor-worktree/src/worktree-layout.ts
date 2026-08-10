@@ -66,35 +66,12 @@ export function runIdOfWorktreePath(worktreesDir: string, p: string): string | u
 }
 
 /**
- * The directory a run's worktrees live under is reserved for the run's shared scratch, so no repo may
- * claim it.
+ * The layout constants are CANONICAL in `@dahrk/contracts`, because both sides need the same answer
+ * and neither owns it: the node creates `<runId>/<repoDir>/`, and the hub reproduces the path for the
+ * run projection and the portals. Re-exported here so this module stays the one place the node asks
+ * about worktree layout.
  *
- * MIRRORS `@dahrk/contracts` (DHK-251), which is the canonical definition because BOTH sides need the
- * same answer: the node creates these directories, the hub reproduces the path for the run projection
- * and the portals. It is duplicated here only because this repo pins a published contracts version
- * that predates the export. REPLACE both of these with a re-export from `@dahrk/contracts` when the
- * pin moves to >= 0.19.0 - keeping two copies is exactly the drift the shared definition exists to
- * prevent.
+ * They were briefly duplicated in this file, while the repo still pinned a contracts version that
+ * predated the export. That is over.
  */
-export const RUN_SCRATCH_DIR_NAME = ".dahrk";
-
-/**
- * The directory name a repo's worktree takes inside its run directory:
- * `<worktrees>/<runId>/<worktreeDirName(ref)>/`. See {@link RUN_SCRATCH_DIR_NAME} on why this is a copy.
- *
- * Deliberately not `sanitizeBranchName`: that permits `/`, which is right for a branch and would
- * silently nest `acme/api` two levels deep as a directory. Stripping the leading dot is what keeps the
- * scratch directory unclaimable, since no output can begin with `.`.
- *
- * NOT collision-free on its own - two owners can share a repo name. Disambiguating within a run's set
- * is the caller's job, because only the caller sees the whole set (see `dirNamesFor`).
- */
-export function worktreeDirName(ref: { repoId: string; repo?: string }): string {
-  const clean = (raw: string): string =>
-    raw
-      .replace(/[^A-Za-z0-9._-]+/g, "-")
-      .replace(/-{2,}/g, "-")
-      .replace(/^[.-]+/, "")
-      .replace(/[.-]+$/, "");
-  return clean(ref.repo ?? "") || clean(ref.repoId ?? "") || "repo";
-}
+export { RUN_SCRATCH_DIR_NAME, worktreeDirName } from "@dahrk/contracts";

@@ -149,7 +149,8 @@ export function sandboxOptions(ctx: RunnerContext): Partial<Options> {
       filesystem: {
         // EVERY worktree of the run (DHK-251), not just the primary: a sibling the agent cannot write
         // is a repo it was checked out to change and cannot. `workspaces` is absent at N=1, so this is
-        // the same list it always was for a single-repo run.
+        // the same list it always was for a single-repo run. Node-local ctx extension, like
+        // `injectedSkillPaths` - the cast is deliberate, not a contracts-version leftover.
         allowWrite: [
           ...((ctx as RunnerContext & { workspaces?: Array<{ worktreePath: string }> }).workspaces ?? [
             ctx.workspace,

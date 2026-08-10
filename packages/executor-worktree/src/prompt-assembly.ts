@@ -284,6 +284,10 @@ function checkFailuresBlock(ctx: RunnerContext): string {
  * working directory is the primary repo, and the siblings are `../<name>` beside it.
  */
 function reposBlock(ctx: RunnerContext): string {
+  // A node-local extension of the runner context, not a contract field - the same shape as
+  // `injectedSkillPaths`. The cast is deliberate and is NOT leftover scaffolding from the pinned
+  // contracts version: `JobRequest.extraWorkspaces` is the wire field and is properly typed; this is
+  // the stage runner handing the resolved worktrees to an adapter in-process.
   const workspaces = (ctx as RunnerContext & { workspaces?: WorkspaceRef[] }).workspaces ?? [];
   if (workspaces.length < 2) return "";
   const rows = workspaces.map((w, i) => {

@@ -24,6 +24,19 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Changed
+
+- DHK-358 follow-up: the `@dahrk/contracts` catalog pin moves to `^0.19.0`, now that the hub half
+  (dahrk-harness#646) has published it. That deletes the scaffolding the node carried to land ahead of
+  the publish: the `as { extraWorkspaces?: … }` casts in `stage-runner.ts` and `ws-client.ts`, and the
+  copies of `RUN_SCRATCH_DIR_NAME` / `worktreeDirName` in `worktree-layout.ts`, which are now
+  re-exports of the canonical definitions. Two copies of a definition that exists precisely to stop
+  hub/node drift were the drift. No behaviour change; the casts were already structurally correct, so
+  this is the compiler taking over their enforcement.
+- DHK-358 follow-up: the two remaining `ctx as RunnerContext & { workspaces?: … }` casts are NOT
+  leftovers and now say so. `workspaces` is a node-local runner-context extension, the same shape as
+  `injectedSkillPaths`; the wire field is `JobRequest.extraWorkspaces` and it is properly typed.
+
 ### Added
 
 - DHK-358: N worktrees for one run. `<worktreesDir>/<runId>/<repoDir>/` for EVERY run, single-repo

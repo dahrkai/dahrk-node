@@ -7,8 +7,8 @@ settings:
 catalogs:
   default:
     '@dahrk/contracts':
-      specifier: ^0.17.0
-      version: 0.17.0
+      specifier: ^0.19.0
+      version: 0.19.0
 
 importers:
 
@@ -31,7 +31,7 @@ importers:
         version: 0.3.183(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(zod@3.25.76)
       '@dahrk/contracts':
         specifier: 'catalog:'
-        version: 0.17.0
+        version: 0.19.0
       '@earendil-works/pi-coding-agent':
         specifier: 0.84.1
         version: 0.84.1(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(ws@8.21.0)(zod@3.25.76)
@@ -65,7 +65,7 @@ importers:
     dependencies:
       '@dahrk/contracts':
         specifier: 'catalog:'
-        version: 0.17.0
+        version: 0.19.0
       '@dahrk/executor-worktree':
         specifier: workspace:*
         version: link:../executor-worktree
@@ -96,7 +96,7 @@ importers:
         version: 0.3.183(@anthropic-ai/sdk@0.110.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(zod@3.25.76)
       '@dahrk/contracts':
         specifier: 'catalog:'
-        version: 0.17.0
+        version: 0.19.0
       '@earendil-works/pi-coding-agent':
         specifier: 0.84.1
         version: 0.84.1(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(ws@8.21.0)(zod@3.25.76)
@@ -287,8 +287,8 @@ packages:
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
 
-  '@dahrk/contracts@0.17.0':
-    resolution: {integrity: sha512-5zJzBLIzWZSSimgbuPyVaZtpjDNgYlYDx5ghYFeu99i/0dhz44zOuucYn1B2pZnazCUeLka1Ucd9WdmS7v20aw==}
+  '@dahrk/contracts@0.19.0':
+    resolution: {integrity: sha512-2RLO+66n69EfhkSgYJsw+svcfBC15m9Cb3HevtT67gCgC20f5lJhWyswIV+Zaa9fGOD0HAuWPMkJ9AF64G2YCQ==}
 
   '@earendil-works/pi-agent-core@0.84.1':
     resolution: {integrity: sha512-evyzXYWCLQGmcaBYHlmSku02r8qoN4SGI60GZABo6iV+H+nqX+P9ud8fEZ4GmRq9mUSREvvfX+w9dA9ThF9C6w==}
@@ -2082,7 +2082,7 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
-  '@dahrk/contracts@0.17.0':
+  '@dahrk/contracts@0.19.0':
     dependencies:
       ajv: 8.20.0
       yaml: 2.9.0
