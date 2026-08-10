@@ -19,6 +19,8 @@ import {
   unitIsCurrent,
   LAUNCHD_LABEL,
   SYSTEMD_UNIT,
+  DEFAULT_SERVICE_NAMES,
+  resolveServiceNames,
   UNIT_FILE_MODE,
   stableNodeBin,
   parseServiceStatus,
@@ -118,6 +120,36 @@ test("buildPlan: systemd path + systemctl --user enable/disable, linger is best-
   assert.equal(linger?.ignoreFailure, true);
   // Both managers now write the same log files, so there is one hint on every platform.
   assert.equal(plan.logHint, "dahrk logs -f");
+});
+
+test("resolveServiceNames: two state dirs yield two service names; the default is unchanged (DHK-1100)", () => {
+  // A default install (no DAHRK_STATE_DIR) keeps EXACTLY the historical names and paths, so existing
+  // single-node installs upgrade in place.
+  assert.deepEqual(resolveServiceNames({}), DEFAULT_SERVICE_NAMES);
+  assert.equal(resolveServiceNames({}).launchdLabel, "ai.dahrk.node");
+  assert.equal(resolveServiceNames({}).systemdUnit, "dahrk-node.service");
+  assert.equal(
+    buildPlan({ ...BASE, names: resolveServiceNames({}) }).filePath,
+    "/Users/me/Library/LaunchAgents/ai.dahrk.node.plist",
+  );
+
+  // Two distinct state dirs give two distinct launchd labels, systemd units, and plist paths - so
+  // neither node overwrites the other's service definition.
+  const a = resolveServiceNames({ DAHRK_STATE_DIR: "/tmp/nodeA" });
+  const b = resolveServiceNames({ DAHRK_STATE_DIR: "/tmp/nodeB" });
+  assert.notEqual(a.launchdLabel, DEFAULT_SERVICE_NAMES.launchdLabel);
+  assert.notEqual(a.launchdLabel, b.launchdLabel);
+  assert.notEqual(a.systemdUnit, b.systemdUnit);
+  assert.match(a.launchdLabel, /^ai\.dahrk\.node\.[0-9a-f]{8}$/);
+  assert.match(a.systemdUnit, /^dahrk-node-[0-9a-f]{8}\.service$/);
+  assert.notEqual(
+    buildPlan({ ...BASE, names: a }).filePath,
+    buildPlan({ ...BASE, names: b }).filePath,
+  );
+
+  // Deterministic: the same state dir always resolves to the same name (what keeps the self-heal a
+  // repair, not a rewrite war).
+  assert.deepEqual(resolveServiceNames({ DAHRK_STATE_DIR: "/tmp/nodeA" }), a);
 });
 
 /** A recording harness: capture printed lines, written files, and the loader commands that ran. */

@@ -24,7 +24,7 @@
  * them.
  */
 import type { JobLedgerEntry, RuntimeStatus } from "@dahrk/edge";
-import { detectManager, probeService, unitPath, type ServiceStatus } from "./service.js";
+import { detectManager, probeService, resolveServiceNames, unitPath, type ServiceStatus } from "./service.js";
 import { readState, stateFile, type NodeState } from "./state.js";
 import { ago, arrow, dim, hint, hints, humanDuration, kv, symbol, verdict, type Level } from "./ui.js";
 import {
@@ -367,14 +367,21 @@ export async function gatherFacts(
   const manager = detectManager(deps.platform);
   let service: ServiceStatus | undefined;
   if (manager !== "unsupported") {
-    const unit = unitPath(manager, deps.homeDir);
+    // The service name follows this node's state dir, so a node with a custom DAHRK_STATE_DIR reports on
+    // its OWN unit rather than whichever node holds the default label (DHK-1100).
+    const names = resolveServiceNames(deps.env);
+    const unit = unitPath(manager, deps.homeDir, names);
     const exists = deps.fileExists(unit);
     // `probeService` is the one place that knows how to ask this, shared with `doctor` and `restart` so the
     // three cannot drift. It skips the supervisor entirely when there is no unit, and only pays for the
     // second (disable) probe once the first has said the job is not loaded.
-    service = probeService(manager, exists, deps.capture, {
-      ...(deps.uid !== undefined ? { uid: deps.uid } : {}),
-    });
+    service = probeService(
+      manager,
+      exists,
+      deps.capture,
+      { ...(deps.uid !== undefined ? { uid: deps.uid } : {}) },
+      names,
+    );
   }
 
   const state = readState(stateFile(deps.env));

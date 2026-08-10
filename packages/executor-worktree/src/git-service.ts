@@ -392,21 +392,35 @@ export function sanitizeBranchName(name: string): string {
 }
 
 /**
- * Resolve the absolute worktree base a git service uses: an explicit override, else
- * `DAHRK_WORKTREES_DIR`, else `~/.dahrk/worktrees`. Exported so the client can
- * advertise the exact same base to the hub on `hello` (single source of truth with `createGitService`).
+ * The node's state dir: the single knob (`DAHRK_STATE_DIR`) that isolates one node from another on the
+ * same host, defaulting to `~/.dahrk`. Inlined rather than imported because executor-worktree cannot
+ * depend on `apps/edge-node`; kept byte-identical to `stateDir` in `apps/edge-node/src/state.ts`, so the
+ * two must move together. The worktree and mirror roots default UNDER it, so setting `DAHRK_STATE_DIR`
+ * alone is enough to give a second node its own trees rather than sharing (and reaping) the first's.
  */
-export function resolveWorktreesDir(override?: string): string {
-  return override ?? process.env.DAHRK_WORKTREES_DIR ?? join(homedir(), ".dahrk", "worktrees");
+function stateDir(): string {
+  return process.env.DAHRK_STATE_DIR ?? join(homedir(), ".dahrk");
 }
 
 /**
- * Resolve the absolute per-repo bare-mirror base. Exported for the same reason as
- * {@link resolveWorktreesDir}: the reaper must reconcile against the SAME mirrors this service writes,
- * and a second copy of this fallback chain would silently drift.
+ * Resolve the absolute worktree base a git service uses: an explicit override, else
+ * `DAHRK_WORKTREES_DIR`, else `<stateDir>/worktrees` (i.e. `~/.dahrk/worktrees` by default, but under
+ * `DAHRK_STATE_DIR` when that is set, so a second node isolates by state dir alone). Exported so the
+ * client can advertise the exact same base to the hub on `hello` (single source of truth with
+ * `createGitService`).
+ */
+export function resolveWorktreesDir(override?: string): string {
+  return override ?? process.env.DAHRK_WORKTREES_DIR ?? join(stateDir(), "worktrees");
+}
+
+/**
+ * Resolve the absolute per-repo bare-mirror base: an override, else `DAHRK_MIRRORS_DIR`, else
+ * `<stateDir>/mirrors` (the same state-dir derivation as {@link resolveWorktreesDir}). Exported for the
+ * same reason: the reaper must reconcile against the SAME mirrors this service writes, and a second copy
+ * of this fallback chain would silently drift.
  */
 export function resolveMirrorsDir(override?: string): string {
-  return override ?? process.env.DAHRK_MIRRORS_DIR ?? join(homedir(), ".dahrk", "mirrors");
+  return override ?? process.env.DAHRK_MIRRORS_DIR ?? join(stateDir(), "mirrors");
 }
 
 export function createGitService(opts: GitServiceOptions = {}): GitService {

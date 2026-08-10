@@ -17,6 +17,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- Two nodes on one host with distinct `DAHRK_STATE_DIR` values now get their own service and worktree roots, so neither clobbers the other.
 - A node with no Docker installed now reports as healthy, instead of showing a finding for a tool it never uses.
 - The node health report's all-clear no longer claims a repository was checked, since it examines none.
 - A stage can no longer read files outside its worktree by changing directory first. (#201)

@@ -10,7 +10,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceRef } from "@dahrk/contracts";
-import { createGitService, resolveWorktreesDir, sanitizeBranchName, parseOwnerRepo } from "../src/git-service.js";
+import {
+  createGitService,
+  resolveWorktreesDir,
+  resolveMirrorsDir,
+  sanitizeBranchName,
+  parseOwnerRepo,
+} from "../src/git-service.js";
 
 const git = (cwd: string, args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf-8" });
@@ -131,6 +137,50 @@ test("resolveWorktreesDir single-sources the base the service exposes for hello 
   } finally {
     if (saved.d === undefined) delete process.env.DAHRK_WORKTREES_DIR;
     else process.env.DAHRK_WORKTREES_DIR = saved.d;
+  }
+});
+
+test("worktree and mirror roots follow DAHRK_STATE_DIR, so a state dir alone isolates a node (DHK-1100)", () => {
+  const saved = {
+    wt: process.env.DAHRK_WORKTREES_DIR,
+    mir: process.env.DAHRK_MIRRORS_DIR,
+    state: process.env.DAHRK_STATE_DIR,
+  };
+  try {
+    delete process.env.DAHRK_WORKTREES_DIR;
+    delete process.env.DAHRK_MIRRORS_DIR;
+
+    // A default install (no env at all) is unchanged: both roots stay under `~/.dahrk`.
+    delete process.env.DAHRK_STATE_DIR;
+    assert.match(resolveWorktreesDir(), /[/\\]\.dahrk[/\\]worktrees$/);
+    assert.match(resolveMirrorsDir(), /[/\\]\.dahrk[/\\]mirrors$/);
+
+    // Setting only the state dir moves BOTH roots under it, with no dedicated worktrees/mirrors env.
+    process.env.DAHRK_STATE_DIR = "/tmp/nodeA";
+    assert.equal(resolveWorktreesDir(), join("/tmp/nodeA", "worktrees"));
+    assert.equal(resolveMirrorsDir(), join("/tmp/nodeA", "mirrors"));
+    assert.equal(createGitService().worktreesDir, join("/tmp/nodeA", "worktrees"));
+
+    // A second state dir yields a disjoint pair of roots, so two nodes never share a tree.
+    process.env.DAHRK_STATE_DIR = "/tmp/nodeB";
+    assert.equal(resolveWorktreesDir(), join("/tmp/nodeB", "worktrees"));
+    assert.equal(resolveMirrorsDir(), join("/tmp/nodeB", "mirrors"));
+    assert.notEqual(resolveWorktreesDir(), join("/tmp/nodeA", "worktrees"));
+
+    // An explicit worktrees/mirrors env still wins over the state-dir default.
+    process.env.DAHRK_WORKTREES_DIR = "/env/wt";
+    process.env.DAHRK_MIRRORS_DIR = "/env/mir";
+    assert.equal(resolveWorktreesDir(), "/env/wt");
+    assert.equal(resolveMirrorsDir(), "/env/mir");
+  } finally {
+    for (const [k, v] of [
+      ["DAHRK_WORKTREES_DIR", saved.wt],
+      ["DAHRK_MIRRORS_DIR", saved.mir],
+      ["DAHRK_STATE_DIR", saved.state],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 });
 

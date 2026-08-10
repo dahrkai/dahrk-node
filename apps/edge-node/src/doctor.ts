@@ -31,7 +31,7 @@ import {
   probeRuntimeStatuses,
 } from "@dahrk/edge";
 import { isAlive, parseLock } from "./lock.js";
-import { detectManager, probeService, unitPath, type ServiceStatus } from "./service.js";
+import { detectManager, probeService, resolveServiceNames, unitPath, type ServiceStatus } from "./service.js";
 import { resolvePresence, type NodePresence } from "./status.js";
 import { lockFile, readState, stateFile } from "./state.js";
 import { dim, out as uiOut, symbol, verdict, type Level } from "./ui.js";
@@ -138,10 +138,16 @@ export function hostPresence(): { presence: NodePresence; service?: ServiceStatu
   const manager = detectManager(osPlatform());
   let service: ServiceStatus | undefined;
   if (manager !== "unsupported") {
-    const unit = unitPath(manager, homedir());
-    service = probeService(manager, existsSync(unit), captureProbe, {
-      ...(process.getuid ? { uid: process.getuid() } : {}),
-    });
+    // Same state-dir-derived name the install/start paths use, so `doctor` probes this node's own unit.
+    const names = resolveServiceNames(process.env);
+    const unit = unitPath(manager, homedir(), names);
+    service = probeService(
+      manager,
+      existsSync(unit),
+      captureProbe,
+      { ...(process.getuid ? { uid: process.getuid() } : {}) },
+      names,
+    );
   }
   const held = parseLock(readLock(lockFile(process.env)));
   const lockedPid = held !== undefined && isAlive(held) ? held : undefined;

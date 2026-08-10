@@ -23,6 +23,7 @@ import {
   type StatusDeps,
   type StatusFacts,
 } from "../src/status.ts";
+import { resolveServiceNames } from "../src/service.ts";
 import { persistEnrolment, writeState } from "../src/state.ts";
 
 const NOW = Date.parse("2026-07-13T12:00:00Z");
@@ -425,9 +426,11 @@ test("runStatus: an agent the supervisor was told not to run is diagnosed as exa
       uid: 501,
       capture: (argv) => {
         spawned.push(argv);
+        // The disabled listing names this node's own (state-dir-derived) label, not the default.
+        const label = resolveServiceNames({ DAHRK_STATE_DIR: dir }).launchdLabel;
         return argv[1] === "list"
           ? { code: 113, stdout: "" }
-          : { code: 0, stdout: 'disabled services = {\n\t"ai.dahrk.node" => disabled\n}' };
+          : { code: 0, stdout: `disabled services = {\n\t"${label}" => disabled\n}` };
       },
     });
 
@@ -502,7 +505,9 @@ test("runStatus: status never dials the hub - it only reports the URL it would d
       stateDir: dir,
       out: (l) => void out.push(l),
       capture: (argv) => {
-        assert.deepEqual(argv, ["launchctl", "list", "ai.dahrk.node"], "the only spawn is the supervisor probe");
+        // The label follows this node's (temp) state dir, so it is the isolated one, not the default.
+        const label = resolveServiceNames({ DAHRK_STATE_DIR: dir }).launchdLabel;
+        assert.deepEqual(argv, ["launchctl", "list", label], "the only spawn is the supervisor probe");
         return { code: 0, stdout: '\t"PID" = 1;\n' };
       },
     });

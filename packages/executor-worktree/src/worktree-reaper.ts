@@ -38,9 +38,11 @@ export interface ReapPolicy {
   /** Reap a worktree idle for longer than this. */
   maxIdleMs?: number;
   /**
-   * Never reap a worktree touched more recently than this, whatever else says. This is the only guard
-   * against reaping a live run belonging to ANOTHER node process sharing the same worktrees dir (there
-   * is no IPC between them), so it must stay comfortably longer than the longest plausible stage.
+   * Never reap a worktree touched more recently than this, whatever else says. Two nodes on one host now
+   * isolate by state dir - each gets its own worktrees root under `DAHRK_STATE_DIR` (DHK-1100) - so the
+   * shared-directory hazard this once guarded against no longer arises by default. It stays as
+   * defence-in-depth for a hand-configured overlap (two nodes pointed at one `DAHRK_WORKTREES_DIR`), where
+   * there is still no IPC between them, so it must stay comfortably longer than the longest plausible stage.
    */
   activityGraceMs?: number;
   /**
