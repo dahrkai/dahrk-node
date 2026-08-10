@@ -5,9 +5,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ResolvedCheck, RunnerContext, TraceEvent, WorkspaceRef } from "@dahrk/contracts";
 import {
   createCheckRunner,
@@ -172,6 +173,96 @@ test("cancelling mid-stage records the remaining checks as skipped, not missing"
       ["passed", "skipped", "skipped"],
       "one entry per declared check, always",
     );
+  } finally {
+    cleanup();
+  }
+});
+
+/** Is this pid still alive? `kill(pid, 0)` sends no signal; it throws `ESRCH` once the process is gone. */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Poll until `pid` is gone or the budget elapses. SIGKILL delivery is asynchronous, so a bare check
+ *  straight after settle can still see the process for a beat. Returns whether it died in time. */
+async function waitDead(pid: number, budgetMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await delay(25);
+  }
+  return !isAlive(pid);
+}
+
+/** Read the pid a backgrounded child wrote to `bg.pid`, once it appears. */
+async function readBgPid(dir: string): Promise<number> {
+  const path = join(dir, "bg.pid");
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number(readFileSync(path, "utf8").trim());
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    } catch {
+      /* not written yet */
+    }
+    await delay(25);
+  }
+  throw new Error("the backgrounded child never recorded its pid");
+}
+
+// The DHK-1099 regression. A check that backgrounds a long-lived child - a dev server, a watcher -
+// used to leave that grandchild running once the check's own `sh` was SIGKILLed, because the kill went
+// to the shell's pid alone and the reparented grandchild never received it. It must now die with the
+// stage. Timeout path: the per-check wall clock fires and reaps the whole process group.
+test("a backgrounded child is reaped when the check times out, not left to outlive the stage", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    // Background a long sleep, record its pid, then wait on it so the check itself hangs to the timeout.
+    const runP = run(dir, [
+      { name: "leaky", command: "sleep 30 & echo $! > bg.pid; wait", timeoutSeconds: 1 },
+    ]);
+    const bgPid = await readBgPid(dir);
+    const { result, outcomes } = await runP;
+    assert.equal(outcomes[0]?.timedOut, true);
+    assert.equal(result.status, "fail");
+    assert.equal(await waitDead(bgPid), true, `the backgrounded child (pid ${bgPid}) survived the stage`);
+  } finally {
+    cleanup();
+  }
+});
+
+// Clean-exit path: a check that exits 0 having backgrounded a server (its stdio detached, so the check
+// settles at once) must still not leave that server running past the stage.
+test("a backgrounded child is reaped even when the check exits cleanly", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    const { result } = await run(dir, [
+      { name: "starts-a-server", command: "sleep 30 >/dev/null 2>&1 & echo $! > bg.pid" },
+    ]);
+    assert.equal(result.status, "ok", "the check itself exited 0");
+    const bgPid = await readBgPid(dir);
+    assert.equal(await waitDead(bgPid), true, `the backgrounded child (pid ${bgPid}) survived a clean stage exit`);
+  } finally {
+    cleanup();
+  }
+});
+
+// Cancel path (the stage wall clock / a stage-stop): the in-flight check and anything it backgrounded
+// are reaped at once, not left running until the next check boundary the flag would take effect at.
+test("cancelling reaps the in-flight check's whole process group", async () => {
+  const { dir, cleanup } = sandbox();
+  try {
+    const runner = createCheckRunner([{ name: "leaky", command: "sleep 30 & echo $! > bg.pid; wait" }]);
+    const promise = runner.runBatch(ctxFor(dir), () => {});
+    const bgPid = await readBgPid(dir);
+    await runner.cancel();
+    await promise;
+    assert.equal(await waitDead(bgPid), true, `the backgrounded child (pid ${bgPid}) survived the cancel`);
   } finally {
     cleanup();
   }

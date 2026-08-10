@@ -14,10 +14,11 @@
  * changed command invalidates the marker and re-runs. A failed setup leaves NO marker, so a retry
  * re-runs rather than trusting a half-built tree.
  */
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { detachedGroup, killProcessGroup } from "./process-group.js";
 
 /** Minimal logger; defaults to a no-op so the library is quiet in tests. Mirrors GitLogger. */
 export interface RepoSetupLogger {
@@ -91,26 +92,36 @@ export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
   }
 
   log.info(`repo setup: running \`${command}\``);
-  try {
-    const stdout = execFileSync("sh", ["-c", command], {
-      cwd: worktreePath,
-      env: opts.env ?? process.env,
-      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      encoding: "utf8",
-      // Fold stderr into stdout so the captured trace shows what the installer said, in order.
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    // Only on a clean exit do we mark the tree installed. mkdir -p in case a fresh worktree's scratch
-    // dir is not yet present (the stage runner creates it, but the helper must not assume the order).
+  // `spawnSync`, not `execFileSync`: it returns the child's pid, which is what lets us reap the whole
+  // process GROUP afterwards. `detached` makes the `sh` a group leader, so a setup command that
+  // backgrounded something (`generator --watch &`) - or timed out mid-install - does not leak that child
+  // past setup: it is signalled with the group rather than left orphaned on the operator's machine
+  // (DHK-1099). The synchronous form is retained (setup runs before the runner, so blocking is fine).
+  const res = spawnSync("sh", ["-c", command], {
+    cwd: worktreePath,
+    env: opts.env ?? process.env,
+    timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    encoding: "utf8",
+    // Fold stderr into stdout so the captured trace shows what the installer said, in order.
+    stdio: ["ignore", "pipe", "pipe"],
+    ...detachedGroup,
+  });
+  // spawnSync's own timeout kill signals only the `sh` pid; reap the group so any backgrounded
+  // grandchild goes too. Unconditional and best-effort: a no-background command is a cheap no-op.
+  killProcessGroup({ pid: res.pid });
+
+  const combined = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+  // Clean exit (status 0, no spawn/timeout error): mark the tree installed. mkdir -p in case a fresh
+  // worktree's scratch dir is not yet present (the stage runner creates it, but the helper must not
+  // assume the order).
+  if (res.status === 0 && !res.error) {
     mkdirSync(dirname(markerPath), { recursive: true });
     writeFileSync(markerPath, want);
-    return { status: "ran", output: tail(stdout ?? "") };
-  } catch (e) {
-    // execFileSync throws on a non-zero exit, a signal (timeout kill), or a spawn error. Never write
-    // the marker - a retry must re-run rather than trust a half-built tree.
-    const err = e as { status?: number | null; stdout?: Buffer | string; stderr?: Buffer | string };
-    const combined = `${err.stdout?.toString() ?? ""}${err.stderr?.toString() ?? ""}` || (e as Error).message;
-    log.warn(`repo setup failed (exit ${err.status ?? "null"})`);
-    return { status: "failed", exitCode: err.status ?? null, output: tail(combined) };
+    return { status: "ran", output: tail(combined) };
   }
+  // A non-zero exit, a signal (timeout kill), or a spawn error. Never write the marker - a retry must
+  // re-run rather than trust a half-built tree.
+  const output = combined || res.error?.message || "";
+  log.warn(`repo setup failed (exit ${res.status ?? "null"})`);
+  return { status: "failed", exitCode: res.status ?? null, output: tail(output) };
 }

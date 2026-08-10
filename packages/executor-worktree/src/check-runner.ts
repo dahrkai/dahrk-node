@@ -37,7 +37,7 @@
  * that genuinely needs the credential is a node-native PROBE instead (`CheckProbe`, injected here as
  * `probes`): the node performs it, the check env stays credential-free.
  */
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type {
   CheckProbe,
   JobResult,
@@ -47,6 +47,7 @@ import type {
   StageVerification,
   TraceEvent,
 } from "@dahrk/contracts";
+import { detachedGroup, killProcessGroup } from "./process-group.js";
 
 /** Default per-check wall clock, matching the setup step's own cap. */
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -143,14 +144,29 @@ async function runProbe(
  * Run one check to completion. Never rejects: a spawn failure, a non-zero exit and a timeout are all
  * ordinary outcomes of "did this check pass", not exceptions.
  */
-async function runOne(check: ResolvedCheck, cwd: string, startedAt: number): Promise<CheckOutcome> {
+async function runOne(
+  check: ResolvedCheck,
+  cwd: string,
+  startedAt: number,
+  register?: (child: ChildProcess | undefined) => void,
+): Promise<CheckOutcome> {
   const timeoutMs = (check.timeoutSeconds ?? DEFAULT_TIMEOUT_MS / 1000) * 1000;
   return await new Promise<CheckOutcome>((resolve) => {
     let chunks = "";
     let timedOut = false;
     let settled = false;
 
-    const child = spawn("sh", ["-c", check.command], { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    // `detached` so the command leads its own process group: a check that backgrounds a child
+    // (`npm run dev &`, a watcher) can then be reaped by GROUP rather than leaking that grandchild past
+    // the stage - killing only `sh` never reached it (DHK-1099). Registered with the runner so a
+    // `cancel()` (wall clock, stage stop) can reap the in-flight group too, not just at the next check.
+    const child = spawn("sh", ["-c", check.command], {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...detachedGroup,
+    });
+    register?.(child);
 
     // Cap as we go rather than at the end, so a runaway command cannot grow the buffer without bound.
     const append = (buf: Buffer): void => {
@@ -161,13 +177,19 @@ async function runOne(check: ResolvedCheck, cwd: string, startedAt: number): Pro
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killProcessGroup(child);
     }, timeoutMs);
 
     const settle = (exitCode: number | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      register?.(undefined);
+      // Reap the group on EVERY exit, including a clean one: a check that exited 0 having backgrounded a
+      // server left that server running, and it must not outlive the stage. The leader is gone but its
+      // group persists while a member lives, so `-pid` still reaches the survivor; a group with nothing
+      // left throws `ESRCH`, which the helper swallows, so the ordinary no-background case is a no-op.
+      killProcessGroup(child);
       resolve({
         name: check.name,
         command: check.command,
@@ -214,6 +236,9 @@ export function createCheckRunner(
 ): Runner {
   let cancelled = false;
   let lastSummary = "";
+  /** The check currently spawned, so `cancel()` can reap its process group at once rather than waiting
+   *  for the next check boundary. Undefined between checks and once a check settles. */
+  let currentChild: ChildProcess | undefined;
 
   return {
     // A check stage runs no agent, so claiming an agent runtime here would corrupt the trace record
@@ -259,7 +284,9 @@ export function createCheckRunner(
         // verification, the summary - is identical either way.
         const outcome = check.probe
           ? await runProbe(check, probes, Date.now())
-          : await runOne(check, cwd, Date.now());
+          : await runOne(check, cwd, Date.now(), (c) => {
+              currentChild = c;
+            });
         outcomes.push(outcome);
 
         onTrace({
@@ -313,10 +340,12 @@ export function createCheckRunner(
     },
 
     async cancel(): Promise<void> {
-      // Takes effect at the next check boundary; the in-flight child is bounded by its own per-check
-      // wall clock. Documented rather than escalated because killing mid-check would report a
-      // verdict for a command that never finished.
+      // Stops the loop at the next check boundary AND reaps the in-flight check's process group now, so a
+      // wall-clock or stage-stop cancel takes down the running command and anything it backgrounded
+      // rather than leaving it to outlive the stage (DHK-1099). The killed child settles with a null exit
+      // and the remaining checks record as skipped, so `verifications` still has one entry per check.
       cancelled = true;
+      if (currentChild) killProcessGroup(currentChild);
     },
   };
 }

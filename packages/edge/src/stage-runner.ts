@@ -5,7 +5,7 @@
  * keyed by jobId. No LLM here - control flow is the engine's; inference (M4) lives
  * inside the Runner. The worktree is created once per run and reused (sticky owner).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,8 @@ import {
   safeStageSegment,
   createTraceWriter,
   createWorktreeReaper,
+  detachedGroup,
+  killProcessGroup,
   ManagedMailbox,
   overlayComponents,
   resolveMirrorsDir,
@@ -1420,11 +1422,19 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // R4 stage-exit hooks run in the worktree only if the stage otherwise succeeded.
         if (status === "ok" && job.hooks && job.hooks.length > 0) {
           for (const cmd of job.hooks) {
-            try {
-              execFileSync("sh", ["-c", cmd], { cwd: ref.worktreePath, stdio: ["pipe", "pipe", "pipe"] });
-            } catch (e) {
+            // `spawnSync` + `detached` so the hook leads its own process group and we can reap it: a hook
+            // that backgrounds a child must not leak it past the stage, same as a check command (DHK-1099).
+            const res = spawnSync("sh", ["-c", cmd], {
+              cwd: ref.worktreePath,
+              stdio: ["pipe", "pipe", "pipe"],
+              encoding: "utf8",
+              ...detachedGroup,
+            });
+            killProcessGroup({ pid: res.pid });
+            if (res.status !== 0 || res.error) {
               status = "fail";
-              writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "hook-failed", message: `hook "${cmd}" failed: ${(e as Error).message}` });
+              const reason = res.error ? res.error.message : `exited ${res.status}`;
+              writer.append({ seq: 0, ts: nowIso(), type: "error", runtime: traceRuntime, kind: "hook-failed", message: `hook "${cmd}" failed: ${reason}` });
               break;
             }
           }
