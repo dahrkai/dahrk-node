@@ -47,15 +47,22 @@ export interface CheckResult {
 /**
  * Which tools resolve on PATH. Gathered by the caller (it needs a shell); interpreted here.
  *
- * Only two, and the short list is the point. The SSH-key, `claude`-login and `gh` CLI probes were
- * removed in DHK-1006 because every credential is brokered by the hub: git authenticates with a minted
- * installation token over HTTPS, the PR is opened hub-side through the GitHub App, and inference
- * authenticates on the auth profile the run resolves to. None of them is consulted at run time, so
- * warning about their absence taught the operator to look in exactly the wrong place.
+ * Just one now, and the short list is the point. Every other probe was removed because its absence
+ * taught the operator to look in exactly the wrong place, and the whole list has one explanation here:
+ *
+ * - The SSH-key, `claude`-login and `gh` CLI probes went in DHK-1006, because every credential is
+ *   brokered by the hub: git authenticates with a minted installation token over HTTPS, the PR is
+ *   opened hub-side through the GitHub App, and inference authenticates on the auth profile the run
+ *   resolves to. None of them is consulted at run time.
+ * - `docker` went in DHK-1070. Docker is reached only by the container-isolated Pi runtime, behind
+ *   `DAHRK_PI_ISOLATION=container` - a flag no shipped configuration turns on. A normal `claude-code`
+ *   stage never touches Docker and a normal `pi` stage runs in-process, so on any node we support the
+ *   row reported on something that cannot happen, and when Docker was absent its `warn` dragged an
+ *   otherwise-healthy node's verdict to "healthy, with findings" for a tool it will never use. See
+ *   `docs/adr/0002-stage-isolation-is-the-node-boundary.md`.
  */
 export interface ToolPresence {
   git: boolean;
-  docker: boolean;
 }
 
 // -- pure sub-checks ---------------------------------------------------------
@@ -115,16 +122,24 @@ export function checkDiskSpace(freeBytes: number | undefined): CheckResult {
     : { status: "warn", label: "Free space", detail: `only ${gib} GiB free; a clone + worktree may not fit` };
 }
 
-/** The tool floor. `git` is required (a worktree run cannot happen without it) so its absence fails;
- *  `docker` is a graceful-degradation finding (only container-isolated stages need it). */
+/**
+ * The tool floor: just `git`, and its absence is a hard failure - no stage can run without it, and it
+ * is git that spends the brokered GitHub App token to clone and fetch.
+ *
+ * Git earns a row HERE even though `git-available` was dropped from the hub's preflight probes as
+ * tautological. That was correct there: preflight's check stage runs inside a worktree git already
+ * built, so git is provably present. This check runs in-process against a node that may never have run a
+ * job, where git's absence is genuinely possible. Same tool, different question, different answer - do
+ * not "fix" the inconsistency away. (`docker` was removed in DHK-1070; see {@link ToolPresence}.)
+ *
+ * Returns an array because it once carried several rows; keeping the shape means the callers that spread
+ * it need no change as the list shrinks.
+ */
 export function checkTools(tools: ToolPresence): CheckResult[] {
   const git: CheckResult = tools.git
     ? { status: "pass", label: "git", detail: "installed" }
     : { status: "fail", label: "git", detail: "not found; git is required to run a workflow" };
-  const docker: CheckResult = tools.docker
-    ? { status: "pass", label: "docker", detail: "available" }
-    : { status: "warn", label: "docker", detail: "not present; container stages are unavailable" };
-  return [git, docker];
+  return [git];
 }
 
 /** Hub reachability. An enrolment rejection still counts as REACHED (the token, not the hub, is the
@@ -218,8 +233,16 @@ export function checkToken(
  * The CLI's preflight has always synthesised this deterministically rather than asking a model, and
  * since DHK-1059 so does the hub's. Shared here so the terminal, the portal card and the node health
  * dialog all read the same sentence for the same facts.
+ *
+ * `allClear` is the all-green read, and it is a parameter because the two callers checked different
+ * things: the CLI preflight examines a repo and its default names one, but the node health check takes
+ * no repo path at all (see the module header), so it passes an override that claims only what it
+ * measured. Attesting to an unchecked repo is the exact defect DHK-1070 removed.
  */
-export function synthesise(checks: CheckResult[]): string {
+export function synthesise(
+  checks: CheckResult[],
+  allClear = "The floor is sound. Node, repo, and tools all check out - this host is ready to run a workflow.",
+): string {
   const fails = checks.filter((c) => c.status === "fail");
   const warns = checks.filter((c) => c.status === "warn");
   const list = (cs: CheckResult[]): string =>
@@ -230,8 +253,13 @@ export function synthesise(checks: CheckResult[]): string {
   if (warns.length > 0) {
     return `The floor is sound, with ${warns.length} early warning${warns.length === 1 ? "" : "s"}: ${list(warns)}. ${warns.length === 1 ? "It does" : "These do"} not block a run, but ${warns.length === 1 ? "is" : "are"} worth addressing.`;
   }
-  return "The floor is sound. Node, repo, and tools all check out - this host is ready to run a workflow.";
+  return allClear;
 }
+
+/** The node health report's all-green read: it names only what a node-scoped check measures. Unlike the
+ *  CLI preflight's default all-clear, it cannot claim a repo was checked, because this report examines
+ *  none - so a node-scoped attestation cannot carry a customer path into the hub's durable node event. */
+const NODE_ALL_CLEAR = "The floor is sound. This node checks out - ready to run a workflow.";
 
 // -- the wire report ---------------------------------------------------------
 
@@ -278,7 +306,7 @@ export function buildNodeHealthReport(
   return {
     verdict,
     sections,
-    readMarkdown: synthesise([...checks]),
+    readMarkdown: synthesise([...checks], NODE_ALL_CLEAR),
     gatheredAt: now,
     tookMs,
   };

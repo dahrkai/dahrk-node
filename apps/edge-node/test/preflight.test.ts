@@ -83,26 +83,27 @@ test("checkRepo: a git repo with commits passes; not-a-repo fails; empty repo is
   assert.equal(checkRepo({ path: "/w", isGitRepo: true, headResolves: false }).status, "warn");
 });
 
-test("checkTools: git is required (missing = fail); other tools missing are findings", () => {
-  const all: ToolPresence = { git: true, sshKey: true, claude: true, gh: true, docker: true };
-  assert.ok(checkTools(all).every((c) => c.status === "pass"));
+test("checkTools: git is the only row - required (missing = fail), and no docker row is ever emitted", () => {
+  const rows = checkTools({ git: true });
+  assert.deepEqual(rows.map((c) => c.label), ["git"]);
+  assert.equal(rows[0]?.status, "pass");
 
-  const noGit = checkTools({ ...all, git: false });
+  const noGit = checkTools({ git: false });
   assert.equal(noGit.find((c) => c.label === "git")?.status, "fail");
 
-  const noDocker = checkTools({ ...all, docker: false });
-  assert.equal(noDocker.find((c) => c.label === "docker")?.status, "warn");
+  // docker was removed (DHK-1070): the row must not quietly return.
+  assert.ok(!checkTools({ git: true }).some((c) => c.label === "docker"));
 });
 
 test("synthesise: reads unsound on a fail, sound-with-warnings on a finding, all-clear otherwise", () => {
   assert.match(synthesise([{ status: "fail", label: "git", detail: "not found" }]), /unsound/i);
-  assert.match(synthesise([{ status: "warn", label: "docker", detail: "not present" }]), /sound, with 1 early warning/i);
+  assert.match(synthesise([{ status: "warn", label: "Free space", detail: "thin" }]), /sound, with 1 early warning/i);
   assert.match(synthesise([{ status: "pass", label: "node" }]), /floor is sound\./i);
 });
 
 // -- runPreflight orchestration (injected deps: no host, no network) ---------
 
-const okTools: ToolPresence = { git: true, sshKey: true, claude: true, gh: true, docker: true };
+const okTools: ToolPresence = { git: true };
 const okRepo: RepoProbe = { path: "/w/app", isGitRepo: true, headResolves: true, baseBranch: "main" };
 const okHost: HostFacts = { worktreeRootWritable: true, freeDiskBytes: 50 * 1024 * 1024 * 1024, tools: okTools, repo: okRepo };
 
@@ -142,15 +143,15 @@ test("runPreflight: an old Node exits 1 as an unsound floor", async () => {
   assert.equal(code, 1);
 });
 
-test("runPreflight: findings alone stay sound (exit 0) - a missing tool is a finding, not a failure", async () => {
+test("runPreflight: findings alone stay sound (exit 0) - a warning is a finding, not a failure", async () => {
   const out: string[] = [];
-  const host: HostFacts = { ...okHost, tools: { ...okTools, docker: false } };
-  // Supply a (reachable) hub so the only finding is the missing docker.
+  const host: HostFacts = { ...okHost, freeDiskBytes: 64 * 1024 * 1024 };
+  // Supply a (reachable) hub so the only finding is the thin disk.
   const code = await runPreflight({ repoPath: "/w/app", hubUrl: "ws://h:1", nodeId: "node-under-test" }, deps(host, out));
   assert.equal(code, 0);
   const text = out.join("\n");
   assert.match(text, /SOUND with 1 finding\./);
-  assert.match(text, /▲ docker: not present/);
+  assert.match(text, /▲ Free space:/);
 });
 
 test("runPreflight: an unreachable hub is a finding, never an unsound floor (issue-less run)", async () => {

@@ -17,6 +17,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Fixed
 
+- A node with no Docker installed now reports as healthy, instead of showing a finding for a tool it never uses.
+- The node health report's all-clear no longer claims a repository was checked, since it examines none.
 - A stage can no longer read files outside its worktree by changing directory first. (#201)
 - A node that dies mid-run preserves the uncommitted work in every repository of that run. (#201)
 - Each repository of a run runs its own setup command. (#201)
