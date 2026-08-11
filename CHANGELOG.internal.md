@@ -26,25 +26,6 @@ this file is left verbatim.
 
 ### Fixed
 
-- DHK-1136: the batch output-idle watchdog no longer kills a live stage. Root cause: `bumpStall()` was
-  reachable only from `onTrace`, which fires solely for *normalised* trace events, but the mappers
-  normalise `system` / `stream_event` / `rate_limit_event` to zero events by design. So the watchdog
-  measured the *trace* stream while the runtime it was trying to prove alive is a property of the *SDK
-  message* stream; a long assistant turn that only emitted such messages (~1/s for the whole 300s
-  window on DHK-1113) looked identical to a hang and died at exactly `stallMs` with `timeout` /
-  `harness`. This was the third bug in this seam (DHK-955, DHK-1017), each a different silent interval
-  patched while the general defect survived. Fix: measure liveness where messages arrive. A new
-  `onLive?: () => void` on the runner ctx (declared on `PolicyAwareRunnerContext` in `runtime-session.ts`,
-  wired to `() => bumpStall()` in `stage-runner.ts` next to `writeRaw`) is called per SDK message by
-  both adapters (`claude-adapter.ts` `handleMessage`, `pi-adapter.ts` `sendTurn`), right where
-  `ctx.writeRaw?.(...)` already is, before any mapping. It is a *pure* watchdog reset: it never appends
-  a trace event or sends progress, so the non-normalised messages stay out of the trace and the Linear
-  thread. The DHK-955 open-tool-call suspension still holds (`bumpStall` returns early while
-  `openToolCalls` is non-empty). A stall that genuinely fires now means the runtime sent nothing at
-  all, so the summary reports the last trace event kind and its timestamp (`stage-runner.ts`). Covered
-  both directions in `stage-runner.test.ts` (a quiet-but-live runner survives; a truly silent one is
-  still killed) and as a both-runtimes property in `runtime-conformance.test.ts` (a message normalising
-  to zero events bumps `onLive` but emits nothing). Default stall window unchanged at 300s.
 - DHK-1099: a process a stage backgrounds (`npm run dev &`, `nohup`, a watcher) no longer outlives the
   run and the node. Root cause: there was no process-group kill anywhere on the node - no node-owned
   `spawn` passed `detached: true`, so every child joined the node's own process group, and a kill of a
@@ -62,6 +43,38 @@ this file is left verbatim.
   follow-up filed: the SDK (`query()` / `createAgentSession`) surfaces no pid (see
   `ws-client.ts:424-428`), so there is nothing for the node to signal, and re-execing the node as a
   session leader would put the node in the very group a reap would kill. Documented in ADR 0003.
+- DHK-1136: the batch stall watchdog measured the wrong stream and killed live stages. `bumpStall` was
+  only reachable from `onTrace`, which fires only for *normalised* trace events - but both mappers
+  normalise a large class of native records to nothing (`system`, `stream_event`, `rate_limit_event`
+  for Claude; several event types for Pi). So a runtime mid-turn streams a message a second and
+  produces zero trace events, and the watchdog could not distinguish that from a hang. Liveness now
+  comes from `ctx.onLive`, which both adapters call once per native message *before* normalisation,
+  beside the existing `writeRaw`. It is a pure watchdog reset: nothing reaches the trace writer or the
+  progress stream, so the Linear thread does not fill with control-plane noise.
+
+  The evidence, from the two DHK-1113 build timeouts (`run-34a20c0d-f8a1-4ad0-9286-56242500d94d` and
+  `run-2bbeb95b-e5b1-4031-865f-97e64292ed9f`): `writeRaw` is called unconditionally per message, so its
+  raw/ counter is a faithful record of what arrived. Across the 300s the node called silent it recorded
+  291 and 223 messages respectively - roughly one a second, throughout. Both stages were killed anyway,
+  at a cost of 1.66 USD.
+
+  This is the third bug in this seam. DHK-955 (watchdog fired mid-tool-call) and DHK-1017 (`stallMs`
+  read on a check job with no `agentConfig`) each patched one specific silent interval; the general
+  defect - liveness derived from the normalised stream rather than the message stream - survived both,
+  so the next silent interval reproduced it. Hence fixing the seam rather than adding a third special
+  case, and hence doing it in both adapters: it is a runtime-conformance property, not a Claude quirk.
+
+  `onLive` rides on the node-local `PolicyAwareRunnerContext` extension and is read defensively in the
+  adapters, since `@dahrk/contracts` does not declare it - the same idiom as `injectedSkillPaths`. The
+  300s default is deliberately unchanged: raising it only moves the cliff and costs real detection
+  latency on genuine hangs. The stall summary now also reports how stale the trace was when the kill
+  fired, which is what distinguishes "died mid-turn" from "died idle".
+- DHK-1136 follow-up (this PR, on top of #206): `onLive` is now declared once on
+  `PolicyAwareRunnerContext` in `runtime-session.ts` rather than re-asserted with an inline
+  `ctx as { onLive?: () => void }` at each adapter call site, so the seam has a single documented
+  shape. `runtime-conformance.test.ts` carries it as a both-runtimes property: a native message that
+  normalises to zero trace events must bump `ctx.onLive` and emit nothing, which is exactly the
+  invariant the watchdog depends on and the one a future mapper change would silently break.
 
 ### Changed
 

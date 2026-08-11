@@ -543,7 +543,7 @@ forBothRuntimes("a batch stage that streams no output for `stallMs` is cancelled
     const result = await runner.runJob(job);
     assert.equal(result.status, "timeout", "a silent batch stage is cancelled by the stall watchdog");
     assert.match(result.summary ?? "", /stalled \(no runtime output for/, "the summary marks it a stall, not a plain timeout");
-    assert.match(result.summary ?? "", /saw nothing from the runtime at all/, "the summary says what the node last saw (DHK-1136)");
+    assert.match(result.summary ?? "", /last trace event \d+s ago/, "and says how stale the trace is, so the stall is legible without the archive (DHK-1136)");
     assert.equal(result.failureClass, "harness", "a harness-owned stall kill is billed harness, not agent (DHK-569)");
   } finally {
     if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
@@ -616,76 +616,6 @@ forBothRuntimes("a batch stage that keeps streaming resets the stall watchdog an
   }
 });
 
-forBothRuntimes("a batch stage that only signals liveness (no trace events) outlives the stall window (DHK-1136)", async (runtime) => {
-  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-onlive-"));
-  const repo = join(root, "repo");
-  execFileSync("mkdir", ["-p", repo]);
-  initRepo(repo);
-
-  const sink: TraceSink = {
-    event: () => undefined,
-    finalised: () => undefined,
-    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
-  };
-
-  // The production shape from the ticket: a live runtime whose SDK messages all normalise to zero
-  // trace events (`system` / `stream_event` / `rate_limit_event`), so it streams `ctx.onLive()` every
-  // 5ms for ~100ms (10x the 50ms window) but NEVER calls `onTrace`, then finishes ok. On the pre-fix
-  // code `onLive` did not exist, the watchdog never reset, and the stage was killed as `timeout`;
-  // measuring liveness at the SDK-message boundary keeps the healthy stage alive.
-  let onLiveCalls = 0;
-  const makeQuietLiveRunner = (rt: Runner["runtime"]): Runner => ({
-    runtime: rt,
-    async runBatch(ctx: RunnerContext, _onTrace: (event: TraceEvent) => void) {
-      const onLive = (ctx as RunnerContext & { onLive?: () => void }).onLive;
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 5));
-        onLive?.(); // a sign of life that produces no trace event, as the adapters do per SDK message
-        onLiveCalls++;
-      }
-      return { status: "ok" };
-    },
-    async runInteractive() {
-      return { status: "ok" };
-    },
-    async summarise() {
-      return "done";
-    },
-    async cancel() {},
-  });
-
-  const runner = createStageRunner({
-    gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
-    makeRunner: makeQuietLiveRunner,
-    rules: [],
-    sendProgress: () => undefined,
-    trace: sink,
-  });
-
-  const job: JobRequest = {
-    tenantId: "t_default",
-    runId: "run-sr-onlive",
-    stageId: "build",
-    jobId: "job-sr-onlive-1",
-    awakeableId: "awk-onlive",
-    executorType: "worktree",
-    agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
-    workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
-  };
-
-  const prev = process.env.DAHRK_BATCH_STALL_MS;
-  process.env.DAHRK_BATCH_STALL_MS = "50"; // shorter than the total run, longer than each 5ms liveness gap
-  try {
-    const result = await runner.runJob(job);
-    assert.equal(result.status, "ok", "a live-but-quiet batch stage is never cancelled by the watchdog");
-    assert.ok(onLiveCalls > 0, "the stage runner wired ctx.onLive through to the runner");
-  } finally {
-    if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
-    else process.env.DAHRK_BATCH_STALL_MS = prev;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 forBothRuntimes("a batch stage doing one long non-streaming tool call outlives the stall window (DHK-955)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-toolcall-"));
   const repo = join(root, "repo");
@@ -750,6 +680,83 @@ forBothRuntimes("a batch stage doing one long non-streaming tool call outlives t
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+forBothRuntimes(
+  "a batch stage whose runtime streams only zero-event messages outlives the stall window (DHK-1136)",
+  async (runtime) => {
+    const root = mkdtempSync(join(tmpdir(), "dahrk-sr-onlive-"));
+    const repo = join(root, "repo");
+    execFileSync("mkdir", ["-p", repo]);
+    initRepo(repo);
+
+    const sink: TraceSink = {
+      event: () => undefined,
+      finalised: () => undefined,
+      requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+    };
+
+    // The long-assistant-turn shape, and the one that killed two DHK-1113 runs. The runtime is talking
+    // the whole time, but every message it sends normalises to NO trace event (`system`,
+    // `stream_event`, `rate_limit_event`), so `onTrace` never fires. Only `ctx.onLive` sees it. No tool
+    // call is open either, so the DHK-955 suspension cannot save this stage - liveness has to come from
+    // the message stream itself.
+    const makeQuietRunner = (rt: Runner["runtime"]): Runner => ({
+      runtime: rt,
+      async runBatch(ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
+        // One normalised event up front, then the call closes: from here the watchdog is armed and
+        // nothing further reaches `onTrace`.
+        onTrace({ seq: 0, ts: new Date().toISOString(), type: "thought", runtime: rt, text: "thinking" });
+        const onLive = (ctx as { onLive?: () => void }).onLive;
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 5)); // 5ms ticks vs a 50ms window: 10x margin
+          onLive?.(); // the adapter's per-message call, with nothing to normalise
+        }
+        return { status: "ok" };
+      },
+      async runInteractive() {
+        return { status: "ok" };
+      },
+      async summarise() {
+        return "done";
+      },
+      async cancel() {},
+    });
+
+    const runner = createStageRunner({
+      gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+      makeRunner: makeQuietRunner,
+      rules: [],
+      sendProgress: () => undefined,
+      trace: sink,
+    });
+
+    const job: JobRequest = {
+      tenantId: "t_default",
+      runId: "run-sr-onlive",
+      stageId: "build",
+      jobId: "job-sr-onlive-1",
+      awakeableId: "awk-onlive",
+      executorType: "worktree",
+      agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+      workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    };
+
+    const prev = process.env.DAHRK_BATCH_STALL_MS;
+    process.env.DAHRK_BATCH_STALL_MS = "50"; // 50ms window, far shorter than the ~100ms of quiet work
+    try {
+      const result = await runner.runJob(job);
+      assert.equal(
+        result.status,
+        "ok",
+        "a runtime streaming messages that normalise to no trace event is alive, not stalled",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
+      else process.env.DAHRK_BATCH_STALL_MS = prev;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 forBothRuntimes("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-rtenv-"));

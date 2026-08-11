@@ -201,9 +201,12 @@ type PolicyAwareRunnerContext = RunnerContext & {
   authorizeToolUse?: (toolName: string, input: unknown) => PolicyOutcome;
   /** Surface an interactive-stage `AskUserQuestion` as a Linear `select` elicitation (DHK-344). */
   emitElicit?: (question: ElicitQuestion) => void;
-  /** Reset the batch output-idle watchdog on every SDK message the runtime sends (DHK-1136), so a
-   *  live stage whose messages all normalise to zero trace events is not mistaken for a hang. A pure
-   *  watchdog reset: it never writes a trace event or streams progress. */
+  /** The runtime received a message from its provider (DHK-1136). Called by the adapter once per
+   *  native message, BEFORE normalisation, so it fires for records that map to no trace event at all
+   *  (`system`, `stream_event`, `rate_limit_event`). That is the whole point: it is the only honest
+   *  liveness signal, and the normalised trace stream is not one. Carried on the local extended shape
+   *  since `@dahrk/contracts` does not declare it yet - the same defensive idiom as `injectedSkillPaths`
+   *  above. Purely a watchdog reset: it must never write to the trace or the progress stream. */
   onLive?: () => void;
 };
 
@@ -1183,14 +1186,13 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // `bumpStall` suspends the watchdog until the set drains. `action`/`observation` pair by
         // `toolUseId` (DHK-384), so interleaved/parallel calls track correctly.
         const openToolCalls = new Set<string>();
-        // The last trace event the node saw, for the stall summary (DHK-1136): when the watchdog does
-        // fire, the summary reports what was last observed and when, so a stall is a one-look diagnosis
-        // rather than a trace-archaeology session. A live-but-quiet stage (only non-normalised SDK
-        // messages) no longer trips the watchdog at all, so a fired stall now genuinely means the
-        // runtime went silent - and this says what it was doing when it did.
-        let lastTrace: { kind: TraceEvent["type"]; ts: string } | undefined;
+        // When the stage last produced a NORMALISED event, as opposed to merely being alive. Only read
+        // to make a stall legible (DHK-1136): once `onLive` drives the watchdog, a stall means the
+        // runtime went silent entirely, and the gap since the last trace event is what says whether it
+        // died mid-turn or while idle.
+        let lastTraceAt = Date.now();
         const onTrace = (event: TraceEvent): void => {
-          lastTrace = { kind: event.type, ts: event.ts };
+          lastTraceAt = Date.now();
           if (event.type === "action") {
             const key = actionKey(event.tool, event.input);
             const authorised = authorisedActions.indexOf(key);
@@ -1304,13 +1306,8 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // The adapter persists each runtime-native record under the attempt's raw/ sidecar
           // and stamps the rawRef onto the emitted event.
           writeRaw: writer.writeRaw,
-          // The batch output-idle watchdog's liveness reset (DHK-1136). The adapter calls this for
-          // EVERY SDK message, before mapping, so a message that normalises to zero trace events
-          // (`system` / `stream_event` / `rate_limit_event`) still proves the runtime alive. It is a
-          // PURE reset: `bumpStall` only re-arms the timer, never appends a trace event or sends
-          // progress, so this silence stays out of the trace and the Linear thread. `bumpStall` reads
-          // the current value of the `let` at call time, so this picks up the armed watchdog wired
-          // below; it also honours the DHK-955 open-tool-call suspension for free.
+          // Sits beside `writeRaw` deliberately: the adapter calls both at the same point, for every
+          // native message. `writeRaw` records it, `onLive` says the runtime is alive (DHK-1136).
           onLive: () => bumpStall(),
           authorizeToolUse,
           // Wire the interactive AskUserQuestion elicitation seam (DHK-344): the adapter calls this when
@@ -1353,9 +1350,16 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         //
         // Batch output-idle watchdog. A batch stage has no idle timer of its own, and the wall clock is
         // opt-in (usually absent), so a genuinely hung stage - an orphaned subprocess, a runtime that
-        // stops streaming - would otherwise run forever. Cancel the runner if it emits NO trace event
-        // (assistant text, tool call, tool result) for `stallMs`; `bumpStall` above resets it on every
-        // event, so an actively-working stage is never touched. Batch-only: interactive stages keep
+        // stops streaming - would otherwise run forever. Cancel the runner if the RUNTIME goes silent
+        // for `stallMs`.
+        //
+        // "Silent" means no native message at all, not no trace event (DHK-1136). Those are different
+        // things and conflating them is what made this watchdog kill live stages: the mappers normalise
+        // `system` / `stream_event` / `rate_limit_event` to zero events, so a long assistant turn streams
+        // a message a second and produces nothing `onTrace` can see. Liveness therefore comes from
+        // `ctx.onLive`, which the adapter calls per native message before normalisation; `onTrace` bumps
+        // too, since a normalised event implies a message. An actively-working stage is never touched.
+        // Batch-only: interactive stages keep
         // their own per-turn idle timer. Override via the stage's `stall_seconds` (-> agentConfig.stallMs,
         // read defensively until the contract republishes) or env `DAHRK_BATCH_STALL_MS`; default 300s.
         let stalled = false;
@@ -1463,16 +1467,15 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // engine-owned summarisation turn (only after success, never failing the stage).
         let summary = result.summary ?? `${stageId}: ${status}`;
         // A stalled batch stage reports a distinct, legible summary (the runner's own summary is
-        // unreliable after a mid-stream cancel). Prefer it over the generic `<stage>: timeout`. Since
-        // DHK-1136 the watchdog resets on any SDK message, so a fired stall means the runtime sent
-        // NOTHING for the window - not merely no trace event. Say what the node last saw and when, so
-        // the next occurrence is diagnosed at a glance rather than by reading the raw sidecar.
+        // unreliable after a mid-stream cancel). Prefer it over the generic `<stage>: timeout`.
         if (stalled && !timedOut) {
-          const secs = Math.round(stallMs / 1000);
-          const lastSeen = lastTrace
-            ? `last saw a ${lastTrace.kind} event at ${lastTrace.ts}`
-            : "saw nothing from the runtime at all";
-          summary = `${stageId}: stalled (no runtime output for ${secs}s; ${lastSeen})`;
+          // Say what actually went quiet. Since DHK-1136 the watchdog measures RUNTIME silence (any
+          // native message, normalised or not), so a stall here means nothing arrived at all - a real
+          // hang, not a long turn. The trace-event age is reported alongside because it is the part
+          // that distinguishes "died mid-turn" from "died idle", and reading it off the summary saves
+          // the next person the trace archaeology this bug originally cost.
+          const traceAgeS = Math.round((Date.now() - lastTraceAt) / 1000);
+          summary = `${stageId}: stalled (no runtime output for ${Math.round(stallMs / 1000)}s; last trace event ${traceAgeS}s ago)`;
         }
         if (!interactive && status === "ok") {
           try {
