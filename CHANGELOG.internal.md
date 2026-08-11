@@ -43,6 +43,32 @@ this file is left verbatim.
   follow-up filed: the SDK (`query()` / `createAgentSession`) surfaces no pid (see
   `ws-client.ts:424-428`), so there is nothing for the node to signal, and re-execing the node as a
   session leader would put the node in the very group a reap would kill. Documented in ADR 0003.
+- DHK-1136: the batch stall watchdog measured the wrong stream and killed live stages. `bumpStall` was
+  only reachable from `onTrace`, which fires only for *normalised* trace events - but both mappers
+  normalise a large class of native records to nothing (`system`, `stream_event`, `rate_limit_event`
+  for Claude; several event types for Pi). So a runtime mid-turn streams a message a second and
+  produces zero trace events, and the watchdog could not distinguish that from a hang. Liveness now
+  comes from `ctx.onLive`, which both adapters call once per native message *before* normalisation,
+  beside the existing `writeRaw`. It is a pure watchdog reset: nothing reaches the trace writer or the
+  progress stream, so the Linear thread does not fill with control-plane noise.
+
+  The evidence, from the two DHK-1113 build timeouts (`run-34a20c0d-f8a1-4ad0-9286-56242500d94d` and
+  `run-2bbeb95b-e5b1-4031-865f-97e64292ed9f`): `writeRaw` is called unconditionally per message, so its
+  raw/ counter is a faithful record of what arrived. Across the 300s the node called silent it recorded
+  291 and 223 messages respectively - roughly one a second, throughout. Both stages were killed anyway,
+  at a cost of 1.66 USD.
+
+  This is the third bug in this seam. DHK-955 (watchdog fired mid-tool-call) and DHK-1017 (`stallMs`
+  read on a check job with no `agentConfig`) each patched one specific silent interval; the general
+  defect - liveness derived from the normalised stream rather than the message stream - survived both,
+  so the next silent interval reproduced it. Hence fixing the seam rather than adding a third special
+  case, and hence doing it in both adapters: it is a runtime-conformance property, not a Claude quirk.
+
+  `onLive` rides on the node-local `PolicyAwareRunnerContext` extension and is read defensively in the
+  adapters, since `@dahrk/contracts` does not declare it - the same idiom as `injectedSkillPaths`. The
+  300s default is deliberately unchanged: raising it only moves the cliff and costs real detection
+  latency on genuine hangs. The stall summary now also reports how stale the trace was when the kill
+  fired, which is what distinguishes "died mid-turn" from "died idle".
 
 ### Changed
 

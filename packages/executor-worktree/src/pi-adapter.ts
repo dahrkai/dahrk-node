@@ -452,6 +452,11 @@ function makePiRuntimeSession(
       let status: JobStatus | undefined;
       const unsub = s.subscribe((ev) => {
         const rawRef = ctx.writeRaw?.(ev);
+        // An event arrived, so the runtime is alive - report that BEFORE normalisation, and before the
+        // early returns below, so every native event counts (DHK-1136). `consumePiEvent` maps plenty of
+        // events to none, so a consumer watching only the normalised stream cannot tell a working turn
+        // from a hang. Read defensively: additive over the published `RunnerContext`.
+        (ctx as { onLive?: () => void }).onLive?.();
         // Count Pi's per-turn boundary and abort the in-flight `prompt()` once the ceiling is reached
         // (DHK-970). Pi settles the aborted run with a `stopReason: "aborted"` terminal event, which
         // `settleStatus` maps to `fail` with no `failureClass` - the SAME terminal state and `agent`

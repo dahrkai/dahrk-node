@@ -381,6 +381,12 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     if (found) sessionId = found;
     if (msg.type === "result" && typeof msg.total_cost_usd === "number") costUsd = msg.total_cost_usd;
     const rawRef = ctx.writeRaw?.(msg);
+    // A message arrived, so the runtime is alive - report that BEFORE normalisation (DHK-1136).
+    // `consumeClaudeMessage` maps `system` / `stream_event` / `rate_limit_event` to zero events, so a
+    // consumer watching only the normalised stream sees a long assistant turn as total silence and
+    // cannot tell it from a hang. Read defensively: `onLive` is additive over the published
+    // `RunnerContext`, the same forward-compat idiom as the other locally-carried ctx fields.
+    (ctx as { onLive?: () => void }).onLive?.();
     const res = consumeClaudeMessage(msg, state, suppressStageExit);
     for (const e of res.events) emit(e, rawRef);
     return { isResult: res.isResult, status: res.status, responseText: res.responseText };
