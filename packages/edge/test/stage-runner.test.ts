@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, Runtime, TraceEvent, TraceMeta } from "@dahrk/contracts";
 import { REFUSED_CREDENTIAL_SUMMARY, createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
 import {
@@ -333,6 +333,43 @@ forBothRuntimes("DHK-1047: a run-finished tears down the run's worktree and clea
     await runner.finishRun("run-1");
     assert.equal(torn.length, 1, "the run-finished frame tears the worktree down");
     assert.ok(torn[0]!.includes("run-1"), "and it is this run's worktree that goes");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("DHK-1104: a run holds a browse root between stages, and loses it when the run ends", async (runtime) => {
+  // The case worktree browsing exists for is a run PARKED AT A GATE: no job in flight, the worktree
+  // still on disk, and a human being asked to approve a change nothing has shown them. That is the
+  // state a run is in between two stages, which is what this reproduces - `isBusy` is false here and
+  // the browse root must still be there, or browsing answers nothing at exactly the moment it matters.
+  const root = mkdtempSync(join(tmpdir(), "dahrk-browse-root-"));
+  const repo = join(root, "repo");
+  execFileSync("mkdir", ["-p", repo]);
+  initRepo(repo);
+  const { gitService } = tornTracking(root);
+
+  const runner = createStageRunner({ gitService, makeRunner: createMockRunner, rules: [], sendProgress: () => undefined });
+
+  try {
+    assert.equal(runner.browseRoot("run-9"), undefined, "a run never seen has nothing to browse");
+
+    await runner.runJob(finishJob(runtime, repo, 9));
+    assert.equal(runner.isBusy("run-9"), false, "the stage has settled, as at a gate");
+
+    const browse = runner.browseRoot("run-9");
+    assert.ok(browse, "a run parked between stages still has a browse root");
+    // Rooted at the RUN directory, one level above the repository, so a multi-repo run can list its
+    // repositories side by side. Rooting it at the worktree's parent by path arithmetic would land on
+    // the worktrees dir for a legacy flat layout and expose every run on the node.
+    assert.equal(basename(browse.root), "run-9", `unexpected root ${browse.root}`);
+    assert.equal(browse.repos.length, 1);
+    // The repository sits strictly BELOW the root, which is what a root listing enumerates.
+    assert.equal(dirname(browse.repos[0]!.worktreePath), browse.root);
+    assert.ok(browse.repos[0]!.dir.length > 0, "the repository has a directory name of its own");
+
+    await runner.finishRun("run-9");
+    assert.equal(runner.browseRoot("run-9"), undefined, "a finished run's worktree is gone, and so is the root");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

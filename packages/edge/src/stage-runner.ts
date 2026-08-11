@@ -57,7 +57,7 @@ import {
 import { credentialLatch, type CredentialLatch } from "./credential-latch.js";
 import { probeRuntimeStatuses } from "./detect-runtimes.js";
 import { buildRules } from "./builtins.js";
-import { computeFsRoots } from "./fs-roots.js";
+import { computeFsRoots, isUnder } from "./fs-roots.js";
 import { createNodeLogger, type NodeLogger } from "./logger.js";
 import { evaluatePolicies, type PolicyRule } from "./policy.js";
 import { startMcpGateway, type McpGateway } from "./mcp-gateway.js";
@@ -160,6 +160,17 @@ export interface RetentionPolicy {
   maxAgeMs?: number;
 }
 
+/** Where a worktree-browse request for a run resolves its paths (DHK-1104). */
+export interface BrowseRoot {
+  /** The directory a browse path is relative to. For a run laid out the current way this is the RUN
+   *  directory, one level above each repository, which is what lets a multi-repo run list its
+   *  repositories side by side at `path: ""`. */
+  root: string;
+  /** The run's worktrees as paths relative to `root`, primary first. A single-repo run laid out the
+   *  legacy flat way (the worktree IS the run directory) yields one entry whose `dir` is `""`. */
+  repos: { dir: string; worktreePath: string }[];
+}
+
 export interface StageRunner {
   runJob(job: JobRequest): Promise<JobResult>;
   /**
@@ -182,6 +193,10 @@ export interface StageRunner {
    *  for the count cap. Idempotent and unordered-safe: a no-op for an unknown run, an already-torn-down
    *  run, or one with a job still in flight (`isBusy` wins). */
   finishRun(runId: string): Promise<void>;
+  /** Where to resolve a worktree-browse request for a run, or undefined when this node does not hold
+   *  the run (DHK-1104). Deliberately reads the same map as `isLive`, so a run parked at a human gate
+   *  answers: that is the case browsing exists for, and it is exactly when no job is in flight. */
+  browseRoot(runId: string): BrowseRoot | undefined;
   /** Feed a human turn to an in-flight interactive stage (relayed `prompted` text; M5b). */
   enqueueTurn(jobId: string, turn: HumanTurn): void;
   /** Close an interactive stage's turn stream (the human signed off -> its gate exit; M5b). */
@@ -731,6 +746,27 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
 
   return {
     isBusy,
+
+    browseRoot(runId) {
+      const refs = allWorktrees(runId);
+      // A telemetry-only run has a scratch directory, not a worktree; there is nothing to browse and
+      // saying so is not the same as an empty listing.
+      if (refs.length === 0 || scratchOnly.has(runId)) return undefined;
+      const primary = refs[0]!;
+      // Composed from the worktrees dir and the runId rather than taken as `dirname(primary)`. For a
+      // legacy flat layout the parent of the worktree is the worktrees dir itself, and rooting a
+      // browse there would expose every run on this node to a request naming any one of them.
+      const runDir = join(deps.gitService.worktreesDir, runId);
+      // `isUnder` admits the root itself, so the legacy flat case (worktree === runDir) falls through
+      // here and yields a single repo whose `dir` is "" - the same shape, no special case.
+      if (!refs.every((r) => isUnder(runDir, r.worktreePath))) {
+        return { root: primary.worktreePath, repos: [{ dir: "", worktreePath: primary.worktreePath }] };
+      }
+      return {
+        root: runDir,
+        repos: refs.map((r) => ({ dir: relative(runDir, r.worktreePath), worktreePath: r.worktreePath })),
+      };
+    },
 
     async reapWorktrees() {
       return reaper.reap(reaperDryRun ? { dryRun: true } : {});

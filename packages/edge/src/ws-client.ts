@@ -35,6 +35,7 @@ import { announceableJobs, nullJobLedger, type JobLedger, type JobLedgerEntry } 
 import { ceilingFromEnv, LogShipper } from "./log-shipper.js";
 import { createNodeLogger, levelFromEnv, type NodeLogger } from "./logger.js";
 import { denyToolRule, type PolicyRule } from "./policy.js";
+import { listDirectory, readFile } from "./worktree-browse.js";
 import {
   createStageRunner,
   type BlobPutRequestArgs,
@@ -60,7 +61,7 @@ const RECONNECT_MAX_MS = 30_000;
 
 /** What this build can do beyond running an agent runtime. Advertised on `hello` so the hub can
  *  default-deny a job kind an older client would silently mishandle. */
-const NODE_CAPABILITIES: NodeCapability[] = ["check", "health-probe"];
+const NODE_CAPABILITIES: NodeCapability[] = ["check", "health-probe", "worktree-browse"];
 
 /** How often a PARKED node re-reads its token. Slow on purpose: nothing is dialled and no socket is held
  *  while parked, so this is the whole cost of waiting, and re-enrolment is a human-speed act. */
@@ -786,6 +787,47 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
         });
       } finally {
         healthInFlight = false;
+      }
+      return;
+    }
+    if (msg.type === "worktree-list-request" || msg.type === "worktree-read-request") {
+      // Browsing a run's worktree while the run is still going, or parked at a gate (DHK-1104). The
+      // second is the case that matters: at a deliver gate a human is approving a change nothing has
+      // shown them, and this is what shows it.
+      //
+      // Answered off the stage runner's own map, which is what makes "does this node hold that run"
+      // exact rather than a guess from the disk. That map deliberately outlives a gate, so the answer
+      // is yes for the whole time the question is worth asking.
+      //
+      // No single-flight latch, unlike the health and upgrade branches above: these are cheap and
+      // read-only, and the portal legitimately issues several at once to draw a tree. Every path is
+      // answered, including an unexpected throw, because silence here is read by the hub as an
+      // unreachable node and costs it the full request timeout before it says so.
+      const { requestId, runId, path } = msg;
+      const read = msg.type === "worktree-read-request";
+      try {
+        const browse = stageRunner.browseRoot(runId);
+        if (!browse) {
+          log.warn({ requestId, runId }, `BROWSE_NOT_HELD:${runId}`);
+          send(
+            read
+              ? { type: "worktree-read-reply", requestId, result: { ok: false, reason: "not-found" } }
+              : { type: "worktree-list-reply", requestId, result: { ok: false, reason: "not-found" } },
+          );
+          return;
+        }
+        send(
+          read
+            ? { type: "worktree-read-reply", requestId, result: readFile(browse, path) }
+            : { type: "worktree-list-reply", requestId, result: listDirectory(browse, path) },
+        );
+      } catch (e) {
+        log.error({ err: e, requestId, runId, path }, `BROWSE_ERROR:${(e as Error).message}`);
+        send(
+          read
+            ? { type: "worktree-read-reply", requestId, result: { ok: false, reason: "not-found" } }
+            : { type: "worktree-list-reply", requestId, result: { ok: false, reason: "not-found" } },
+        );
       }
       return;
     }
