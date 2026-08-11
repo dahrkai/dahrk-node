@@ -24,6 +24,30 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Added
+
+- DHK-1137: a node now bounds its concurrent stage jobs. Before, `ws-client.ts` ran every `job` frame
+  the hub dispatched with no cap: on 2026-08-11 one laptop node ran four concurrent agent stages plus
+  `pnpm test`/`pnpm typecheck` check stages in one five-minute window, saturating CPU and disk so every
+  turn drifted longer and a live stage drifted into a watchdog window (a contributing factor in the
+  DHK-1113 timeouts, though the root cause was DHK-1136). Fix: a new pure `packages/edge/src/concurrency.ts`
+  with `resolveMaxConcurrentStages(env, cpuCount)` - the `DAHRK_MAX_CONCURRENT_STAGES` override when it
+  parses to a positive integer, else the derived default `max(2, floor(cores / 4))` (2 on the 8-10 core
+  laptop that piled up, 8 on a 32-core server) - and `createStageLimiter({ max })`, a FIFO admission
+  semaphore (`acquire`/`release`/`inUse`/`queued`/`max`). `ws-client.ts` builds the limiter at startup
+  from `cpus().length`, logs the bound as `EDGE_STAGE_CAP`, and in the `job` branch - after the dedup,
+  replay and `trackJob` guards - `await`s a slot before `runJob`, emitting a `JOB_QUEUED` marker when at
+  cap, releasing in the existing `finally`. Every stage counts one slot (agent and check alike); pushes
+  and control frames (cancel/turn/health/upgrade) stay unbounded so a full node can still drain its git
+  work and never deadlocks behind the semaphore. Over-cap work is QUEUED, not rejected: a queued job is
+  still `trackJob`-ed, so it is announced as in-flight on `hello` and de-duped against re-dispatch - the
+  node honestly owns it - which needs no new wire frame (the external `@dahrk/contracts` `EdgeToHub`
+  union has no reject/nack). The node health report gains a `checkCapacity(inUse, max)` row (pass below
+  the bound, warn at/over it) so oversubscription is visible before it does damage. `NodeHealth` (the
+  heartbeat contract) carries no capacity field, so the heartbeat is left as-is - `activeJobs` already
+  exposes in-flight there. Seams tested in `test/concurrency.test.ts` and `test/node-health.test.ts`;
+  `stage-runner.ts` is untouched, so single- and multi-stage behaviour below the bound is unchanged.
+
 ### Fixed
 
 - DHK-1099: a process a stage backgrounds (`npm run dev &`, `nohup`, a watcher) no longer outlives the

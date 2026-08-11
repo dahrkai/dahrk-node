@@ -8,6 +8,9 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ### Added
 
+- A node now runs a bounded number of stages at once, derived from its CPU count, queuing the rest instead of oversubscribing.
+- The stage-concurrency bound is tunable with the `DAHRK_MAX_CONCURRENT_STAGES` environment variable.
+- A node's health report now shows its stage capacity and how many slots are in use.
 - A run can check out several repositories side by side, so one stage can change both. (#201)
 - A run's worktree can be browsed from the portal while the run is in flight or waiting at a gate.
 

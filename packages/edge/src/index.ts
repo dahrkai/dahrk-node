@@ -30,6 +30,7 @@ export type { PolicyEvent, PolicyRule } from "./policy.js";
 export { detectRuntimes, probeRuntimeStatuses } from "./detect-runtimes.js";
 export {
   buildNodeHealthReport,
+  checkCapacity,
   checkDiskSpace,
   checkHub,
   checkNode,

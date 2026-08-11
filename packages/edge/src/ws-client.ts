@@ -12,11 +12,12 @@
  * let the harness time a kill, mirroring the S1 edge.
  */
 import { randomUUID } from "node:crypto";
-import { arch as osArch, platform as osPlatform } from "node:os";
+import { arch as osArch, cpus, platform as osPlatform } from "node:os";
 import { WebSocket } from "ws";
 import type { EdgeToHub, HubToEdge, InstallChannel, NodeCapability, NodeErrorClass, Runtime } from "@dahrk/contracts";
 import {
   buildNodeHealthReport,
+  checkCapacity,
   checkDiskSpace,
   checkNode,
   checkRuntimes,
@@ -25,6 +26,7 @@ import {
   nearestExisting,
   type CheckResult,
 } from "./node-health.js";
+import { createStageLimiter, resolveMaxConcurrentStages } from "./concurrency.js";
 import { decode, encode, isEnrolmentRejection } from "@dahrk/contracts";
 import { classifyRuntimeError, createGitService, makeRunner, type GitLogger } from "@dahrk/executor-worktree";
 import { collectHealth, diskFreeBytes, HealthCounters } from "./health.js";
@@ -594,6 +596,15 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
   // JobRequest is destructured, so this costs nothing to populate.
   const running = new Map<string, JobLedgerEntry>();
 
+  // The node's admission bound (DHK-1137). A node used to take whatever the hub dispatched: four agent
+  // stages plus checks in one window saturated a laptop and dragged live stages into watchdog windows.
+  // The limiter caps concurrent STAGE jobs (agent and check alike) at a CPU-derived default, tunable
+  // with `DAHRK_MAX_CONCURRENT_STAGES`, and QUEUES the rest rather than oversubscribing - a queued job
+  // is still `trackJob`-ed, so it is announced as in-flight and the hub will not hand it elsewhere.
+  // Pushes and control frames stay unbounded, so a full node can still finish and drain its git work.
+  const limiter = createStageLimiter({ max: resolveMaxConcurrentStages(process.env, cpus().length) });
+  log.info({ maxConcurrentStages: limiter.max }, `EDGE_STAGE_CAP:${limiter.max}`);
+
   // Start tracking a job/push: in memory for the de-dup guard, on disk so it survives our own death.
   const trackJob = (entry: JobLedgerEntry): void => {
     running.set(entry.jobId, entry);
@@ -750,6 +761,9 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
           checkDiskSpace(diskFreeBytes(nearestExisting(gitService.worktreesDir))),
           { status: "pass", label: "Hub reachability", detail: `connected to ${opts.hubUrl}` },
           { status: "pass", label: "Enrolment token", detail: "accepted by the hub" },
+          // Capacity + current load (DHK-1137), so oversubscription is visible from the report rather
+          // than only from a host that has already gone slow.
+          checkCapacity(limiter.inUse(), limiter.max),
           ...(opts.probeHostChecks ? await opts.probeHostChecks() : []),
         ];
         send({
@@ -954,6 +968,13 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
     });
     counters.activeJobs = running.size;
     jobLog.info({}, `JOB_STARTED:${job.stageId} ${job.jobId}`);
+    // Admission control (DHK-1137): past the bound this awaits a freed slot instead of piling another
+    // full runtime session onto a saturated host. The job is already `trackJob`-ed above, so a queued
+    // stage is honestly owned - announced as in-flight and de-duped against re-dispatch - while it waits.
+    if (limiter.inUse() >= limiter.max) {
+      jobLog.info({ inUse: limiter.inUse(), max: limiter.max, queued: limiter.queued() }, `JOB_QUEUED:${job.stageId} ${job.jobId}`);
+    }
+    await limiter.acquire();
     try {
       const result = await stageRunner.runJob(job);
       const frame: EdgeToHub = { type: "result", awakeableId: job.awakeableId, result };
@@ -989,6 +1010,7 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // `err` carries the stack into the file sink - the old code dropped it and kept only `.message`.
       jobLog.error({ err: e, durationMs: Date.now() - startedAt }, `JOB_ERROR:${job.stageId} ${(e as Error).message}`);
     } finally {
+      limiter.release();
       untrackJob(job.jobId);
       counters.activeJobs = running.size;
     }

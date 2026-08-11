@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildNodeHealthReport,
+  checkCapacity,
   isWritable,
   nearestExisting,
   type CheckResult,
@@ -98,6 +99,32 @@ test("an empty check set is a report, not a crash", () => {
   const report = buildNodeHealthReport([], 0, 0);
   assert.equal(report.verdict, "ok");
   assert.deepEqual(report.sections, []);
+});
+
+// --- the concurrency-capacity row (DHK-1137) ------------------------------------------------------
+
+// Capacity + current load is what makes oversubscription visible BEFORE it causes damage rather than
+// after: the health report now carries how many of the node's stage slots are in use.
+test("capacity below the bound passes and reports the load", () => {
+  const check = checkCapacity(1, 4);
+  assert.equal(check.status, "pass");
+  assert.match(check.detail ?? "", /1 of 4/);
+});
+
+// At the bound the node is full and further work is queueing, so the row warns - the same amber a
+// full node should show on the shared card, not a green that hides the contention.
+test("at or over the bound it warns: the node is full and work is queueing", () => {
+  assert.equal(checkCapacity(4, 4).status, "warn");
+  assert.equal(checkCapacity(5, 4).status, "warn");
+});
+
+// It folds into the report like any other check, so the capacity row rides the same on-demand health
+// answer the hub already asks for.
+test("checkCapacity folds into the report as its own section", () => {
+  const report = buildNodeHealthReport([checkCapacity(2, 4)], 0, 0);
+  const section = report.sections.find((s) => s.label === "Stage capacity");
+  assert.ok(section, "the report carries a stage-capacity section");
+  assert.equal(section?.status, "ok");
 });
 
 // --- the worktree-root probe (regression, caught by CI) -------------------------------------------
