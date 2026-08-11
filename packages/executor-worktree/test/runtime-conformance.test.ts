@@ -400,6 +400,7 @@ interface Outcome {
   reply?: string;
   released?: boolean;
   enforcesPreExecution?: boolean;
+  liveCalls?: number;
 }
 
 /** Every assertion the suite makes, keyed so a row can record an intentional skip with a reason. */
@@ -417,7 +418,8 @@ type AssertionKey =
   | "idle-timeout"
   | "burst-coalescing"
   | "runtime-error"
-  | "external-classification";
+  | "external-classification"
+  | "liveness-non-normalised";
 
 /**
  * One runtime row. Each scenario builder scripts the row's fake, builds its REAL runner through the
@@ -446,6 +448,9 @@ interface RuntimeCase {
   batchUnpriced(): Promise<Outcome>;
   /** A batch whose session/prompt throws the given message (runtime error classification). */
   batchThrows(message: string): Promise<Outcome>;
+  /** A batch fed a recognised-but-not-normalised control message (maps to zero trace events) before
+   *  the terminal result; reports whether it bumped `ctx.onLive` without emitting a trace event. */
+  livenessNonNormalised(): Promise<Outcome>;
   /** An interactive stage cancelled mid-stage; reports the settle and whether the session was released. */
   cancelInteractive(): Promise<Outcome>;
   /** An interactive stage with no human reply within a tiny idle window (idle timeout). */
@@ -592,6 +597,21 @@ const claudeCase: RuntimeCase = {
     const runner = createClaudeRunner({ createSession: () => throwing });
     const result = await runner.runBatch(ctxBatch("claude-code"), (e) => events.push(e));
     return { events, result };
+  },
+  async livenessNonNormalised() {
+    const events: TraceEvent[] = [];
+    let liveCalls = 0;
+    // A `system` control message normalises to zero trace events, then the terminal result. The
+    // control message must reach `ctx.onLive` (proof of life) yet emit nothing (DHK-1136).
+    const fake = new FakeClaudeSession([
+      [cm({ type: "system", subtype: "init", session_id: "claude-sess-1" }), resultMsg({})],
+    ]);
+    const runner = createClaudeRunner({ createSession: (init) => fake.bind(init) });
+    const result = await runner.runBatch(
+      ctxBatch("claude-code", { onLive: () => (liveCalls += 1) } as Partial<RunnerContext>),
+      (e) => events.push(e),
+    );
+    return { events, result, liveCalls };
   },
   async cancelInteractive() {
     const events: TraceEvent[] = [];
@@ -779,6 +799,21 @@ const piCase: RuntimeCase = {
     const runner = createPiRunner({ createSession: async () => throwing });
     const result = await runner.runBatch(ctxBatch("pi"), (e) => events.push(e));
     return { events, result };
+  },
+  async livenessNonNormalised() {
+    const events: TraceEvent[] = [];
+    let liveCalls = 0;
+    // `agent_start` is Pi lifecycle noise (maps to zero trace events), then the terminal `agent_end`.
+    // The noise event must reach `ctx.onLive` yet emit nothing, matching Claude's `system` (DHK-1136).
+    const fake = new FakePiSession([
+      [pe({ type: "agent_start" }), pe({ type: "agent_end", messages: [{ stopReason: "stop" }] })],
+    ]);
+    const runner = createPiRunner({ createSession: async () => fake });
+    const result = await runner.runBatch(
+      ctxBatch("pi", { onLive: () => (liveCalls += 1) } as Partial<RunnerContext>),
+      (e) => events.push(e),
+    );
+    return { events, result, liveCalls };
   },
   async cancelInteractive() {
     const events: TraceEvent[] = [];
@@ -1059,5 +1094,27 @@ test(
     assert.equal(result.status, "fail");
     assert.equal(result.failureClass, "config", "a refused credential is the operator's to fix, not the agent's");
     assert.match(result.summary ?? "", /refused the credential/i, "the summary says the credential was refused");
+  }),
+);
+
+// --- Assertion 13: liveness is read at the SDK-message boundary, not after normalisation (DHK-1136) --
+
+test(
+  "conformance: a message that normalises to zero trace events bumps liveness but emits nothing on both runtimes",
+  forEachCase("liveness-non-normalised", async (_t, c) => {
+    const { events, result, liveCalls } = await c.livenessNonNormalised();
+    // The control/noise message reached `ctx.onLive` - the batch stall watchdog's liveness signal.
+    assert.ok((liveCalls ?? 0) >= 1, "the non-normalised message reached ctx.onLive (proof of life)");
+    // ...but produced no trace event: the only event is the terminal stage-exit. So the liveness
+    // signal never reaches the trace writer or the progress stream - a pure watchdog reset.
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ["state"],
+      "the non-normalised message emits no trace event, only the terminal stage-exit survives",
+    );
+    // onLive fired for BOTH messages (the noise one and the terminal one), so it is bumped per SDK
+    // message, not per trace event - exactly the property the watchdog needs to not kill a live stage.
+    assert.ok((liveCalls ?? 0) > events.length, "liveness is bumped per SDK message, not per trace event");
+    assert.equal(result.status, "ok");
   }),
 );
