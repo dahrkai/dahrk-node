@@ -32,8 +32,31 @@ _Avoid_: Server, backend, orchestrator.
 
 **Edge node**:
 A deliberate worker (a Mac or a VPS) that connects **outbound** to the hub over WebSocket and runs
-stages. It has **no inbound ports**. "Node" always means an edge node.
+stages. It has **no inbound ports**. "Node" always means an edge node. One artifact; the only axis that
+distinguishes nodes is **who operates it**.
 _Avoid_: Worker, agent, runner (a runner is the thing inside a stage, not the node).
+
+**Self-managed node**:
+A node the customer operates, on infrastructure they control. The free-tier default, bring-your-own
+compute.
+_Avoid_: Unmanaged, self-hosted node (prefer "self-managed"), BYO node.
+
+**Managed node**:
+A node Dahrk operates on Dahrk infrastructure, on the customer's behalf. Identical in every other
+respect: it enrols to one tenant and is handed the same brokered credentials, so which kind serves a job
+can never change the result.
+_Avoid_: Hosted node, cloud node, pool (node groups are retired).
+
+**Sandbox**:
+The isolated guest a managed node works in: one Firecracker microVM per tenant, on a rig. A whole
+machine carrying the repository's toolchain, isolated so an agent reaches nothing it was not given.
+This is the **public, customer-facing word**, and the only sense the word is permitted in: **microVM**
+is the precise architectural term, **managed node** is the enrolment and billing unit, and **sandbox**
+is what a reader already understands from E2B, Daytona and Cloudflare. Never write it next to a usage
+meter: the comparable is a dev-VM product, not a metered code-interpreter platform, and the pricing
+model turns on that distinction (dahrk-hq D9).
+_Avoid_: Container (it is not one, and the difference is the point), VM (unqualified), box, cell,
+jail, workspace (Linear owns that word).
 
 ### The one rule
 
@@ -55,8 +78,15 @@ The versioned definition of a stage graph for an issue: the ordered stages, thei
 and loops. Hub-owned and DB-canonical.
 _Avoid_: Pipeline, playbook, recipe.
 
+**Subject**:
+What a run is **about**, and therefore which surface its questions and results belong to: a Linear
+issue, a Slack thread, or nothing at all (an admin, triage or preflight run is about the system
+itself). The run's anchor, not its trigger - a continuation run on the same issue carries the same
+subject.
+_Avoid_: Issue (that is one kind of subject), topic, target, context.
+
 **Run**:
-One execution of a workflow for one Linear issue. Scope: the whole issue.
+One execution of a workflow, about one Subject. Scope: the whole subject.
 _Avoid_: Job (a job is one stage dispatch), session, execution.
 
 **Stage**:
@@ -95,7 +125,8 @@ _Avoid_: Retry, try.
 **Worktree**:
 The git worktree created once at run start and shared by every stage, torn down at run end. The
 carrier of context between stages (never a live LLM conversation - stages swap runtimes).
-_Avoid_: Checkout, clone, sandbox.
+_Avoid_: Checkout, clone, sandbox (a **Sandbox** is the machine; a worktree is a directory on it, and
+on a self-managed node there is no sandbox at all).
 
 **Runner adapter**:
 A thin wrapper over a vendor agent SDK (Claude Agent SDK, Pi) implementing the internal
@@ -114,15 +145,15 @@ _Avoid_: Report, digest.
 ### Identity and authentication
 
 **Tenant**:
-The top isolation boundary for the future SaaS. In Phase 1 it is pinned to one constant and never
-varied. Tenant 0 is the platform itself, not a customer.
+The top isolation boundary: one customer's members, integrations, credentials, repositories and runs.
+Tenant 0 is the platform itself, not a customer.
 _Avoid_: Org, customer, account (as synonyms).
 
 **Integration**:
-Any outside system the account links: a tracker (Linear), a code host (GitHub), a model provider
-(Anthropic, OpenAI). The **user-facing umbrella term**, and the name of the portal surface that holds
-them. An integration is a *provider*; the records beneath it (a Connection, an Installation, an
-AuthProfile) are its *instances*.
+Any outside system the account links: a tracker (Linear), a code host (GitHub), a chat surface
+(Slack), a model provider (Anthropic, OpenAI). The **user-facing umbrella term**, and the name of the
+portal surface that holds them. An integration is a *provider*; the records beneath it (a Connection,
+an Installation, an AuthProfile) are its *instances*.
 _Avoid_: Connection (as the umbrella), plugin, app.
 
 **Connection**:
@@ -137,6 +168,13 @@ behind the GitHub integration; one per tenant. Distinct from the **sign-in OAuth
 "Continue with GitHub", which is identity and grants nothing: conflating the two produced a
 cross-tenant IDOR, so name which GitHub you mean.
 _Avoid_: Connection, GitHub integration (the integration is the provider, this is its instance).
+
+**Slack Installation**:
+One Slack app install binding a tenant to a Slack workspace. The instance behind the Slack integration;
+one per tenant, exactly parallel to the GitHub **Installation**. Channels are *routing configuration*
+inside it, never identities: there is one `@Dahrk`, and what varies per channel is which repository a
+run defaults to.
+_Avoid_: Slack connection, bot, persona, agent (there is one agent).
 
 **Workspace**:
 A Linear workspace exposed by a Connection. Contains the issues that become runs. The name a person
@@ -197,14 +235,52 @@ _Avoid_: Repo config, project, codebase.
 ### The control surface
 
 **Control surface**:
-Linear's Agent Session API, used natively: activities for progress, the agent-plan checklist for the
-stage graph, elicitations for gates, the `prompted` webhook for drive, the `stop` signal for cancel.
-_Avoid_: UI, dashboard, API (when you mean this specifically).
+Where a run is driven from and reported to: progress, the stage graph, gates, drive and cancel. A run
+has exactly one, decided by its Subject. **Linear** uses the Agent Session API natively: activities for
+progress, the agent-plan checklist for the stage graph, elicitations for gates, the `prompted` webhook
+for drive, the `stop` signal for cancel. **Slack** uses the Events API and Block Kit in the subject's
+thread. A surface must be able to *answer*, not merely display: a run may only start on a workflow
+whose every gate its surface can raise and resolve.
+_Avoid_: UI, dashboard, API (when you mean this specifically), notification (a sink is not a surface).
 
 **Gate**:
-A deterministic pause for a human, raised as a Linear `elicitation`. Used between stages and by an
-`ask` policy verdict.
+A deterministic pause of the **run** for a human, raised as a Linear `elicitation`. Used between stages
+and by an `ask` policy verdict. The run's status becomes `awaitingInput` and **nothing is held**: no job
+is in flight, and the wait may be days.
 _Avoid_: Approval, checkpoint, pause.
+
+**In-stage question**:
+A question an **interactive stage** asks while its own work is still in flight. The run stays `active`
+and carries an `awaitingHuman` health flag, because a live agent session is parked waiting for the answer.
+The distinction from a gate is not cosmetic: a gate holds nothing and can outlive the machine, whereas an
+in-stage question holds a running session that dies with it.
+_Avoid_: Gate, elicitation (Linear's activity type carries both, so it names the wire, not the concept).
+
+### What a reviewer may see
+
+Three separate capabilities, deliberately not one. They differ by what they expose, not by size, and the
+names are load-bearing: conflating them is how a link ends up serving a machine that holds credentials.
+
+**Browse**:
+Reading a run's worktree - listing directories, opening a file - while the work is still uncommitted.
+Needs no running process and no credentials, so it is available on any node, including a self-hosted one,
+at any point in a run.
+_Avoid_: Diff (a diff is a comparison; this is the files themselves), file viewer, explorer.
+
+**Preview**:
+The change under review, running, reachable over HTTPS from the review surface. Served by a **separate
+credential-free guest**, never the one the agent worked in, and private by default: only the run's tenant
+can open it. Offered at stages that declare how the repository is served; a stage with nothing built yet
+has none.
+_Avoid_: Deploy preview, staging (an environment is a different thing), demo, sandbox (the preview
+guest is a second guest beside the run's **Sandbox**, holding no credentials; calling both "the
+sandbox" is exactly the conflation these three names exist to prevent).
+
+**Debug terminal**:
+A shell in the **agent's own** environment, for diagnosing a run that has stalled or misbehaved. Sees what
+the agent sees, and therefore sits next to the run's credentials, so it is a deliberate, audited,
+owner-only action rather than a link beside the preview.
+_Avoid_: Terminal (unqualified - a preview terminal is a different, credential-free thing), SSH, console.
 
 **Policy**:
 A deterministic guard returning `allow` / `deny` / `ask` around a tool call or at stage entry. Never
