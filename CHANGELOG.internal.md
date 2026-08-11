@@ -69,12 +69,10 @@ this file is left verbatim.
   300s default is deliberately unchanged: raising it only moves the cliff and costs real detection
   latency on genuine hangs. The stall summary now also reports how stale the trace was when the kill
   fired, which is what distinguishes "died mid-turn" from "died idle".
-- DHK-1136 follow-up (this PR, on top of #206): `onLive` is now declared once on
+- DHK-1136 follow-up (on top of #206 and #208): `onLive` is now declared once on
   `PolicyAwareRunnerContext` in `runtime-session.ts` rather than re-asserted with an inline
   `ctx as { onLive?: () => void }` at each adapter call site, so the seam has a single documented
-  shape. `runtime-conformance.test.ts` carries it as a both-runtimes property: a native message that
-  normalises to zero trace events must bump `ctx.onLive` and emit nothing, which is exactly the
-  invariant the watchdog depends on and the one a future mapper change would silently break.
+  shape rather than a cast repeated per adapter.
 
 ### Changed
 

@@ -419,7 +419,6 @@ type AssertionKey =
   | "burst-coalescing"
   | "runtime-error"
   | "external-classification"
-  | "config-classification"
   | "liveness-non-normalised";
 
 /**
