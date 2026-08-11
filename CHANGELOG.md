@@ -9,6 +9,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Added
 
 - A run can check out several repositories side by side, so one stage can change both. (#201)
+- A run's worktree can be browsed from the portal while the run is in flight or waiting at a gate.
 
 ### Changed
 

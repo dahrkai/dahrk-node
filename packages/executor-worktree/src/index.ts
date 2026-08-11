@@ -27,6 +27,7 @@ export {
   parseOwnerRepo,
   resolveWorktreesDir,
   resolveMirrorsDir,
+  ignoredPaths,
   FETCH_PROBE_TIMEOUT_SECONDS,
 } from "./git-service.js";
 /** Restart-safe collection of run worktrees (DHK-371). See `worktree-reaper.ts`. */

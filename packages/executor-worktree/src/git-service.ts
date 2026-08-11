@@ -409,6 +409,46 @@ function stateDir(): string {
  * client can advertise the exact same base to the hub on `hello` (single source of truth with
  * `createGitService`).
  */
+/**
+ * Which of `relPaths` git would ignore in `worktreePath`, as a set, in ONE git invocation.
+ *
+ * The batched sibling of the per-path `isScratchPath` inside `createGitService`, and it keeps the same
+ * two rules deliberately: the engine-owned scratch dir is excluded by name, and everything else is put
+ * to `check-ignore --no-index` so a path is judged purely by the ignore rules rather than by whether it
+ * happens to be tracked. Both forms of the scratch path are matched because under the run-level layout
+ * `<worktree>/.dahrk/scratch` is a symlink, which git treats as a file (see `excludeScratchLocally`).
+ *
+ * Batched because the worktree-browse listing (DHK-1104) answers inside the hub's 3s request timeout,
+ * and one `execFileSync` per entry would blow that on any real directory. `--stdin -z` takes the whole
+ * set at once; the exit status is 1 when nothing matched, which is a normal empty answer and not an
+ * error. Best-effort: if git cannot be run at all, nothing is reported ignored, because hiding a file
+ * is cosmetic whereas failing the listing is not.
+ */
+export function ignoredPaths(worktreePath: string, relPaths: string[]): Set<string> {
+  const ignored = new Set<string>();
+  const candidates: string[] = [];
+  for (const p of relPaths) {
+    if (p === SCRATCH_DIR || p.startsWith(`${SCRATCH_DIR}/`)) ignored.add(p);
+    else candidates.push(p);
+  }
+  if (candidates.length === 0) return ignored;
+  try {
+    const out = execFileSync("git", ["check-ignore", "--no-index", "--stdin", "-z"], {
+      cwd: worktreePath,
+      input: `${candidates.join("\0")}\0`,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    for (const p of out.split("\0")) if (p) ignored.add(p);
+  } catch (e) {
+    // Exit 1 means "no path matched", which is the common case and carries the (empty) answer in
+    // stdout. Any other failure leaves the set as it stands.
+    const stdout = (e as { stdout?: string }).stdout;
+    if (typeof stdout === "string") for (const p of stdout.split("\0")) if (p) ignored.add(p);
+  }
+  return ignored;
+}
+
 export function resolveWorktreesDir(override?: string): string {
   return override ?? process.env.DAHRK_WORKTREES_DIR ?? join(stateDir(), "worktrees");
 }
