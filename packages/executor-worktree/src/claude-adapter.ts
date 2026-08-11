@@ -381,6 +381,11 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     if (found) sessionId = found;
     if (msg.type === "result" && typeof msg.total_cost_usd === "number") costUsd = msg.total_cost_usd;
     const rawRef = ctx.writeRaw?.(msg);
+    // Every SDK message is evidence the runtime is alive, whether or not it normalises to a trace
+    // event. Bump the batch stall watchdog HERE, before mapping, so an assistant turn that only ever
+    // emits `system` / `stream_event` / `rate_limit_event` (all normalised to zero events) is not
+    // mistaken for a hang (DHK-1136). A pure watchdog reset - it writes no trace and streams nothing.
+    (ctx as PolicyAwareRunnerContext).onLive?.();
     const res = consumeClaudeMessage(msg, state, suppressStageExit);
     for (const e of res.events) emit(e, rawRef);
     return { isResult: res.isResult, status: res.status, responseText: res.responseText };

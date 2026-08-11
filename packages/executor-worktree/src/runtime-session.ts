@@ -33,6 +33,16 @@ export type PolicyAwareRunnerContext = RunnerContext & {
   /** Surface an interactive-stage structured question as a Linear `select` elicitation (DHK-344).
    *  Supplied by the stage runner; absent in tests that do not exercise the elicit path. */
   emitElicit?: (question: ElicitQuestion) => void;
+  /**
+   * Liveness signal for the batch output-idle watchdog (DHK-1136). The adapter calls this once for
+   * EVERY SDK message it receives from the runtime, right where `writeRaw` is called, BEFORE any
+   * mapping - so a message that normalises to zero trace events (`system` / `stream_event` /
+   * `rate_limit_event`) still proves the runtime is alive. The stage runner wires it to a pure
+   * watchdog reset: it must NOT reach the trace writer or the progress stream, or the silence the
+   * watchdog exists to catch fills the Linear thread with noise. Absent for the check runner and in
+   * tests that do not arm the watchdog, so it is called defensively. Carried on this local-extension
+   * shape (alongside `authorizeToolUse`/`emitElicit`) since `@dahrk/contracts` does not declare it. */
+  onLive?: () => void;
 };
 
 /**

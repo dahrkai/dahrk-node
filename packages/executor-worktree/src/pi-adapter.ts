@@ -452,6 +452,11 @@ function makePiRuntimeSession(
       let status: JobStatus | undefined;
       const unsub = s.subscribe((ev) => {
         const rawRef = ctx.writeRaw?.(ev);
+        // Every Pi event is evidence the runtime is alive, whether or not it normalises to a trace
+        // event. Bump the batch stall watchdog HERE, before mapping, so a long turn that streams only
+        // non-normalised events is not mistaken for a hang (DHK-1136). A pure watchdog reset: it
+        // writes no trace and streams nothing, so both runtimes carry the property, not just Claude.
+        (ctx as PolicyAwareRunnerContext).onLive?.();
         // Count Pi's per-turn boundary and abort the in-flight `prompt()` once the ceiling is reached
         // (DHK-970). Pi settles the aborted run with a `stopReason: "aborted"` terminal event, which
         // `settleStatus` maps to `fail` with no `failureClass` - the SAME terminal state and `agent`

@@ -201,6 +201,10 @@ type PolicyAwareRunnerContext = RunnerContext & {
   authorizeToolUse?: (toolName: string, input: unknown) => PolicyOutcome;
   /** Surface an interactive-stage `AskUserQuestion` as a Linear `select` elicitation (DHK-344). */
   emitElicit?: (question: ElicitQuestion) => void;
+  /** Reset the batch output-idle watchdog on every SDK message the runtime sends (DHK-1136), so a
+   *  live stage whose messages all normalise to zero trace events is not mistaken for a hang. A pure
+   *  watchdog reset: it never writes a trace event or streams progress. */
+  onLive?: () => void;
 };
 
 /** Upload bytes to a hub-minted presigned URL (heavy trace payloads bypass the control socket). */
@@ -1179,7 +1183,14 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // `bumpStall` suspends the watchdog until the set drains. `action`/`observation` pair by
         // `toolUseId` (DHK-384), so interleaved/parallel calls track correctly.
         const openToolCalls = new Set<string>();
+        // The last trace event the node saw, for the stall summary (DHK-1136): when the watchdog does
+        // fire, the summary reports what was last observed and when, so a stall is a one-look diagnosis
+        // rather than a trace-archaeology session. A live-but-quiet stage (only non-normalised SDK
+        // messages) no longer trips the watchdog at all, so a fired stall now genuinely means the
+        // runtime went silent - and this says what it was doing when it did.
+        let lastTrace: { kind: TraceEvent["type"]; ts: string } | undefined;
         const onTrace = (event: TraceEvent): void => {
+          lastTrace = { kind: event.type, ts: event.ts };
           if (event.type === "action") {
             const key = actionKey(event.tool, event.input);
             const authorised = authorisedActions.indexOf(key);
@@ -1293,6 +1304,14 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           // The adapter persists each runtime-native record under the attempt's raw/ sidecar
           // and stamps the rawRef onto the emitted event.
           writeRaw: writer.writeRaw,
+          // The batch output-idle watchdog's liveness reset (DHK-1136). The adapter calls this for
+          // EVERY SDK message, before mapping, so a message that normalises to zero trace events
+          // (`system` / `stream_event` / `rate_limit_event`) still proves the runtime alive. It is a
+          // PURE reset: `bumpStall` only re-arms the timer, never appends a trace event or sends
+          // progress, so this silence stays out of the trace and the Linear thread. `bumpStall` reads
+          // the current value of the `let` at call time, so this picks up the armed watchdog wired
+          // below; it also honours the DHK-955 open-tool-call suspension for free.
+          onLive: () => bumpStall(),
           authorizeToolUse,
           // Wire the interactive AskUserQuestion elicitation seam (DHK-344): the adapter calls this when
           // the agent asks a structured question, and the edge relays it to the hub as an `elicit` frame.
@@ -1444,9 +1463,16 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // engine-owned summarisation turn (only after success, never failing the stage).
         let summary = result.summary ?? `${stageId}: ${status}`;
         // A stalled batch stage reports a distinct, legible summary (the runner's own summary is
-        // unreliable after a mid-stream cancel). Prefer it over the generic `<stage>: timeout`.
+        // unreliable after a mid-stream cancel). Prefer it over the generic `<stage>: timeout`. Since
+        // DHK-1136 the watchdog resets on any SDK message, so a fired stall means the runtime sent
+        // NOTHING for the window - not merely no trace event. Say what the node last saw and when, so
+        // the next occurrence is diagnosed at a glance rather than by reading the raw sidecar.
         if (stalled && !timedOut) {
-          summary = `${stageId}: stalled (no output for ${Math.round(stallMs / 1000)}s)`;
+          const secs = Math.round(stallMs / 1000);
+          const lastSeen = lastTrace
+            ? `last saw a ${lastTrace.kind} event at ${lastTrace.ts}`
+            : "saw nothing from the runtime at all";
+          summary = `${stageId}: stalled (no runtime output for ${secs}s; ${lastSeen})`;
         }
         if (!interactive && status === "ok") {
           try {

@@ -26,6 +26,25 @@ this file is left verbatim.
 
 ### Fixed
 
+- DHK-1136: the batch output-idle watchdog no longer kills a live stage. Root cause: `bumpStall()` was
+  reachable only from `onTrace`, which fires solely for *normalised* trace events, but the mappers
+  normalise `system` / `stream_event` / `rate_limit_event` to zero events by design. So the watchdog
+  measured the *trace* stream while the runtime it was trying to prove alive is a property of the *SDK
+  message* stream; a long assistant turn that only emitted such messages (~1/s for the whole 300s
+  window on DHK-1113) looked identical to a hang and died at exactly `stallMs` with `timeout` /
+  `harness`. This was the third bug in this seam (DHK-955, DHK-1017), each a different silent interval
+  patched while the general defect survived. Fix: measure liveness where messages arrive. A new
+  `onLive?: () => void` on the runner ctx (declared on `PolicyAwareRunnerContext` in `runtime-session.ts`,
+  wired to `() => bumpStall()` in `stage-runner.ts` next to `writeRaw`) is called per SDK message by
+  both adapters (`claude-adapter.ts` `handleMessage`, `pi-adapter.ts` `sendTurn`), right where
+  `ctx.writeRaw?.(...)` already is, before any mapping. It is a *pure* watchdog reset: it never appends
+  a trace event or sends progress, so the non-normalised messages stay out of the trace and the Linear
+  thread. The DHK-955 open-tool-call suspension still holds (`bumpStall` returns early while
+  `openToolCalls` is non-empty). A stall that genuinely fires now means the runtime sent nothing at
+  all, so the summary reports the last trace event kind and its timestamp (`stage-runner.ts`). Covered
+  both directions in `stage-runner.test.ts` (a quiet-but-live runner survives; a truly silent one is
+  still killed) and as a both-runtimes property in `runtime-conformance.test.ts` (a message normalising
+  to zero events bumps `onLive` but emits nothing). Default stall window unchanged at 300s.
 - DHK-1099: a process a stage backgrounds (`npm run dev &`, `nohup`, a watcher) no longer outlives the
   run and the node. Root cause: there was no process-group kill anywhere on the node - no node-owned
   `spawn` passed `detached: true`, so every child joined the node's own process group, and a kill of a
