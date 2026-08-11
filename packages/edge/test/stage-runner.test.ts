@@ -542,7 +542,8 @@ forBothRuntimes("a batch stage that streams no output for `stallMs` is cancelled
   try {
     const result = await runner.runJob(job);
     assert.equal(result.status, "timeout", "a silent batch stage is cancelled by the stall watchdog");
-    assert.match(result.summary ?? "", /stalled \(no output for/, "the summary marks it a stall, not a plain timeout");
+    assert.match(result.summary ?? "", /stalled \(no runtime output for/, "the summary marks it a stall, not a plain timeout");
+    assert.match(result.summary ?? "", /last trace event \d+s ago/, "and says how stale the trace is, so the stall is legible without the archive (DHK-1136)");
     assert.equal(result.failureClass, "harness", "a harness-owned stall kill is billed harness, not agent (DHK-569)");
   } finally {
     if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
@@ -679,6 +680,83 @@ forBothRuntimes("a batch stage doing one long non-streaming tool call outlives t
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+forBothRuntimes(
+  "a batch stage whose runtime streams only zero-event messages outlives the stall window (DHK-1136)",
+  async (runtime) => {
+    const root = mkdtempSync(join(tmpdir(), "dahrk-sr-onlive-"));
+    const repo = join(root, "repo");
+    execFileSync("mkdir", ["-p", repo]);
+    initRepo(repo);
+
+    const sink: TraceSink = {
+      event: () => undefined,
+      finalised: () => undefined,
+      requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+    };
+
+    // The long-assistant-turn shape, and the one that killed two DHK-1113 runs. The runtime is talking
+    // the whole time, but every message it sends normalises to NO trace event (`system`,
+    // `stream_event`, `rate_limit_event`), so `onTrace` never fires. Only `ctx.onLive` sees it. No tool
+    // call is open either, so the DHK-955 suspension cannot save this stage - liveness has to come from
+    // the message stream itself.
+    const makeQuietRunner = (rt: Runner["runtime"]): Runner => ({
+      runtime: rt,
+      async runBatch(ctx: RunnerContext, onTrace: (event: TraceEvent) => void) {
+        // One normalised event up front, then the call closes: from here the watchdog is armed and
+        // nothing further reaches `onTrace`.
+        onTrace({ seq: 0, ts: new Date().toISOString(), type: "thought", runtime: rt, text: "thinking" });
+        const onLive = (ctx as { onLive?: () => void }).onLive;
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 5)); // 5ms ticks vs a 50ms window: 10x margin
+          onLive?.(); // the adapter's per-message call, with nothing to normalise
+        }
+        return { status: "ok" };
+      },
+      async runInteractive() {
+        return { status: "ok" };
+      },
+      async summarise() {
+        return "done";
+      },
+      async cancel() {},
+    });
+
+    const runner = createStageRunner({
+      gitService: createGitService({ worktreesDir: join(root, "wt"), mirrorsDir: join(root, "mir") }),
+      makeRunner: makeQuietRunner,
+      rules: [],
+      sendProgress: () => undefined,
+      trace: sink,
+    });
+
+    const job: JobRequest = {
+      tenantId: "t_default",
+      runId: "run-sr-onlive",
+      stageId: "build",
+      jobId: "job-sr-onlive-1",
+      awakeableId: "awk-onlive",
+      executorType: "worktree",
+      agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+      workspaceRef: { repoId: "repo", gitUrl: repo, repo: "repo", baseBranch: "main", worktreePath: "", scratchPath: "" },
+    };
+
+    const prev = process.env.DAHRK_BATCH_STALL_MS;
+    process.env.DAHRK_BATCH_STALL_MS = "50"; // 50ms window, far shorter than the ~100ms of quiet work
+    try {
+      const result = await runner.runJob(job);
+      assert.equal(
+        result.status,
+        "ok",
+        "a runtime streaming messages that normalise to no trace event is alive, not stalled",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.DAHRK_BATCH_STALL_MS;
+      else process.env.DAHRK_BATCH_STALL_MS = prev;
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 forBothRuntimes("the Job's runtimeEnv is threaded onto the runner ctx (injection boundary)", async (runtime) => {
   const root = mkdtempSync(join(tmpdir(), "dahrk-sr-rtenv-"));
