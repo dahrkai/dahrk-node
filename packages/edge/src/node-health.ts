@@ -142,6 +142,21 @@ export function checkTools(tools: ToolPresence): CheckResult[] {
   return [git];
 }
 
+/**
+ * The node's stage-concurrency load: how many of its bounded slots are in use (DHK-1137).
+ *
+ * A node now runs at most a CPU-derived number of stages at once and queues the rest (see
+ * `concurrency.ts`), and this row is what makes that bound observable BEFORE oversubscription causes
+ * damage rather than after. Below the bound it passes; at or over it the node is full and further work
+ * is queueing, which is the amber a shared card should show - a limitation the node still runs with, not
+ * a fault, so it maps to the same `warn` a thin disk does.
+ */
+export function checkCapacity(inUse: number, max: number): CheckResult {
+  return inUse >= max
+    ? { status: "warn", label: "Stage capacity", detail: `${inUse} of ${max} stage slots in use; further stages queue` }
+    : { status: "pass", label: "Stage capacity", detail: `${inUse} of ${max} stage slots in use` };
+}
+
 /** Hub reachability. An enrolment rejection still counts as REACHED (the token, not the hub, is the
  *  problem - reported separately by {@link checkToken}). */
 export function checkHub(hubUrl: string | undefined, probe: HubProbeResult | undefined): CheckResult {
