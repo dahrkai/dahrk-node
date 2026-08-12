@@ -24,7 +24,34 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-12
+
+### Changed
+
+- DHK-1104 prerequisite: the `@dahrk/contracts` catalogue pin moves to `^0.20.0` (#209), which publishes
+  the worktree-browse wire frames - the list/read request pair and the `worktree-browse` capability.
+  A caret cannot cross a minor pre-1.0, so the catalogue entry is the only thing that adopts them; this
+  is the bump the daily `refresh-contracts` job would have proposed the following morning, done by hand
+  to unblock the node half. Worth recording why it was not already published: the frames landed on
+  harness `main` in dahrk-harness#678 without bumping `packages/contracts/package.json`, and
+  `publish-contracts.yml` only publishes a version npm does not already have - so it ran, found the
+  current version published, and correctly did nothing. `main` and npm disagreed with nothing red
+  anywhere, and three runs on DHK-1104 burned $9.66 rediscovering it.
+- The shared-kernel block in `CONTEXT.md` is re-synced from the workspace root (#212): adds **Sandbox**
+  (the isolated guest a managed node works in, one Firecracker microVM per tenant on a rig) and narrows
+  the avoid-notes under **Worktree** and **Preview**, which previously banned the word outright, to
+  those two senses only. Mechanical output of `scripts/sync-context.sh`; no repo-specific language
+  changed. Decision: dahrk-hq D10.
+
 ### Added
+
+- DHK-967 follow-up to #206: the SDK-boundary liveness property is now asserted in the shared
+  runtime-conformance suite (#208), not only in `stage-runner.test.ts`. The property is a
+  runtime-conformance one - a native message that normalises to zero trace events must still bump
+  `ctx.onLive`, and must still emit nothing - so a regression in either adapter should redden that
+  adapter's row and name it. Assertion 13 drives both real adapters: Claude with a `system` control
+  message then the terminal result, Pi with an `agent_start` lifecycle event then the terminal
+  `agent_end`. Test-only; no `src` change.
 
 - DHK-1137: a node now bounds its concurrent stage jobs. Before, `ws-client.ts` ran every `job` frame
   the hub dispatched with no cap: on 2026-08-11 one laptop node ran four concurrent agent stages plus
