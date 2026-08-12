@@ -6,13 +6,15 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-12
+
 ### Added
 
-- A node now runs a bounded number of stages at once, derived from its CPU count, queuing the rest instead of oversubscribing.
-- The stage-concurrency bound is tunable with the `DAHRK_MAX_CONCURRENT_STAGES` environment variable.
-- A node's health report now shows its stage capacity and how many slots are in use.
+- A node now runs a bounded number of stages at once, derived from its CPU count, queuing the rest instead of oversubscribing. (#210)
+- The stage-concurrency bound is tunable with the `DAHRK_MAX_CONCURRENT_STAGES` environment variable. (#210)
+- A node's health report now shows its stage capacity and how many slots are in use. (#210)
 - A run can check out several repositories side by side, so one stage can change both. (#201)
-- A run's worktree can be browsed from the portal while the run is in flight or waiting at a gate.
+- A run's worktree can be browsed from the portal while the run is in flight or waiting at a gate. (#211)
 
 ### Changed
 
@@ -22,10 +24,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Fixed
 
 - A batch stage is no longer cancelled while its runtime is still working through a long turn. (#206)
-- A process a check or setup command backgrounds during a stage is now killed when the stage settles, instead of outliving the node.
-- Two nodes on one host with distinct `DAHRK_STATE_DIR` values now get their own service and worktree roots, so neither clobbers the other.
-- A node with no Docker installed now reports as healthy, instead of showing a finding for a tool it never uses.
-- The node health report's all-clear no longer claims a repository was checked, since it examines none.
+- A process a check or setup command backgrounds during a stage is now killed when the stage settles, instead of outliving the node. (#205)
+- Two nodes on one host with distinct `DAHRK_STATE_DIR` values now get their own service and worktree roots, so neither clobbers the other. (#204)
+- A node with no Docker installed now reports as healthy, instead of showing a finding for a tool it never uses. (#203)
+- The node health report's all-clear no longer claims a repository was checked, since it examines none. (#203)
 - A stage can no longer read files outside its worktree by changing directory first. (#201)
 - A node that dies mid-run preserves the uncommitted work in every repository of that run. (#201)
 - Each repository of a run runs its own setup command. (#201)
@@ -669,7 +671,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/dahrkai/dahrk-node/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/dahrkai/dahrk-node/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/dahrkai/dahrk-node/compare/v0.4.1...v0.4.2
