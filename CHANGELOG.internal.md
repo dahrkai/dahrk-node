@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-13
+
 ## [0.4.5] - 2026-08-12
 
 ### Changed
