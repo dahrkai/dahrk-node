@@ -1115,10 +1115,17 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             return finish("fail", `${stageId}: ${msg}`, job.sessionId, undefined, undefined, "harness");
           }
           // Fold the outcome into the trace so setup's stdout/exit are observable (acceptance).
+          //
+          // The DURATION rides the detail string deliberately. It is the number ADR 0019 needs to choose
+          // between a shared toolchain volume, baking toolchains into the rootfs template, and doing
+          // nothing, and a managed guest pays the uncached cost on EVERY run (its worktree, and so the
+          // marker, dies with the guest). Putting it in the free-text detail means it is queryable from
+          // the stage trace today, without waiting on a contracts change - the `event: "setup"` cast
+          // below is already evidence of how long that wait can be.
           const detail =
             outcome.status === "cached"
-              ? `setup(${target.repo}): cached (already installed)`
-              : `setup(${target.repo}): ran (exit 0, ${outcome.output.length} bytes)`;
+              ? `setup(${target.repo}): cached (already installed) in ${outcome.durationMs}ms`
+              : `setup(${target.repo}): ran (exit 0, ${outcome.output.length} bytes) in ${outcome.durationMs}ms`;
           // `event: "setup"` is not in the pinned `@dahrk/contracts` (^0.6.0) state-event union yet,
           // so cast the frame the same way the Job fields above are read defensively; drop the cast
           // once contracts ships the value. The error `kind` below needs no cast (it is an open string).

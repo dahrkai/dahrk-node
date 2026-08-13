@@ -39,13 +39,25 @@ export interface RepoSetupOpts {
   log?: RepoSetupLogger;
 }
 
+/**
+ * Wall-clock milliseconds this call spent, on EVERY variant, because the interesting question is a
+ * comparison: what a cold install costs against what the cached path costs.
+ *
+ * WHY IT IS RECORDED AT ALL (ADR 0019). Idempotency here is keyed on a marker in the WORKTREE. An edge
+ * node is long-lived, so its worktrees and package stores persist and this is mostly `cached`. A managed
+ * guest is torn down after a stage or group (ADR 0011), so every managed run gets a fresh worktree and
+ * pays `ran` in full - a cost the 600s cap below implies is minutes, charged to every customer run
+ * rather than to a few CI runs a week. ADR 0019 has to choose between a shared toolchain volume, baking
+ * toolchains into the rootfs template, and doing nothing, and this number is what chooses. It was
+ * explicitly left unmeasured there rather than guessed.
+ */
 export type RepoSetupResult =
   /** The marker for this exact command is already present; setup was not re-run. */
-  | { status: "cached" }
+  | { status: "cached"; durationMs: number }
   /** Ran to a zero exit; the marker was written. `output` is the bounded combined stdout+stderr tail. */
-  | { status: "ran"; output: string }
+  | { status: "ran"; durationMs: number; output: string }
   /** Non-zero exit, threw, or timed out; the marker was NOT written so a retry re-runs. */
-  | { status: "failed"; exitCode: number | null; output: string };
+  | { status: "failed"; durationMs: number; exitCode: number | null; output: string };
 
 /** The engine-owned scratch dir, matching GitService's `SCRATCH_DIR`. Untracked, so the marker never
  *  enters a commit or the PR, and it survives a worktree reuse (createWorktree only `mkdir -p`s it). */
@@ -72,6 +84,12 @@ function tail(output: string): string {
 export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
   const { worktreePath, command } = opts;
   const log = opts.log ?? noopLogger;
+  // Timed from the TOP, not from around the spawn: the marker read is part of what the cached path
+  // costs, and a comparison between the two paths is the whole point (see RepoSetupResult).
+  // `performance.now()` rather than `Date.now()` because it is monotonic - an NTP step mid-install
+  // would otherwise be able to report a negative duration.
+  const startedAt = performance.now();
+  const elapsedMs = (): number => Math.round(performance.now() - startedAt);
   // Keyed by the repo's own directory name, because a run's repos now SHARE one scratch (DHK-358).
   // A single marker under the shared scratch would mean repo A's marker is repo B's, so repo B's
   // install would silently never run and the agent would get an uninstalled tree with no trace event
@@ -84,7 +102,7 @@ export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
     try {
       if (readFileSync(markerPath, "utf8").trim() === want) {
         log.info(`repo setup: cached (marker matches), skipping`);
-        return { status: "cached" };
+        return { status: "cached", durationMs: elapsedMs() };
       }
     } catch {
       // An unreadable marker is treated as absent: fall through and re-run.
@@ -117,11 +135,13 @@ export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
   if (res.status === 0 && !res.error) {
     mkdirSync(dirname(markerPath), { recursive: true });
     writeFileSync(markerPath, want);
-    return { status: "ran", output: tail(combined) };
+    const durationMs = elapsedMs();
+    log.info(`repo setup: ran in ${durationMs}ms`);
+    return { status: "ran", durationMs, output: tail(combined) };
   }
   // A non-zero exit, a signal (timeout kill), or a spawn error. Never write the marker - a retry must
   // re-run rather than trust a half-built tree.
   const output = combined || res.error?.message || "";
   log.warn(`repo setup failed (exit ${res.status ?? "null"})`);
-  return { status: "failed", exitCode: res.status ?? null, output: tail(output) };
+  return { status: "failed", durationMs: elapsedMs(), exitCode: res.status ?? null, output: tail(output) };
 }
