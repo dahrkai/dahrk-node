@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Changed
+
+- Setup trace events now report how long the repository setup command took, or how long the cached path saved.
+
 ## [0.4.5] - 2026-08-12
 
 ### Added

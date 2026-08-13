@@ -91,3 +91,55 @@ test("DHK-358: each repo of a run gets its own marker, so a sibling's setup is n
     rmSync(runDir, { recursive: true, force: true });
   }
 });
+
+// --- ADR 0019: the duration is the number that chooses the managed-tier toolchain cache ------------
+// Recorded on every variant so the two paths can be COMPARED. On an edge node setup is mostly cached
+// and cheap; a managed guest is torn down after a stage, so its worktree - and therefore the marker -
+// dies with it and every run pays the uncached cost in full. Guessing that number is what ADR 0019
+// refused to do.
+
+test("ADR 0019: a run reports a duration that reflects the time the command actually took", () => {
+  const wt = mkdtempSync(join(tmpdir(), "dahrk-setup-duration-"));
+  try {
+    const res = runRepoSetup({ worktreePath: wt, command: "sleep 0.25" });
+    assert.equal(res.status, "ran");
+    const ms = res.status === "ran" ? res.durationMs : -1;
+    // Asserted as a RANGE, not a constant: the point is that it measures real elapsed time rather than
+    // reporting a plausible-looking zero, which is the way this instrumentation fails silently.
+    assert.ok(ms >= 250, `expected at least the 250ms sleep, got ${ms}ms`);
+    assert.ok(ms < 30_000, `expected a sane wall time, got ${ms}ms`);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0019: the cached path reports a duration too, and it is far below the run it replaced", () => {
+  const wt = mkdtempSync(join(tmpdir(), "dahrk-setup-duration-cached-"));
+  try {
+    const command = "sleep 0.25";
+    const ran = runRepoSetup({ worktreePath: wt, command });
+    const cached = runRepoSetup({ worktreePath: wt, command });
+    assert.equal(ran.status, "ran");
+    assert.equal(cached.status, "cached");
+    // The comparison IS the measurement: a cached call must not be paying the install again.
+    assert.ok(
+      (cached.status === "cached" ? cached.durationMs : Infinity) < (ran.status === "ran" ? ran.durationMs : 0),
+      "the cached path must be cheaper than the run it skipped",
+    );
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0019: a failed setup still reports how long it burned before failing", () => {
+  const wt = mkdtempSync(join(tmpdir(), "dahrk-setup-duration-failed-"));
+  try {
+    // A failure that took nine minutes to arrive is a different operational problem from one that
+    // failed instantly, and the trace should be able to tell them apart.
+    const res = runRepoSetup({ worktreePath: wt, command: "sleep 0.25; exit 3" });
+    assert.equal(res.status, "failed");
+    assert.ok((res.status === "failed" ? res.durationMs : -1) >= 250, "time spent before the failure is reported");
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
