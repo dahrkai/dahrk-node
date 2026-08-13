@@ -6,6 +6,8 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-13
+
 ### Changed
 
 - Setup trace events now report how long the repository setup command took, or how long the cached path saved.
@@ -675,7 +677,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/dahrkai/dahrk-node/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/dahrkai/dahrk-node/compare/v0.4.2...v0.4.3
