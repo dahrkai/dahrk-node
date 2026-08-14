@@ -12,11 +12,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { decode, encode, type EdgeToHub, type JobRequest, type PushJob } from "@dahrk/contracts";
 import { startEdgeNode } from "../src/ws-client.js";
+import { resolveMaxConcurrentStages } from "../src/concurrency.js";
 import { fileJobLedger, jobLedgerFile, type JobLedger, type JobLedgerEntry } from "../src/job-ledger.js";
 
 const NODE_TENANT = "t_node";
@@ -252,6 +253,36 @@ test("an idle node announces an EMPTY in-flight list, not an absent one", async 
     assert.ok(hello);
     assert.deepEqual((hello as { inFlightJobs?: unknown }).inFlightJobs, []);
   });
+});
+
+// --- advertising the stage-concurrency bound on hello (DHK-1206) -----------------------------------
+
+test("hello carries the node's resolved maxConcurrentJobs bound", async () => {
+  // Without this the hub reads an absent field as an effective 1 ("every client that predates the
+  // field") and clamps a multi-core node to one stage at a time. The value must match what the
+  // limiter resolves and logs as EDGE_STAGE_CAP.
+  const expected = resolveMaxConcurrentStages(process.env, cpus().length);
+  await withEdge(async (ctx) => {
+    const hello = ctx.inbound.find((m) => m.type === "hello");
+    assert.ok(hello);
+    assert.equal((hello as { maxConcurrentJobs?: unknown }).maxConcurrentJobs, expected);
+  });
+});
+
+test("hello carries the DAHRK_MAX_CONCURRENT_STAGES override when set", async () => {
+  // The operator's escape hatch must reach the hub too, not just the local limiter.
+  const prev = process.env.DAHRK_MAX_CONCURRENT_STAGES;
+  process.env.DAHRK_MAX_CONCURRENT_STAGES = "7";
+  try {
+    await withEdge(async (ctx) => {
+      const hello = ctx.inbound.find((m) => m.type === "hello");
+      assert.ok(hello);
+      assert.equal((hello as { maxConcurrentJobs?: unknown }).maxConcurrentJobs, 7);
+    });
+  } finally {
+    if (prev === undefined) delete process.env.DAHRK_MAX_CONCURRENT_STAGES;
+    else process.env.DAHRK_MAX_CONCURRENT_STAGES = prev;
+  }
 });
 
 test("a job the previous process died holding is reconciled at boot, and never announced", async () => {

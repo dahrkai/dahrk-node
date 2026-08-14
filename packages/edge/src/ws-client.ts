@@ -540,6 +540,14 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // the projection instead of an advisory placeholder. Single-sourced from the git service so it
       // always matches where worktrees actually land.
       worktreesDir: gitService.worktreesDir,
+      // The node's resolved stage-concurrency bound (DHK-1206). Absent, the hub normalises it to an
+      // effective 1 - "every client that predates the field" - so a multi-core node that has decided it
+      // can run two stages is clamped to one. Sent on every (re)advertise, so the value survives a
+      // reconnect. The local limiter stays authoritative: this is only a hub-side optimisation, and a
+      // node handed more than it advertised still queues rather than oversubscribing (see the limiter).
+      // The cast below carries the field until the pinned `@dahrk/contracts` types it on the `hello`
+      // frame; the hub already reads and normalises it off the wire.
+      maxConcurrentJobs: limiter.max,
       // What we are running RIGHT NOW (DHK-416), which is what lets a new hub build ADOPT an in-flight
       // stage rather than duplicate it (DHK-415). Without this the hub cannot tell "this node is midway
       // through the stage you are about to re-dispatch" from "this node is idle", so a hub roll or a
@@ -555,7 +563,7 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // `announceableJobs` drops what we cannot version-stamp - announcing such a job would make the hub
       // KILL it, not adopt it. See there.
       inFlightJobs: announceableJobs(running.values()),
-    });
+    } as EdgeToHub & { maxConcurrentJobs: number });
   };
 
   // Self-heal a transiently-degraded boot: re-probe the host's runtimes on an interval and, when the
