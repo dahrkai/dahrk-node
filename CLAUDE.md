@@ -4,6 +4,18 @@ The open-source **Dahrk** edge client: the installable software (`dahrk-node`) t
 enrolled with the hub, becomes a **node** and executes workflow stages in a git worktree. Apache-2.0,
 copyright Skakel Labs.
 
+## This repo is public
+
+Everything written here is world-readable and durable: code, commit messages, PR titles and bodies,
+comments, branch names. Editing a PR body later does not remove what it said.
+
+- Keep commit messages and PR bodies **short and self-contained**. Describe the change on its own
+  terms, in this repo's own vocabulary.
+- **Write nothing that depends on context from outside this repo**, and link to nothing a reader
+  here cannot open. Where the reasoning for a change sits elsewhere, give the substance plainly and
+  leave out the pointer.
+- Brevity is the safeguard. Less surrounding narrative means less to get wrong.
+
 ## Dahrk brand & naming (canonical: github.com/dahrkai/dahrk-hq)
 
 Naming conventions for this repo (summary; the source of truth is `dahrk-hq`):

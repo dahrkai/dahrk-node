@@ -22,13 +22,19 @@ _Avoid_: the bot, the agent (when you mean the product).
 The company that owns Dahrk.
 _Avoid_: Dahrk Inc.
 
-### The two deployables
+### Deployables
 
 **Hub**:
-The single deployed, owned service. Ingests Linear webhooks, authenticates them, hosts the engine,
-holds the workflow registry, runs the WebSocket server, and routes Jobs to nodes. The only public
-inbound endpoint.
-_Avoid_: Server, backend, orchestrator.
+The main Dahrk-owned service. It owns public inbound endpoints, integration credentials and channel
+delivery; ingests webhooks, hosts the Engine and workflow registry, runs the node WebSocket server and
+routes Jobs. It never performs inference.
+_Avoid_: Server, backend, orchestrator, Assistant service.
+
+**Assistant service**:
+The private, horizontally scalable Dahrk service that processes Assistant turns with the AuthProfile-
+selected runtime. It has no public inbound endpoint, Slack credential or repository execution surface;
+the Hub gives it normalized work and accepts its delivery intentions.
+_Avoid_: Hub, Slack agent, per-Tenant assistant, Edge node.
 
 **Edge node**:
 A deliberate worker (a Mac or a VPS) that connects **outbound** to the hub over WebSocket and runs
@@ -48,8 +54,10 @@ can never change the result.
 _Avoid_: Hosted node, cloud node, pool (node groups are retired).
 
 **Sandbox**:
-The isolated guest a managed node works in: one Firecracker microVM per tenant, on a rig. A whole
-machine carrying the repository's toolchain, isolated so an agent reaches nothing it was not given.
+The isolated guest a managed node works in: a Firecracker microVM on a rig, serving one tenant and
+**reset to its golden snapshot when no run holds state on it**, so one run never inherits another's
+residue. A whole machine carrying the repository's toolchain, isolated so an agent reaches nothing it
+was not given.
 This is the **public, customer-facing word**, and the only sense the word is permitted in: **microVM**
 is the precise architectural term, **managed node** is the enrolment and billing unit, and **sandbox**
 is what a reader already understands from E2B, Daytona and Cloudflare. Never write it next to a usage
@@ -61,9 +69,9 @@ jail, workspace (Linear owns that word).
 ### The one rule
 
 **Determinism boundary**:
-The invariant that the engine is pure deterministic TypeScript and **no LLM call ever decides control
-flow**. Inference happens only inside a stage. Wanting an LLM to choose the next step is a design
-error, not a feature.
+The invariant that no LLM call decides Engine control flow or commits an externally visible mutation.
+Inference may prepare an Action proposal in the Slack assistant or perform Run work inside a Stage;
+deterministic code and explicit human decisions alone advance durable state.
 _Avoid_: Orchestration logic, agentic routing.
 
 **Engine**:
@@ -78,6 +86,21 @@ The versioned definition of a stage graph for an issue: the ordered stages, thei
 and loops. Hub-owned and DB-canonical.
 _Avoid_: Pipeline, playbook, recipe.
 
+**Batch**:
+A snapshotted, explicitly revisable set of Linear issue Subjects requested as one body of work,
+optionally sourced from a parent issue, Project or Project Milestone.
+_Avoid_: Epic, campaign, queue, stack (when referring to the collection of issues).
+
+**Batch revision**:
+An immutable replacement of a Batch's unadmitted suffix: its membership, dependency edges, ordering
+and priority. It never rewrites an active, Delivered or landed prefix.
+_Avoid_: Live Batch, mutation, edit-in-place.
+
+**Run request**:
+The durable intention to start one workflow about one Subject. It exists before a Run and waits until
+its Batch dependencies and admission constraints allow the Run to begin.
+_Avoid_: Queued Run (no Run exists yet), Job, task.
+
 **Subject**:
 What a run is **about**, and therefore which surface its questions and results belong to: a Linear
 issue, a Slack thread, or nothing at all (an admin, triage or preflight run is about the system
@@ -88,6 +111,21 @@ _Avoid_: Issue (that is one kind of subject), topic, target, context.
 **Run**:
 One execution of a workflow, about one Subject. Scope: the whole subject.
 _Avoid_: Job (a job is one stage dispatch), session, execution.
+
+**Repair run**:
+A narrow follow-up Run that returns an existing PR layer to Delivery after failed required checks or
+a branch conflict. It reuses the Subject, branch and PR rather than repeating the full workflow.
+_Avoid_: Attempt, retry, rerun.
+
+**Delivery**:
+The point at which a write Subject has a clean PR layer in every Repository it changed and every
+declared required check passes. Delivery does not mean that a human has reviewed or merged the layer.
+_Avoid_: Completion, landing, merge.
+
+**Revalidation**:
+The loss and recovery of Delivery across a PR-stack suffix after a lower layer changes. Every affected
+layer must establish its checks against its new head before dependent work proceeds.
+_Avoid_: Retry, restack (that is GitHub's branch operation), cached success.
 
 **Stage**:
 One node in the workflow graph: a runtime + model + prompt/skill + tools + interaction mode. Part of
@@ -127,6 +165,25 @@ The git worktree created once at run start and shared by every stage, torn down 
 carrier of context between stages (never a live LLM conversation - stages swap runtimes).
 _Avoid_: Checkout, clone, sandbox (a **Sandbox** is the machine; a worktree is a directory on it, and
 on a self-managed node there is no sandbox at all).
+
+**PR stack**:
+The ordered chain of pull requests produced by a Batch in one Repository, with one write issue per
+layer and each layer based on the branch immediately below it.
+_Avoid_: Stage stack, queue, Batch.
+
+**Repository write lane**:
+The exclusive reservation that prevents unrelated write work from advancing branches in one
+Repository concurrently. Releasing compute never releases this branch-ownership reservation.
+_Avoid_: Lock (the implementation may not be one), node slot, queue.
+
+**Execution slot**:
+One concurrent Job of capacity advertised by an Edge node and occupied only while a Job is in flight.
+_Avoid_: CPU, thread, Run slot.
+
+**Landing**:
+The human-initiated movement of a Delivered prefix of a PR stack into the Repository's base branch.
+It may land the bottom layer, a named prefix or the whole Delivered stack.
+_Avoid_: Delivery, automatic merge, deployment.
 
 **Runner adapter**:
 A thin wrapper over a vendor agent SDK (Claude Agent SDK, Pi) implementing the internal
@@ -174,7 +231,78 @@ One Slack app install binding a tenant to a Slack workspace. The instance behind
 one per tenant, exactly parallel to the GitHub **Installation**. Channels are *routing configuration*
 inside it, never identities: there is one `@Dahrk`, and what varies per channel is which repository a
 run defaults to.
-_Avoid_: Slack connection, bot, persona, agent (there is one agent).
+_Avoid_: Slack connection, bot, persona, agent (there is one Slack assistant).
+
+**Assistant**:
+Dahrk's Tenant-scoped conversational presence on Slack, the Portal and Microsoft Teams. It gathers
+context, sharpens intent, proposes actions and delegates accepted work, but is not itself a Run,
+Workflow or Stage and holds no execution resource while waiting for a person.
+_Avoid_: Slack agent, Teams bot, conversational Run.
+
+**Assistant conversation**:
+A deliberate, resumable exchange between the Assistant and people. Dahrk owns its canonical
+**Conversation record**; one bound Slack thread, Teams thread or Portal session is writable at a time,
+while explicit continuation may transfer control to another surface. Surface-native history may inform
+the exchange without replacing the canonical record.
+_Avoid_: Run, SDK session, channel conversation.
+
+**Conversation record**:
+Dahrk's authoritative ordered record of an Assistant conversation: its messages, context snapshot,
+Assistant turns, tool receipts, Action proposals, decisions and linked work. A runtime-native session
+may accelerate continuation but never replaces this record.
+_Avoid_: SDK session, transcript, Trace, memory.
+
+**Conversation binding**:
+The link between an Assistant conversation and a Slack thread, Teams thread or Portal session. Exactly
+one binding is writable at a time; another may be a read-only mirror until control is explicitly
+transferred.
+_Avoid_: Conversation, SDK session, duplicate thread.
+
+**Conversation participant**:
+A linked Tenant member allowed to read and contribute to an Assistant conversation. The initiator is a
+participant; another linked member joins through explicit sharing, an accepted Directed message, or an
+authorized confirmation decision. Ambient speakers, quoted people and context-snapshot authors do not
+join. Participation never grants mutation authority, which remains a separate Tenant capability.
+_Avoid_: Channel member, viewer, approver, platform audience.
+
+**Conversation context snapshot**:
+The immutable, bounded, disclosed set of nearby surface messages attached when an Assistant conversation
+begins. It explains the invocation but does not grow with unrelated later traffic. Users can revise the
+snapshot before committing an Action proposal.
+_Avoid_: Channel history, transcript, memory.
+
+**Directed message**:
+A message that explicitly asks the Assistant to act. In Slack or Teams this is a direct message or an
+explicit `@Dahrk` mention; in a deliberate Portal session every submitted human message is directed. It
+can begin or revise an Assistant conversation.
+_Avoid_: Reply, event, prompt.
+
+**Ambient message**:
+A human message near an invocation or inside a surface thread that is not directed at Dahrk. It may
+inform the next directed exchange, but never triggers a response, grants Conversation access, or changes
+accepted work by itself.
+_Avoid_: Ignored message, assistant input, follow-up (which does not say whom it addresses).
+
+**Assistant turn**:
+The processing of one ordered burst of Directed messages into at most one Assistant reply or Action
+proposal. A newer Directed message supersedes an unpublished turn: its inference may finish, but its
+stale reply is withheld and the new message participates in the successor turn.
+_Avoid_: Run, Job, Stage, message.
+
+**Action proposal**:
+The inert, human-readable draft of an externally visible action the Slack assistant offers for
+confirmation. Accepting the current proposal commits that action; generating or revising it does not.
+_Avoid_: Gate, approval, Run request.
+
+**Capture**:
+Committing an Action proposal as a new or revised Linear issue linked to its Assistant conversation.
+Capture records work; it never starts it.
+_Avoid_: Delegate, launch, run.
+
+**Delegate**:
+Committing tracked work for execution by creating its Batch and Run request. Delegation may include
+Capture only when the Action proposal explicitly names both mutations.
+_Avoid_: Capture, run (no Run exists before admission), assign.
 
 **Workspace**:
 A Linear workspace exposed by a Connection. Contains the issues that become runs. The name a person
@@ -182,10 +310,11 @@ recognises, so it is what a surface prints for a Connection.
 _Avoid_: Org, team (a team is a subdivision of a workspace).
 
 **AuthProfile**:
-The tenant-owned record naming a provider and the credential that authenticates **inference** for it. Its
-provider decides the **runtime** (`anthropic` -> Claude Code, everything else -> Pi) and its `defaultModel`
-decides the model, so it is the single fact behind "how does this stage think". Resolved in exactly two
-rungs: the stage's own reference, else the account default.
+The Tenant-owned record naming a provider, credential kind and default model for **inference**. Those
+facts decide both runtime and model: an Anthropic subscription requires Claude Agent SDK; API-key
+profiles and every other provider use Pi. Onboarding establishes the account default. A Stage may
+select its own profile instead, and the Slack assistant may have a separate account-level selection;
+each falls back directly to the account default.
 _Avoid_: API key, credential (a credential is what the profile points at), model config.
 
 **Env profile**:
@@ -242,6 +371,26 @@ for drive, the `stop` signal for cancel. **Slack** uses the Events API and Block
 thread. A surface must be able to *answer*, not merely display: a run may only start on a workflow
 whose every gate its surface can raise and resolve.
 _Avoid_: UI, dashboard, API (when you mean this specifically), notification (a sink is not a surface).
+
+**Run activity stream**:
+The control-surface projection of a Run's Workflow, Stage, Job and tool lifecycles. It shows redacted
+human-readable progress and outcomes; the full-fidelity execution record remains the Trace.
+_Avoid_: Trace, log, tool output, status message.
+
+**Activity mirror**:
+A read-only copy of a Run activity stream on a linked surface other than the Run's authoritative
+Control surface. It cannot answer gates, drive or cancel the Run, so it never creates a second authority.
+_Avoid_: Control surface, notification, duplicate session.
+
+**Admission service**:
+The deterministic Hub component that turns ready Run requests into Runs under Batch fairness,
+dependency, Tenant-capacity, Execution-slot and Repository-write-lane constraints.
+_Avoid_: Agent, Engine, LLM scheduler, orchestrator.
+
+**Batch control issue**:
+The Linear issue whose Agent Session drives and reports one Batch, including revisions, repairs,
+pause, cancellation and Landing. A Project or Project Milestone cannot itself be this control surface.
+_Avoid_: Epic, Project agent, Batch session.
 
 **Gate**:
 A deterministic pause of the **run** for a human, raised as a Linear `elicitation`. Used between stages
