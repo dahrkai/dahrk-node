@@ -24,6 +24,28 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-14
+
+### Changed
+
+- The `@dahrk/contracts` catalogue pin moves to `^0.21.0` (#214). Routine wire-protocol bump opened by
+  the daily `refresh-contracts` job; a caret cannot cross a pre-1.0 minor, so the catalogue entry and
+  the lockfile are the only things that move. Nothing a self-hoster notices.
+- The shared-kernel block in `CONTEXT.md` is re-synced from the workspace root (#217). This repo's
+  mirror had drifted, so the diff carries several accumulated glossary additions (the Assistant service
+  entry, the Sandbox entry, the reworded Hub) alongside the change that prompted it: a managed guest is
+  no longer described as one Firecracker microVM per tenant held indefinitely, but as a sandbox reset to
+  its golden snapshot when no run holds state on it. Mechanical output of `scripts/sync-context.sh`;
+  no repo-specific language changed.
+
+### Fixed
+
+- DHK follow-up to the stage-concurrency work in #210: the node computed its concurrency bound but
+  never advertised it in the connect frame, so the hub applied its default of one and every node ran
+  a single stage at a time regardless of core count (#219). The node now sends `maxConcurrentJobs`,
+  with regression tests covering both the derived value and the `DAHRK_MAX_CONCURRENT_STAGES`
+  override.
+
 ### Removed
 
 - DHK-1195: removed the dead "Notify dahrk-harness of the new client" step from `release.yml`. No
