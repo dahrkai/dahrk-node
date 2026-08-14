@@ -35,8 +35,6 @@ export class HealthCounters {
   /** Connections made this process lifetime. The flapping signal: this climbing while uptime ALSO climbs
    *  means the socket keeps dropping under a process that is otherwise fine. */
   connectCount = 0;
-  /** Jobs in flight. A node stuck at 1 for an hour is wedged, and nothing else reveals it. */
-  activeJobs = 0;
   /** Worktrees on disk. Climbing without bound was the shape of the leak DHK-371 fixed. */
   worktreeCount = 0;
 
@@ -81,6 +79,9 @@ export function diskFreeBytes(path: string): number | undefined {
 
 export interface HealthInputs {
   counters: HealthCounters;
+  /** Stage slots occupied right now, i.e. `limiter.inUse()`. Queued stages and pushes are excluded: they
+   *  are tracked in the `running` ledger but do not hold a slot, so they must not count as busy here. */
+  activeSlots: number;
   clientVersion: string;
   runtimes: string[];
   /** The worktree base, for the disk gauge. */
@@ -96,7 +97,7 @@ export function collectHealth(inputs: HealthInputs): NodeHealth {
   return {
     uptimeSec: counters.uptimeSec(),
     clientVersion: inputs.clientVersion,
-    activeJobs: counters.activeJobs,
+    activeJobs: inputs.activeSlots,
     connectCount: counters.connectCount,
     worktreeCount: counters.worktreeCount,
     ...(free !== undefined ? { diskFreeBytes: free } : {}),

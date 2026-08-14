@@ -142,7 +142,6 @@ test("the health report carries counts and numbers, and nothing that could name 
   // message, this test should be what stops it - and the fix is to move it to the log channel, not to
   // relax this.
   const counters = new HealthCounters();
-  counters.activeJobs = 2;
   counters.connectCount = 7;
   counters.worktreeCount = 3;
   counters.recordError("git");
@@ -151,6 +150,7 @@ test("the health report carries counts and numbers, and nothing that could name 
 
   const health = collectHealth({
     counters,
+    activeSlots: 2,
     clientVersion: "0.2.0",
     runtimes: ["claude-code"],
     worktreesDir: "/tmp",
@@ -178,6 +178,7 @@ test("uptime and error counts accumulate; a disk read that fails simply omits th
   const counters = new HealthCounters();
   const health = collectHealth({
     counters,
+    activeSlots: 0,
     clientVersion: "0.2.0",
     runtimes: [],
     // A path that cannot be stat'd: the node must still report everything else rather than refuse.
@@ -186,4 +187,20 @@ test("uptime and error counts accumulate; a disk read that fails simply omits th
   assert.equal(health.diskFreeBytes, undefined);
   assert.ok(typeof health.uptimeSec === "number");
   assert.equal(health.errors, undefined, "no errors yet means the field is absent, not zero-filled");
+});
+
+test("reported occupancy is the live-slot count it is handed, not any queued or push tally", () => {
+  // The occupancy the hub sees must be `limiter.inUse()` and nothing else. Queued stages and pushes are
+  // tracked elsewhere (the `running` ledger) and must never inflate this number - that over-reporting was
+  // the bug. So `collectHealth` reads occupancy from its `activeSlots` input alone: whatever bookkeeping
+  // the counters carry, the reported figure is the slot count passed in.
+  const counters = new HealthCounters();
+  const health = collectHealth({
+    counters,
+    activeSlots: 1,
+    clientVersion: "0.2.0",
+    runtimes: [],
+    worktreesDir: "/tmp",
+  });
+  assert.equal(health.activeJobs, 1);
 });
