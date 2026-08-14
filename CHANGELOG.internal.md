@@ -24,7 +24,18 @@ this file is left verbatim.
 
 ## [Unreleased]
 
-## [0.4.7] - 2026-08-14
+### Changed
+
+- Heartbeat occupancy now comes from `limiter.inUse()` rather than `counters.activeJobs = running.size`
+  (DHK-1155). The `running` ledger also holds queued stages (tracked before `limiter.acquire()`) and
+  pushes (never limited), so sourcing `activeJobs` from it over-reported node load; the live slot count
+  excludes both by construction. `collectHealth` now takes an `activeSlots` input and the redundant
+  `HealthCounters.activeJobs` counter is removed, leaving one source of truth. The on-demand
+  `node-health-request` reply already read `limiter.inUse()`, so the two health paths now agree.
+- Deferred: the `hello` frame still advertises `maxConcurrentJobs` through the
+  `as EdgeToHub & { maxConcurrentJobs: number }` cast (DHK-1155). Removing it needs a published
+  `@dahrk/contracts` release that types the field on `hello`; the latest is `0.21.0`, which does not, so
+  the catalogue pin and the cast are unchanged. Blocked on the dahrk-harness capacity ticket.
 
 ### Changed
 

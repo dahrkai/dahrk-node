@@ -319,6 +319,10 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
               type: "heartbeat",
               health: collectHealth({
                 counters,
+                // Occupancy is the live slot count, not `running.size`: that ledger also holds queued
+                // stages (tracked before `limiter.acquire()`) and pushes (never limited), and counting
+                // them would over-report the node's load. `limiter.inUse()` excludes both by construction.
+                activeSlots: limiter.inUse(),
                 clientVersion: opts.clientVersion ?? "0.0.0",
                 runtimes: currentRuntimes,
                 worktreesDir: gitService.worktreesDir,
@@ -974,7 +978,6 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       startedAt,
       nodePid: process.pid,
     });
-    counters.activeJobs = running.size;
     jobLog.info({}, `JOB_STARTED:${job.stageId} ${job.jobId}`);
     // Admission control (DHK-1137): past the bound this awaits a freed slot instead of piling another
     // full runtime session onto a saturated host. The job is already `trackJob`-ed above, so a queued
@@ -1020,7 +1023,6 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
     } finally {
       limiter.release();
       untrackJob(job.jobId);
-      counters.activeJobs = running.size;
     }
   };
 
