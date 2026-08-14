@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A node now tells the hub its stage-concurrency bound, so a multi-core node runs several stages at once instead of being clamped to one.
+
 ## [0.4.6] - 2026-08-13
 
 ### Changed
