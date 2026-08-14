@@ -62,7 +62,7 @@ This is the **public, customer-facing word**, and the only sense the word is per
 is the precise architectural term, **managed node** is the enrolment and billing unit, and **sandbox**
 is what a reader already understands from E2B, Daytona and Cloudflare. Never write it next to a usage
 meter: the comparable is a dev-VM product, not a metered code-interpreter platform, and the pricing
-model turns on that distinction (dahrk-hq D9).
+model turns on that distinction.
 _Avoid_: Container (it is not one, and the difference is the point), VM (unqualified), box, cell,
 jail, workspace (Linear owns that word).
 

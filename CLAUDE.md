@@ -16,9 +16,9 @@ comments, branch names. Editing a PR body later does not remove what it said.
   leave out the pointer.
 - Brevity is the safeguard. Less surrounding narrative means less to get wrong.
 
-## Dahrk brand & naming (canonical: github.com/dahrkai/dahrk-hq)
+## Dahrk brand & naming
 
-Naming conventions for this repo (summary; the source of truth is `dahrk-hq`):
+Naming conventions for this repo:
 
 - **Entity model.** Product and agent = **Dahrk** / **@Dahrk**, a product of **Skakel Labs**. Product
   repos live under `github.com/dahrkai`.
