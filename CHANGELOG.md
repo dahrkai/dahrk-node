@@ -6,9 +6,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-14
+
 ### Changed
 
-- A node's heartbeat now counts only stages that are executing as busy, so queued and push work no longer inflate its reported load.
+- A node's heartbeat now counts only stages that are executing as busy, so queued and push work no longer inflate its reported load. (#221)
 
 ## [0.4.7] - 2026-08-14
 
@@ -687,7 +689,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...v0.4.5

@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-14
+
 ### Changed
 
 - Heartbeat occupancy now comes from `limiter.inUse()` rather than `counters.activeJobs = running.size`
