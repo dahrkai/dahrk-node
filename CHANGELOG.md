@@ -6,9 +6,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-14
+
 ### Fixed
 
-- A node now tells the hub its stage-concurrency bound, so a multi-core node runs several stages at once instead of being clamped to one.
+- A node now tells the hub its stage-concurrency bound, so a multi-core node runs several stages at once instead of being clamped to one. (#219)
 
 ## [0.4.6] - 2026-08-13
 
@@ -681,7 +683,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/dahrkai/dahrk-node/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/dahrkai/dahrk-node/compare/v0.4.3...v0.4.4
