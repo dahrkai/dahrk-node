@@ -24,6 +24,15 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Removed
+
+- DHK-1195: removed the dead "Notify dahrk-harness of the new client" step from `release.yml`. No
+  workflow in `dahrk-harness` has ever declared a `repository_dispatch` trigger, so the dispatch was
+  silently discarded on every release. The `HARNESS_DISPATCH_PAT` secret reference and its header
+  documentation are removed with it. The `dahrk-web` notification step beside it is confirmed to
+  have a live consumer (it dispatches to rebuild `dahrk.ai/changelog`, and an incident in its history
+  proves the consumer exists) and is left untouched.
+
 ## [0.4.6] - 2026-08-13
 
 ## [0.4.5] - 2026-08-12
