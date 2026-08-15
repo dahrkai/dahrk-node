@@ -62,7 +62,7 @@ This is the **public, customer-facing word**, and the only sense the word is per
 is the precise architectural term, **managed node** is the enrolment and billing unit, and **sandbox**
 is what a reader already understands from E2B, Daytona and Cloudflare. Never write it next to a usage
 meter: the comparable is a dev-VM product, not a metered code-interpreter platform, and the pricing
-model turns on that distinction (dahrk-hq D9).
+model turns on that distinction.
 _Avoid_: Container (it is not one, and the difference is the point), VM (unqualified), box, cell,
 jail, workspace (Linear owns that word).
 
@@ -178,7 +178,15 @@ _Avoid_: Lock (the implementation may not be one), node slot, queue.
 
 **Execution slot**:
 One concurrent Job of capacity advertised by an Edge node and occupied only while a Job is in flight.
-_Avoid_: CPU, thread, Run slot.
+Node-scoped, and released between Stages.
+_Avoid_: CPU, thread, Run slot, an unqualified "slot" (an **Admission slot** is the other one).
+
+**Admission slot**:
+One concurrent Run of a Tenant's managed capacity, held from admission until the Run reaches a terminal
+state - a Run parked on a gate still holds one. Tenant-scoped, and bounds managed compute only: Runs
+placed on a Tenant's own node are uncapped and uncounted. Exhausting them queues Run requests, never
+rejects or downgrades a Run.
+_Avoid_: Execution slot (that is node capacity, not Tenant capacity), an unqualified "slot", licence, seat.
 
 **Landing**:
 The human-initiated movement of a Delivered prefix of a PR stack into the Repository's base branch.
@@ -310,12 +318,36 @@ recognises, so it is what a surface prints for a Connection.
 _Avoid_: Org, team (a team is a subdivision of a workspace).
 
 **AuthProfile**:
-The Tenant-owned record naming a provider, credential kind and default model for **inference**. Those
-facts decide both runtime and model: an Anthropic subscription requires Claude Agent SDK; API-key
-profiles and every other provider use Pi. Onboarding establishes the account default. A Stage may
-select its own profile instead, and the Slack assistant may have a separate account-level selection;
-each falls back directly to the account default.
-_Avoid_: API key, credential (a credential is what the profile points at), model config.
+The Tenant-owned record naming a provider and the credential that authenticates **inference** for it.
+The provider decides the runtime: an Anthropic subscription requires Claude Agent SDK; API-key
+profiles and every other provider use Pi. It does **not** name a model; a Model profile does. A Tenant
+may hold several for one provider, because a subscription and a key are two accounts. Onboarding
+establishes the account default, which is what every Role resolves through until a Model profile says
+otherwise.
+_Avoid_: API key, credential (a credential is what the profile points at), model config, Model profile.
+
+**Role**:
+The named inference slot a Stage declares: `reasoning`, `coding`, `review`, or `default` when it names
+none. A closed, product-owned set. A Stage names a Role and never a model, a credential or a provider,
+which is exactly what lets one Workflow run unchanged in any Account. A Role the resolving Model
+profile does not recognise falls back to `default` rather than failing, so the set can grow without
+breaking published Workflows.
+_Avoid_: Stage type, persona, agent, profile.
+
+**Model profile**:
+The Tenant-owned, reusable map from every Role to an AuthProfile and a model. Named for the dial it
+turns (`Economy`, `Balanced`, `Deep work`), which is a single cost-and-capability axis and not a
+matrix. A Route selects one. Resolving nothing is a loud failure at dispatch, never an ambient
+fallback.
+_Avoid_: Execution profile (retired: "execution" is placement, and placement is inert), auth profile,
+preset, model config.
+
+**Route**:
+The rule binding one trigger label, in one Repository, to a Workflow, a version policy and a Model
+profile. Routes are defined once for the Account and inherited by every Repository; a Repository may
+override a single Route or disable one, and both states are shown rather than implied. `(Repository,
+label)` is unique, so the same label may mean different work in different Repositories.
+_Avoid_: Mapping, binding, trigger (the label is the trigger).
 
 **Env profile**:
 The tenant-owned bundle of **non-secret** `{ envVar -> literal }` entries that points a stage at a dev or
@@ -324,10 +356,12 @@ sentence describes both. Never carries a secret.
 _Avoid_: Environment, config, settings.
 
 **Placement**:
-Which node the hub gives a job to. Decided on capability and availability alone, and **inert**: any node
-that can serve a job produces the same result. Placement is never an input to which model, which credential
-or which repository a run gets.
-_Avoid_: Assignment, scheduling, node routing (there is no such routing).
+Which node the hub gives a job to. Decided on capability and availability alone, and **inert among the
+nodes that satisfy the run's declared requirements**: any of them produces the same result. A
+Repository may require a class of execution (self-managed, say) and the hub still chooses the machine;
+it never names one. Placement is never an input to which model, which credential or which repository a
+run gets.
+_Avoid_: Assignment, scheduling, node routing (there is no such routing), node pool (retired).
 
 **Broker**:
 The hub component that turns a stored `credentialRef` into the credential a job carries. It **mints**
