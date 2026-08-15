@@ -24,6 +24,29 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`runRepoSetup` is async (DHK-1207 follow-up).** It used `spawnSync` with a 600s cap, blocking the
+  event loop the WebSocket heartbeat runs on. A long install starved the heartbeat, the socket went
+  stale and terminated, the hub's dispatch lease lapsed with nothing renewing it, and its reaper
+  declared a healthy in-flight stage dead — failing the run while the agent was still working, and
+  leaving the worktree holding its branch against every later run. `check-runner.ts` and
+  `git-service.ts` had already made this move and documented why; this was the last such path. The
+  regression test asserts a timer keeps firing during setup, which is precisely what the heartbeat is.
+
+- **`planRemoteUpgrade` refuses while jobs are in flight (DHK-1001 follow-up).** It installed the new
+  package and only then called `restart`, which `guardBusy` refuses with `BUSY_NODE` while a stage is
+  running — leaving the package on disk one version ahead of the running process, with `dahrk status`
+  reading the package and the portal reading the handshake, each honestly reporting a different
+  version. The check now happens before `runUpgrade`. `inFlightJobsNow` is extracted from `guardBusy`
+  so the two paths cannot disagree about what "busy" means. There is deliberately no `--force`
+  equivalent: an operator at a terminal can decide a run is worth killing, a hub noticing a release
+  cannot. The hub reads `accepted:false` on a drivable channel as its new `refused` outcome.
+
+The paired `inFlightJobIds` heartbeat change is held back on
+`feat/heartbeat-in-flight-jobs` until `@dahrk/contracts` 0.23.0 publishes — it cannot compile against
+the pinned 0.21.0, and holding these two independent fixes behind it would block them for nothing.
+
 ## [0.4.8] - 2026-08-14
 
 ### Changed

@@ -1103,7 +1103,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             ]
           : [];
         for (const target of setupTargets) {
-          const outcome = runRepoSetup({ worktreePath: target.worktreePath, command: target.command });
+          const outcome = await runRepoSetup({ worktreePath: target.worktreePath, command: target.command });
           if (outcome.status === "failed") {
             // Fail closed BEFORE the runner is constructed, so the agent never touches a broken tree.
             // A distinct `setup-failed` kind + `harness` failureClass make it a clean, attributable

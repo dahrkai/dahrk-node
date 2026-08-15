@@ -6,6 +6,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- Repository setup no longer blocks the node while it runs, so a long install cannot make a busy node look unresponsive. (#224)
+- A node now declines a remote update while it is running stages, instead of installing one it cannot restart into. (#224)
+
 ## [0.4.8] - 2026-08-14
 
 ### Changed

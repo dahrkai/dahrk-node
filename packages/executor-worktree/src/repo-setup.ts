@@ -6,7 +6,8 @@
  * buildable tree (dependencies installed, generators run, ...). It runs the command as a node
  * subprocess with the node process's own privileges - it is provisioning the tree, not an
  * agent-driven action, so it is deliberately outside the agent-facing fs-confine policy (the pnpm
- * store the install writes to is already in the writable roots regardless).
+ * store the install writes to is already in the writable roots regardless). It is ASYNC because the
+ * command can run for minutes and the node's heartbeat shares its event loop - see `spawnSetup`.
  *
  * Idempotency is per worktree: a sentinel file in the worktree's scratch dir records a digest of the
  * command that last succeeded. A reused worktree (re-dispatch / continuation) whose marker matches
@@ -14,7 +15,7 @@
  * changed command invalidates the marker and re-runs. A failed setup leaves NO marker, so a retry
  * re-runs rather than trusting a half-built tree.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -81,7 +82,7 @@ function tail(output: string): string {
   return output.length > OUTPUT_CAP ? output.slice(output.length - OUTPUT_CAP) : output;
 }
 
-export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
+export async function runRepoSetup(opts: RepoSetupOpts): Promise<RepoSetupResult> {
   const { worktreePath, command } = opts;
   const log = opts.log ?? noopLogger;
   // Timed from the TOP, not from around the spawn: the marker read is part of what the cached path
@@ -110,38 +111,91 @@ export function runRepoSetup(opts: RepoSetupOpts): RepoSetupResult {
   }
 
   log.info(`repo setup: running \`${command}\``);
-  // `spawnSync`, not `execFileSync`: it returns the child's pid, which is what lets us reap the whole
-  // process GROUP afterwards. `detached` makes the `sh` a group leader, so a setup command that
-  // backgrounded something (`generator --watch &`) - or timed out mid-install - does not leak that child
-  // past setup: it is signalled with the group rather than left orphaned on the operator's machine
-  // (DHK-1099). The synchronous form is retained (setup runs before the runner, so blocking is fine).
-  const res = spawnSync("sh", ["-c", command], {
-    cwd: worktreePath,
-    env: opts.env ?? process.env,
-    timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    encoding: "utf8",
-    // Fold stderr into stdout so the captured trace shows what the installer said, in order.
-    stdio: ["ignore", "pipe", "pipe"],
-    ...detachedGroup,
-  });
-  // spawnSync's own timeout kill signals only the `sh` pid; reap the group so any backgrounded
-  // grandchild goes too. Unconditional and best-effort: a no-background command is a cheap no-op.
-  killProcessGroup({ pid: res.pid });
+  const { exitCode, output, spawnError } = await spawnSetup(opts, command);
 
-  const combined = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   // Clean exit (status 0, no spawn/timeout error): mark the tree installed. mkdir -p in case a fresh
   // worktree's scratch dir is not yet present (the stage runner creates it, but the helper must not
   // assume the order).
-  if (res.status === 0 && !res.error) {
+  if (exitCode === 0 && !spawnError) {
     mkdirSync(dirname(markerPath), { recursive: true });
     writeFileSync(markerPath, want);
     const durationMs = elapsedMs();
     log.info(`repo setup: ran in ${durationMs}ms`);
-    return { status: "ran", durationMs, output: tail(combined) };
+    return { status: "ran", durationMs, output: tail(output) };
   }
   // A non-zero exit, a signal (timeout kill), or a spawn error. Never write the marker - a retry must
   // re-run rather than trust a half-built tree.
-  const output = combined || res.error?.message || "";
-  log.warn(`repo setup failed (exit ${res.status ?? "null"})`);
-  return { status: "failed", durationMs: elapsedMs(), exitCode: res.status ?? null, output: tail(output) };
+  log.warn(`repo setup failed (exit ${exitCode ?? "null"})`);
+  return {
+    status: "failed",
+    durationMs: elapsedMs(),
+    exitCode,
+    output: tail(output || spawnError || ""),
+  };
+}
+
+/**
+ * Spawn the setup command and resolve once it has exited. Never rejects: a spawn failure is a returned
+ * `spawnError`, because "setup did not run" is an ordinary outcome here, not an exception.
+ *
+ * ## Why `spawn`, not `spawnSync`
+ *
+ * This used to be `spawnSync`, justified as "setup runs before the runner, so blocking is fine". It is
+ * not fine, and the cap on this very call says why: a setup command may run for `DEFAULT_TIMEOUT_MS`
+ * (ten minutes), and the synchronous form blocks the event loop for the whole of it. The node's
+ * WebSocket heartbeat lives on that loop, so a long install starved it and the socket went stale and
+ * terminated - which the hub reads as a node that has stopped answering, mid-stage. `check-runner.ts`
+ * reached the same conclusion for the same reason and its header documents it; `git-service.ts` did
+ * too. This is the third and last of those shell paths.
+ *
+ * `detached` (via `detachedGroup`) makes the `sh` a group leader, so a setup command that backgrounded
+ * something (`generator --watch &`) - or timed out mid-install - does not leak that child past setup:
+ * it is signalled with the group rather than left orphaned on the operator's machine (DHK-1099).
+ */
+function spawnSetup(
+  opts: RepoSetupOpts,
+  command: string,
+): Promise<{ exitCode: number | null; output: string; spawnError?: string }> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    let combined = "";
+    let settled = false;
+
+    const child = spawn("sh", ["-c", command], {
+      cwd: opts.worktreePath,
+      env: opts.env ?? process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...detachedGroup,
+    });
+
+    // Cap as we go rather than at the end, so a runaway installer cannot grow the buffer without
+    // bound. Both streams append to one string, so the trace shows what the installer said IN ORDER -
+    // which the synchronous form only claimed to do, having actually concatenated all of stdout then
+    // all of stderr.
+    const append = (buf: Buffer): void => {
+      combined = tail(combined + buf.toString("utf8"));
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+
+    const timer = setTimeout(() => {
+      killProcessGroup(child);
+    }, timeoutMs);
+
+    const settle = (exitCode: number | null, spawnError?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Reap the group on EVERY exit, including a clean one: a setup command that exited 0 having
+      // backgrounded a watcher left it running, and it must not outlive setup. Best-effort - a
+      // command that backgrounded nothing is a cheap no-op.
+      killProcessGroup(child);
+      resolve({ exitCode, output: combined, ...(spawnError ? { spawnError } : {}) });
+    };
+
+    // `error` fires when the spawn itself failed (no `sh`, bad cwd); no `close` follows it.
+    child.on("error", (err: Error) => settle(null, err.message));
+    // `close`, not `exit`: it waits for the captured streams to drain, so no output is lost.
+    child.on("close", (code) => settle(code));
+  });
 }
