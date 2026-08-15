@@ -43,12 +43,9 @@ this file is left verbatim.
   equivalent: an operator at a terminal can decide a run is worth killing, a hub noticing a release
   cannot. The hub reads `accepted:false` on a drivable channel as its new `refused` outcome.
 
-### Added
-
-- **`inFlightJobIds` on the heartbeat (`@dahrk/contracts` 0.23.0).** Lets the hub renew — and re-lease
-  after its reaper has requeued — the dispatch row for a stage still running here. Not gated on
-  `telemetry.health`: it is liveness, not telemetry, and the ids are ones the hub dispatched itself.
-  Sourced from `running` rather than the limiter, so a stage queued for a slot still counts.
+The paired `inFlightJobIds` heartbeat change is held back on
+`feat/heartbeat-in-flight-jobs` until `@dahrk/contracts` 0.23.0 publishes — it cannot compile against
+the pinned 0.21.0, and holding these two independent fixes behind it would block them for nothing.
 
 ## [0.4.8] - 2026-08-14
 
