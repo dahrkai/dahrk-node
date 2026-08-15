@@ -17,7 +17,7 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { InstallChannel } from "@dahrk/contracts";
-import { nodeIsRunning, runNodeRestart } from "./service.js";
+import { inFlightJobsNow, nodeIsRunning, runNodeRestart } from "./service.js";
 import { writeState } from "./state.js";
 import { arrow, confirm, dim, hint, isInteractive, kv, out as uiOut, verdict } from "./ui.js";
 
@@ -145,6 +145,9 @@ export interface UpdateDeps {
   confirm: (question: string) => Promise<boolean>;
   /** Restart the node. Returns its exit code. */
   restart: () => Promise<number>;
+  /** How many jobs this host is running right now. A hub-driven upgrade REFUSES while this is non-zero,
+   *  because the upgrade is only real once the node restarts, and the restart would kill them. */
+  inFlightJobCount: () => number;
   out: (line: string) => void;
 }
 
@@ -298,6 +301,16 @@ export interface RemoteUpgradePlan {
  *    effect, and the hub is waiting to see the version move before its deadline.
  *  - It refuses a non-drivable channel up front, so the hub can settle `manual` and show a copy-paste
  *    command rather than waiting out a deadline on a node that was never going to move.
+ *  - It refuses a BUSY node up front, for the same reason and with more force. Upgrading is not the
+ *    install; it is the install plus the restart that makes it take effect, and the restart would kill
+ *    every stage in flight. Refusing after installing is the worst of both: that is what this path used
+ *    to do, and it left the package on disk one version ahead of the process serving requests, with
+ *    `dahrk status` and the portal each honestly reporting a different version. The check therefore has
+ *    to happen BEFORE `runUpgrade`, not around the restart.
+ *
+ * Note the asymmetry with `dahrk restart --force`: there is no forcing here. An operator at a terminal
+ * can decide a run is worth killing; a hub that merely noticed a new release cannot, and an upgrade is
+ * never urgent enough to be worth a customer's in-flight stage.
  *
  * `target` is what the hub asked for and is honoured as given: the hub pins it when the intent opens
  * precisely so a release landing mid-rollout cannot fail a node against a version nobody asked it to
@@ -311,6 +324,15 @@ export function planRemoteUpgrade(target: string, deps: Partial<UpdateDeps> = {}
   // No command means no package manager to invoke (a curl install, a from-source checkout). Say so
   // rather than trying and failing: `accepted:false` is a real answer the hub renders as a command.
   if (!cmd) return { channel: wire, accepted: false };
+
+  // Busy: refuse before anything is installed. The hub reads `accepted:false` on a DRIVABLE channel as
+  // `refused` (distinct from the `manual` an undrivable channel yields) and tells the operator to ask
+  // again when the node is idle.
+  const busy = d.inFlightJobCount();
+  if (busy > 0) {
+    d.out(`UPGRADE_REFUSED:${target} node is running ${busy} job(s)`);
+    return { channel: wire, accepted: false };
+  }
 
   return {
     channel: wire,
@@ -401,5 +423,9 @@ const defaultDeps = (): UpdateDeps => ({
     if (outcome.kind === "running") return 0;
     return outcome.kind === "error" ? outcome.code : 1;
   },
+  // The same ledger `guardBusy` consults, so the remote upgrade and `dahrk restart` can never disagree
+  // about whether this node is busy. Best-effort by construction: a missing or corrupt ledger reads as
+  // "no jobs", which degrades to the old behaviour rather than blocking every upgrade for ever.
+  inFlightJobCount: () => inFlightJobsNow().length,
   out: uiOut,
 });

@@ -73,6 +73,10 @@ function harness(over: Partial<UpdateDeps>): {
       counter.restarts++;
       return 0;
     },
+    // Idle by default. Stubbed rather than left to the real dep on purpose: the default reads this
+    // HOST's job ledger, so without it every test here would quietly depend on whether the developer's
+    // own node happened to be running a stage.
+    inFlightJobCount: () => 0,
     ...over,
   };
   // `counter` is returned as an object, not a number: destructuring a getter would snapshot it at zero
@@ -310,6 +314,32 @@ test("planRemoteUpgrade: an undrivable install refuses UP FRONT rather than fail
   assert.equal(plan.channel, "unknown");
   assert.equal(plan.apply, undefined, "nothing to run, so nothing is offered to run");
   assert.deepEqual(ran, []);
+});
+
+test("planRemoteUpgrade: a BUSY node refuses without installing anything", async () => {
+  // The half-applied state this exists to prevent. The old order was install-then-restart, and the
+  // restart is guarded against killing in-flight jobs - so a busy node swapped the package on disk,
+  // failed to bounce, and went on serving the old build. `dahrk status` then read the package (new) and
+  // the portal read the handshake (old), and both were telling the truth.
+  //
+  // `ran` being empty is the whole assertion: refusing after `runUpgrade` would be no fix at all.
+  const { deps, ran, counter, saved } = harness({ inFlightJobCount: () => 1 });
+  const plan = planRemoteUpgrade("0.2.0", deps);
+  assert.equal(plan.accepted, false, "a busy node says no");
+  assert.equal(plan.channel, "npm", "and it is honest that the channel WAS drivable - that is what makes this `refused` rather than `manual`");
+  assert.equal(plan.apply, undefined, "nothing is offered to run");
+  assert.deepEqual(ran, [], "the package manager is never invoked");
+  assert.equal(counter.restarts, 0, "and the node is never restarted out from under its jobs");
+  assert.deepEqual(saved, [], "nothing is recorded as installed, because nothing was");
+});
+
+test("planRemoteUpgrade: an idle node still upgrades - the busy guard is not a blanket refusal", async () => {
+  const { deps, ran, counter } = harness({ inFlightJobCount: () => 0 });
+  const plan = planRemoteUpgrade("0.2.0", deps);
+  assert.equal(plan.accepted, true);
+  await plan.apply!();
+  assert.deepEqual(ran, [["npm", "install", "-g", "dahrk-node@latest"]]);
+  assert.equal(counter.restarts, 1);
 });
 
 test("planRemoteUpgrade: a failing package manager throws rather than reporting a phantom success", async () => {

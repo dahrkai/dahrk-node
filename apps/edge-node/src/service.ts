@@ -949,6 +949,24 @@ export async function runNodeRestart(
 }
 
 /**
+ * What this host is running RIGHT NOW: the ledger entries owned by the node process that is actually up.
+ *
+ * Only jobs owned by the live node count. An entry left behind by a process that has since died is a
+ * leftover the next boot will reconcile, not work anyone would be interrupting.
+ *
+ * Exported because "is this node busy?" now has two callers that must never disagree: `guardBusy` (which
+ * refuses `stop`/`restart`) and the hub-driven upgrade (which refuses the upgrade itself). They used to
+ * disagree in the worst possible way - the remote path had no notion of busy at all, so it installed the
+ * new package and only then hit `guardBusy` on the restart it could no longer avoid, leaving the package
+ * on disk ahead of the running process with no way to reconcile the two.
+ */
+export function inFlightJobsNow(deps: Partial<ServiceDeps> = {}): JobLedgerEntry[] {
+  const d = { ...defaultDeps(), ...deps };
+  const live = liveNodePid(d);
+  return live === undefined ? [] : d.inFlightJobs().filter((j) => j.nodePid === live);
+}
+
+/**
  * Refuse to take down a node that is in the middle of something, unless told to anyway.
  *
  * The job ledger is the node's own record of what it is running right now (it is what lets a crashed node
@@ -958,10 +976,7 @@ export async function runNodeRestart(
  * about first. Returns an exit code to fail with, or undefined when it is safe to proceed.
  */
 function guardBusy(d: ServiceDeps, force: boolean, verb: string): number | undefined {
-  const live = liveNodePid(d);
-  // Only jobs owned by the node that is actually running count. An entry left behind by a process that has
-  // since died is a leftover the next boot will reconcile, not work we would be interrupting.
-  const jobs = live === undefined ? [] : d.inFlightJobs().filter((j) => j.nodePid === live);
+  const jobs = inFlightJobsNow(d);
   if (jobs.length === 0) return undefined;
 
   if (force) {

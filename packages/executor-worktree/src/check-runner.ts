@@ -16,12 +16,14 @@
  *
  * ## Why `spawn`, not `execFileSync`
  *
- * The two existing shell paths on the node - `runRepoSetup` and the stage-exit hooks - are both
- * synchronous. That is tolerable for a dependency install at stage entry; it is NOT tolerable here. A
- * check stage runs `pnpm test`, which can take minutes, and `execFileSync` would block the event loop
+ * A check stage runs `pnpm test`, which can take minutes, and `execFileSync` would block the event loop
  * for the whole of it: no WebSocket heartbeat (so the hub's lease reaper would consider this node
  * dead), no progress frames, no trace streaming, and every other run sharing this node stalled behind
  * it. So each check is an async `spawn` with streaming capture.
+ *
+ * This header used to note that `runRepoSetup` was synchronous and call that "tolerable for a
+ * dependency install at stage entry". It was not: the same starvation took down live runs, and
+ * `runRepoSetup` is now async for exactly the reason stated here.
  *
  * ## Trust
  *
