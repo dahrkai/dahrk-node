@@ -313,10 +313,23 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
       // and a version string - which is what makes it safe to send from a machine we do not own. Suppressed
       // entirely when the operator set DAHRK_TELEMETRY=off; an older hub simply ignores the extra field.
       const health = shipper?.current().health ?? telemetryCeiling.health;
+      // What we are EXECUTING right now, on every beat, so the hub can keep a still-running stage
+      // assigned to this node even after a socket flap. Saying it every beat - rather than only on
+      // reconnect - is the point: a node whose socket drops repeatedly during a long stage is exactly
+      // the case that needs it.
+      //
+      // NOT gated on `telemetry.health`: this is liveness, not telemetry. These are opaque job ids the
+      // hub itself dispatched here - no paths, no repo names, nothing it does not already know - so
+      // turning telemetry off must not quietly put a healthy run at risk.
+      //
+      // `running` (not the limiter) is the right source: a stage is still ours while it queues for a
+      // slot, and omitting it there would let the hub treat it as no longer running.
+      const inFlightJobIds = [...running.keys()];
       send(
         health
           ? {
               type: "heartbeat",
+              inFlightJobIds,
               health: collectHealth({
                 counters,
                 // Occupancy is the live slot count, not `running.size`: that ledger also holds queued
@@ -328,7 +341,7 @@ export async function startEdgeNode(opts: EdgeOptions): Promise<void> {
                 worktreesDir: gitService.worktreesDir,
               }),
             }
-          : { type: "heartbeat" },
+          : { type: "heartbeat", inFlightJobIds },
       );
       if (sock.readyState === WebSocket.OPEN) sock.ping();
     }, intervalMs);
