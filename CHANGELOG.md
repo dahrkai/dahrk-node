@@ -14,6 +14,7 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 ### Added
 
 - A node's heartbeat now reports which stages it is executing, so a brief disconnection no longer risks a running stage. (#225)
+- A finished stage now reports input, output and cached token counts in its trace metadata alongside the cost figure.
 
 ## [0.4.8] - 2026-08-14
 

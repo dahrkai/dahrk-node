@@ -19,8 +19,8 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
-import { consumeClaudeMessage, newBufferState, type BufferState } from "./claude-mappers.js";
+import type { JobStatus, Runner, RunnerContext, TraceMeta } from "@dahrk/contracts";
+import { consumeClaudeMessage, mapUsage, newBufferState, type BufferState } from "./claude-mappers.js";
 import {
   HANDED_BACK_ARTIFACT_PATH,
   makeEmit,
@@ -321,6 +321,8 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
   let active: ClaudeSessionLike | undefined;
   let sessionId: string | undefined;
   let costUsd: number | undefined;
+  // The raw `usage` off the settling result message, mapped to the contract shape on read (DHK-1232).
+  let usageRaw: Record<string, number> | undefined;
 
   const baseOptions = (ctx: RunnerContext): Options => ({
     cwd: ctx.workspace.worktreePath,
@@ -380,6 +382,11 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
     const found = sessionIdOf(msg);
     if (found) sessionId = found;
     if (msg.type === "result" && typeof msg.total_cost_usd === "number") costUsd = msg.total_cost_usd;
+    // The result message carries the turn's token usage beside the cost; capture it for `usage()`.
+    if (msg.type === "result") {
+      const u = (msg as unknown as { usage?: Record<string, number> }).usage;
+      if (u) usageRaw = u;
+    }
     const rawRef = ctx.writeRaw?.(msg);
     // A message arrived, so the runtime is alive - report that BEFORE normalisation (DHK-1136).
     // `consumeClaudeMessage` maps `system` / `stream_event` / `rate_limit_event` to zero events, so a
@@ -485,6 +492,11 @@ export function createClaudeRunner(deps: ClaudeRunnerDeps = {}): Runner & PreExe
       },
       cost(): number | undefined {
         return costUsd;
+      },
+      usage(): TraceMeta["usage"] | undefined {
+        // `mapUsage` maps the SDK's split cache counters (`cache_read_input_tokens` -> cacheRead,
+        // `cache_creation_input_tokens` -> cacheCreate); absent when no result message was seen.
+        return usageRaw ? mapUsage(usageRaw) : undefined;
       },
       dispose(): void {
         if (!mode.interactive) return;

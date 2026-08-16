@@ -12,10 +12,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { JobProgress, JobRequest, PushJob, Runner, RunnerContext, Runtime, TraceEvent, TraceMeta } from "@dahrk/contracts";
+import type { JobProgress, JobRequest, JobResult, PushJob, Runner, RunnerContext, Runtime, TraceEvent, TraceMeta } from "@dahrk/contracts";
 import { REFUSED_CREDENTIAL_SUMMARY, createGitService, createMockRunner, type PreExecutionCapability } from "@dahrk/executor-worktree";
 import {
   createStageRunner,
@@ -165,6 +165,119 @@ forBothRuntimes("a telemetry-only Job (no workspaceRef) runs in scratch with no 
     assert.equal((streamed[streamed.length - 1] as { event: string }).event, "stage-exit");
     assert.ok(finalised, "a finalised frame is sent");
     assert.equal(finalised.meta.status, "ok");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A batch runner that settles ok and reports a fixed cost and (optionally) a fixed token usage,
+ *  so the finalise path can be exercised without a real adapter (DHK-1232). */
+const usageReportingRunner =
+  (usage?: TraceMeta["usage"]) =>
+  (runtime: Runtime): Runner => ({
+    runtime,
+    async runBatch(_ctx, onTrace) {
+      onTrace({ seq: 0, runtime, type: "response", ts: new Date().toISOString(), text: "done" });
+      return { status: "ok", summary: "done", costUsd: 0.07, ...(usage ? { usage } : {}) } as Omit<
+        JobResult,
+        "jobId"
+      >;
+    },
+    async runInteractive() {
+      return { status: "ok", summary: "done" } as Omit<JobResult, "jobId">;
+    },
+    async summarise() {
+      return "done";
+    },
+    async cancel() {},
+  });
+
+/** Read the single finalised meta.json a batch run wrote under its scratch traces dir. */
+const readMetaJson = (scratchRoot: string, runId: string): TraceMeta => {
+  const base = join(scratchRoot, runId, ".dahrk", "scratch", "traces");
+  const walk = (dir: string): string | undefined => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = walk(p);
+        if (found) return found;
+      } else if (entry.name === "meta.json") return p;
+    }
+    return undefined;
+  };
+  const metaPath = walk(base);
+  assert.ok(metaPath, "a finalised meta.json was written");
+  return JSON.parse(readFileSync(metaPath, "utf8")) as TraceMeta;
+};
+
+const usageJob = (runtime: Runtime): JobRequest => ({
+  tenantId: "t_platform",
+  runId: "run-usage-1",
+  stageId: "diagnose",
+  jobId: "job-usage-1",
+  awakeableId: "awk-usage",
+  executorType: "worktree",
+  agentConfig: { runtime, interaction: "batch", tools: ["shell"] },
+  issueContext: "# Telemetry\n\nRun health: degraded.",
+  timeout: 60,
+});
+
+forBothRuntimes("DHK-1232: a finished stage's finalised trace metadata carries usage beside cost", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-usage-"));
+  const scratchRoot = join(root, "scratch");
+  let finalised: { meta: TraceMeta } | undefined;
+  const sink: TraceSink = {
+    event: () => undefined,
+    finalised: (f) => void (finalised = { meta: f.meta }),
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+  const usage = { input: 120, output: 45, cacheRead: 30, cacheCreate: 12 };
+  const runner = createStageRunner({
+    gitService: { createWorktree: () => assert.fail("no worktree"), teardownWorktree: async () => undefined } as never,
+    makeRunner: usageReportingRunner(usage),
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+    scratchRoot,
+  });
+
+  try {
+    const result = await runner.runJob(usageJob(runtime));
+    assert.equal(result.status, "ok");
+    assert.ok(finalised);
+    assert.equal(finalised.meta.costUsd, 0.07, "the cost figure is unchanged");
+    assert.deepEqual(finalised.meta.usage, usage, "the shipped trace metadata carries the token breakdown");
+    assert.deepEqual(readMetaJson(scratchRoot, "run-usage-1").usage, usage, "the on-disk meta.json carries it too");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+forBothRuntimes("DHK-1232: a stage whose runner reports no usage leaves usage absent from the metadata", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-nousage-"));
+  const scratchRoot = join(root, "scratch");
+  let finalised: { meta: TraceMeta } | undefined;
+  const sink: TraceSink = {
+    event: () => undefined,
+    finalised: (f) => void (finalised = { meta: f.meta }),
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+  const runner = createStageRunner({
+    gitService: { createWorktree: () => assert.fail("no worktree"), teardownWorktree: async () => undefined } as never,
+    makeRunner: usageReportingRunner(), // runner reports no usage
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+    scratchRoot,
+  });
+
+  try {
+    const result = await runner.runJob(usageJob(runtime));
+    assert.equal(result.status, "ok");
+    assert.ok(finalised);
+    assert.equal(finalised.meta.costUsd, 0.07, "the cost figure is still reported");
+    assert.ok(!("usage" in finalised.meta), "no usage key, so absent stays distinct from a genuine zero");
+    assert.ok(!("usage" in readMetaJson(scratchRoot, "run-usage-1")), "and the on-disk meta.json omits it too");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

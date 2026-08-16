@@ -13,6 +13,7 @@ import type {
   Runtime,
   RunnerContext,
   TraceEvent,
+  TraceMeta,
 } from "@dahrk/contracts";
 
 /** Distributive Omit: a plain `Omit<Union, K>` collapses to the union's common keys and
@@ -118,6 +119,9 @@ export interface RuntimeSession {
   summariseTurn(): Promise<string>;
   /** The stage's aggregate dollar cost, or `undefined` when the run cannot be priced (never a `0`). */
   cost(): number | undefined;
+  /** The stage's aggregate token usage (input/output/cache), or `undefined` when the runtime reports
+   *  none - so an absent usage stays distinguishable from a genuine all-zero one. */
+  usage(): TraceMeta["usage"] | undefined;
   /** Release the session's resources. */
   dispose(): void;
 }

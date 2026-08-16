@@ -939,6 +939,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           handedBackDoc?: { path: string; content: string },
           failureClass?: FailureClass,
           verifications?: StageVerification[],
+          usage?: TraceMeta["usage"],
         ): Promise<JobResult> => {
           active.delete(jobId);
           turnQueues.delete(jobId);
@@ -955,12 +956,18 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "stage-exit", status }),
           );
           const endedAt = nowIso();
-          writer.finalise({ status, endedAt, ...(sessionId ? { sessionId } : {}) });
+          writer.finalise({
+            status,
+            endedAt,
+            ...(sessionId ? { sessionId } : {}),
+            ...(usage !== undefined ? { usage } : {}),
+          });
           writeScratchState(ref!, job, attempt, status);
           const finalMeta: TraceMeta = {
             ...meta, status, endedAt,
             ...(sessionId ? { sessionId } : {}),
             ...(costUsd !== undefined ? { costUsd } : {}),
+            ...(usage !== undefined ? { usage } : {}),
           };
           // The single most important best-effort path on the node. If this fails the hub ends up with
           // no finalised trace for the stage - the entire forensic record of what the agent did - and
@@ -1370,7 +1377,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
         // Interactive stages run a multi-turn conversation fed by relayed human turns (M5b);
         // batch stages run to a terminal result. Both emit through the same onTrace.
         const interactive = agentConfig?.interaction === "interactive";
-        let result: Omit<JobResult, "jobId" | "summary"> & { summary?: string };
+        let result: Omit<JobResult, "jobId" | "summary"> & { summary?: string; usage?: TraceMeta["usage"] };
         // Wall-clock kill (the contract `JobRequest.timeout` promises "on expiry the executor kills the
         // runner; the engine marks the stage timeout"). Enforce it here so it covers batch AND interactive
         // for both adapters: at the deadline we abort the runner via cancel() and force status `timeout`.
@@ -1556,6 +1563,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
           result.artifact,
           failureClass,
           result.verifications,
+          result.usage,
         );
       } finally {
         inFlight.set(runId, Math.max(0, (inFlight.get(runId) ?? 1) - 1));

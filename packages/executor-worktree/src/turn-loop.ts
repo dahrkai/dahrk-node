@@ -13,6 +13,7 @@ import type {
   JobResult,
   JobStatus,
   RunnerContext,
+  TraceMeta,
 } from "@dahrk/contracts";
 import { interactiveSeedText, resolveStagePrompt } from "./prompt-assembly.js";
 import { createElicitTurnRouter, elicitOutcomeReply } from "./elicit-router.js";
@@ -128,7 +129,7 @@ export async function runInteractiveLoop(
   emit: RuntimeSessionHooks["emit"],
   makeSession: RuntimeSessionFactory,
   opts: InteractiveLoopOptions,
-): Promise<Omit<JobResult, "jobId">> {
+): Promise<Omit<JobResult, "jobId"> & { usage?: TraceMeta["usage"] }> {
   const { signal, cancelled, cancel, instructionInSystemPrompt } = opts;
   // Default to `either`, not `gate` (DHK-363): with `gate` the stage-complete tool is disabled, so an
   // interactive stage can only end `ok` if the human happens to type "allow"/"approve" - a keyword
@@ -249,6 +250,7 @@ export async function runInteractiveLoop(
   }
 
   const costUsd = session.cost();
+  const usage = session.usage();
   const sessionId = session.sessionId;
   const outArtifact = status === "ok" ? artifact : undefined;
   return {
@@ -257,8 +259,9 @@ export async function runInteractiveLoop(
     ...(runtimeFailure ? { failureClass: runtimeFailure.failureClass } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(usage !== undefined ? { usage } : {}),
     ...(outArtifact ? { artifact: outArtifact } : {}),
-  } as Omit<JobResult, "jobId">;
+  } as Omit<JobResult, "jobId"> & { usage?: TraceMeta["usage"] };
 }
 
 /**
@@ -367,7 +370,7 @@ export async function runBatchLoop(
   ctx: RunnerContext,
   hooks: RuntimeSessionHooks,
   opts: { cancelled: () => boolean },
-): Promise<Omit<JobResult, "jobId" | "summary"> & { summary?: string }> {
+): Promise<Omit<JobResult, "jobId" | "summary"> & { summary?: string; usage?: TraceMeta["usage"] }> {
   let status: JobStatus = "ok";
   let failureClass: FailureClass | undefined;
   let summary: string | undefined;
@@ -386,6 +389,7 @@ export async function runBatchLoop(
   }
   if (opts.cancelled()) status = "fail";
   const costUsd = session.cost();
+  const usage = session.usage();
   const sessionId = session.sessionId;
   return {
     status,
@@ -393,5 +397,6 @@ export async function runBatchLoop(
     ...(failureClass ? { failureClass } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(usage !== undefined ? { usage } : {}),
   };
 }
