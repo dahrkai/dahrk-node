@@ -35,7 +35,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform as osPlatform, userInfo } from "node:os";
 import { join } from "node:path";
-import { fileJobLedger, jobLedgerFile, type JobLedgerEntry } from "@dahrk/edge";
+import { fileJobLedger, jobLedgerFile, type JobLedgerEntry, MAX_CONCURRENT_STAGES_ENV } from "@dahrk/edge";
 import { isAlive as pidIsAlive, parseLock } from "./lock.js";
 import { lockFile as resolveLockFile, logDir as resolveLogDir, stateDir as resolveStateDir } from "./state.js";
 import { dim, hint, hints, humanDuration, kv, out as uiOut, verdict } from "./ui.js";
@@ -140,6 +140,12 @@ export interface PlanInputs {
    *  npm-global bins, and `git` is the one host tool a run genuinely cannot proceed without. Unset
    *  omits it. */
   pathEnv?: string;
+  /** The operator's stage-concurrency override (`DAHRK_MAX_CONCURRENT_STAGES`), snapshot from their shell
+   *  the same way `pathEnv` is. Carried here for one reason: the unit is the ONLY place the supervised
+   *  node reads its environment from, and the self-heal rewrites that unit from these inputs. Without a
+   *  field here a hand-added key is not just fragile, it is actively erased by the next ordinary `start`.
+   *  Unset omits it, leaving the node on its CPU-derived default. */
+  maxConcurrentStages?: string;
   homeDir: string;
   /** Directory launchd writes stdout/stderr logs to (systemd uses the journal). */
   logDir: string;
@@ -202,8 +208,8 @@ export function serviceArgv(inputs: PlanInputs): string[] {
   return [inputs.nodeBin, inputs.scriptPath, "start", "--foreground"];
 }
 
-/** The environment the service exports: any explicit hub-url / name overrides, and the operator's PATH
- *  (so the node finds git + the runtime CLIs under a supervisor's minimal PATH).
+/** The environment the service exports: any explicit hub-url / name overrides, the operator's stage-cap
+ *  override, and their PATH (so the node finds git + the runtime CLIs under a supervisor's minimal PATH).
  *
  *  Note what is NOT here: `DAHRK_ENROL_TOKEN`. The daemon reads its token from `~/.dahrk/node.json`, which
  *  is the only place re-enrolment can write to. See the header - a token in here outranks the disk and can
@@ -217,6 +223,12 @@ function serviceEnv(inputs: PlanInputs): Record<string, string> {
     DAHRK_SUPERVISED: "1",
     ...(inputs.hubUrl ? { DAHRK_HUB_URL: inputs.hubUrl } : {}),
     ...(inputs.name ? { DAHRK_NODE_NAME: inputs.name } : {}),
+    // Passed through unvalidated on purpose: `resolveMaxConcurrentStages` already discards anything that
+    // is not a positive integer in favour of the CPU-derived default, so a typo here costs the operator
+    // their override and nothing else. Validating twice would only add a way to refuse to start.
+    ...(inputs.maxConcurrentStages
+      ? { [MAX_CONCURRENT_STAGES_ENV]: inputs.maxConcurrentStages }
+      : {}),
     ...(inputs.pathEnv ? { PATH: inputs.pathEnv } : {}),
   };
 }
@@ -614,9 +626,16 @@ export interface ServiceDeps {
   /** What the node is running right now, from its on-disk ledger (`~/.dahrk/jobs.json`). Drives the guard
    *  that stops `stop` / `restart` silently killing a stage mid-flight. */
   inFlightJobs: () => JobLedgerEntry[];
-  /** This process's environment, for the one question it is authoritative about: `DAHRK_SUPERVISED=1` says
-   *  we ARE the supervised job, because our own units set it and nothing else does. `restart` needs that to
-   *  know it must not try to stop itself. */
+  /** This process's environment. Two things are read from it: `DAHRK_SUPERVISED=1`, the one question it is
+   *  authoritative about (we ARE the supervised job, because our own units set it and nothing else does -
+   *  `restart` needs that to know it must not try to stop itself), and `DAHRK_MAX_CONCURRENT_STAGES`,
+   *  snapshot into the unit at install / self-heal time exactly as `pathEnv` is.
+   *
+   *  ponytail: the stage cap is only as durable as the shell that last ran `start`. Absent from that
+   *  environment, the unit is re-rendered without it and the node silently returns to its CPU-derived
+   *  default, so the override belongs in a shell rc file, not a one-off `export`. If that proves too
+   *  sharp an edge, persist it in `~/.dahrk/node.json` behind a `--max-concurrent-stages` flag the way
+   *  the node id is, and read it from there instead. */
   env: NodeJS.ProcessEnv;
   out: (line: string) => void;
 }
@@ -685,6 +704,9 @@ export async function runServiceInstall(
     scriptPath: d.scriptPath,
     ...(inputs.name ? { name: inputs.name } : {}),
     ...(inputs.hubUrl ? { hubUrl: inputs.hubUrl } : {}),
+    ...(d.env[MAX_CONCURRENT_STAGES_ENV]
+      ? { maxConcurrentStages: d.env[MAX_CONCURRENT_STAGES_ENV] }
+      : {}),
     ...(d.pathEnv ? { pathEnv: d.pathEnv } : {}),
     homeDir: d.homeDir,
     logDir: d.logDir,
@@ -826,6 +848,9 @@ export async function runNodeStart(
     scriptPath: d.scriptPath,
     ...(inputs.name ? { name: inputs.name } : {}),
     ...(inputs.hubUrl ? { hubUrl: inputs.hubUrl } : {}),
+    ...(d.env[MAX_CONCURRENT_STAGES_ENV]
+      ? { maxConcurrentStages: d.env[MAX_CONCURRENT_STAGES_ENV] }
+      : {}),
     ...(d.pathEnv ? { pathEnv: d.pathEnv } : {}),
     homeDir: d.homeDir,
     logDir: d.logDir,

@@ -105,6 +105,19 @@ test("bakes the operator's PATH into the env block so the daemon finds git + run
   assert.doesNotMatch(renderSystemdUnit({ ...BASE, manager: "systemd" }), /Environment=PATH=/);
 });
 
+test("carries the operator's stage-cap override into the env block, and omits it when unset", () => {
+  // The whole point: the unit is the only environment a supervised node has, and the self-heal rewrites
+  // that unit from these inputs. A cap that is not rendered here is a cap the node never sees.
+  const plist = renderLaunchdPlist({ ...BASE, maxConcurrentStages: "4" });
+  assert.match(plist, /<key>DAHRK_MAX_CONCURRENT_STAGES<\/key>\s*<string>4<\/string>/);
+  const unit = renderSystemdUnit({ ...BASE, manager: "systemd", maxConcurrentStages: "4" });
+  assert.match(unit, /Environment=DAHRK_MAX_CONCURRENT_STAGES=4/);
+  // Unset omits the key rather than exporting an empty one, which `resolveMaxConcurrentStages` would
+  // discard anyway - but an empty key in the unit makes the self-heal diff noisier for no gain.
+  assert.doesNotMatch(renderLaunchdPlist(BASE), /DAHRK_MAX_CONCURRENT_STAGES/);
+  assert.doesNotMatch(renderSystemdUnit({ ...BASE, manager: "systemd" }), /DAHRK_MAX_CONCURRENT_STAGES/);
+});
+
 test("buildPlan: launchd path + launchctl load/unload commands", () => {
   const plan = buildPlan(BASE);
   assert.equal(plan.filePath, `/Users/me/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`);

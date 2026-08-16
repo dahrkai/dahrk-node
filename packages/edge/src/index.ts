@@ -58,3 +58,4 @@ export { scrubString, scrubValue, REDACTED } from "./redact.js";
 export { collectHealth, diskFreeBytes, HealthCounters } from "./health.js";
 export { ceilingFromEnv, LogShipper, shipperStream } from "./log-shipper.js";
 export type { LogShipperOptions, ShipSend } from "./log-shipper.js";
+export { MAX_CONCURRENT_STAGES_ENV } from "./concurrency.js";

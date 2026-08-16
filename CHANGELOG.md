@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Changed
+
+- The always-on service now carries `DAHRK_MAX_CONCURRENT_STAGES` through from your shell, so a raised stage cap survives a restart.
+
 ## [0.4.9] - 2026-08-16
 
 ### Added
