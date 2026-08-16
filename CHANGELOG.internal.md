@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-08-16
+
 ### Fixed
 
 - **`runRepoSetup` is async (DHK-1207 follow-up).** It used `spawnSync` with a 600s cap, blocking the
@@ -43,9 +45,24 @@ this file is left verbatim.
   equivalent: an operator at a terminal can decide a run is worth killing, a hub noticing a release
   cannot. The hub reads `accepted:false` on a drivable channel as its new `refused` outcome.
 
-The paired `inFlightJobIds` heartbeat change is held back on
-`feat/heartbeat-in-flight-jobs` until `@dahrk/contracts` 0.23.0 publishes — it cannot compile against
-the pinned 0.21.0, and holding these two independent fixes behind it would block them for nothing.
+### Added
+
+- The paired `inFlightJobIds` heartbeat change has landed (#225), no longer held back on
+  `feat/heartbeat-in-flight-jobs`. `ws-client.ts` now names the executing stages on every heartbeat
+  frame, so the hub can renew the dispatch lease per stage rather than inferring liveness from the
+  socket alone; a brief reconnect no longer risks a stage the node is still working. Unblocked by the
+  `@dahrk/contracts` bump that types the field.
+
+### Changed
+
+- `@dahrk/contracts` catalogue pin moves `0.23.0` -> `0.25.0` (#227). Pre-1.0, so a caret cannot cross
+  the minor and the daily job opens the bump by hand; catalogue entry and lockfile only.
+- `@earendil-works/pi-coding-agent` moves `0.84.1` -> `0.84.2` (#223). Routine runtime bump; the
+  matching `pi-ai` bump and catalogue regeneration landed in the harness first, since
+  `scripts/check-pi-pin.mjs` reads `PI_CATALOG_VERSION` from the published contracts package.
+- The shared-kernel block in `CONTEXT.md` is re-synced from the workspace root (#226), adding the
+  Admission slot, Role, Model profile and Route glossary entries. Mechanical output of
+  `scripts/sync-context.sh`; no repo-specific language changed.
 
 ## [0.4.8] - 2026-08-14
 

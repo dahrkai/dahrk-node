@@ -6,14 +6,16 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
-### Fixed
-
-- Repository setup no longer blocks the node while it runs, so a long install cannot make a busy node look unresponsive. (#224)
-- A node now declines a remote update while it is running stages, instead of installing one it cannot restart into. (#224)
+## [0.4.9] - 2026-08-16
 
 ### Added
 
 - A node's heartbeat now reports which stages it is executing, so a brief disconnection no longer risks a running stage. (#225)
+
+### Fixed
+
+- Repository setup no longer blocks the node while it runs, so a long install cannot make a busy node look unresponsive. (#224)
+- A node now declines a remote update while it is running stages, instead of installing one it cannot restart into. (#224)
 
 ## [0.4.8] - 2026-08-14
 
@@ -698,7 +700,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/dahrkai/dahrk-node/compare/v0.4.5...v0.4.6
