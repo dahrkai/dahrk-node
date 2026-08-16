@@ -24,6 +24,27 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-08-16
+
+### Added
+
+- **Token counts in the stage trace (#229).** Both runner adapters already captured provider usage and
+  discarded it before writing the final stage summary; `runtime-session.ts` now carries it through
+  `turn-loop.ts` into `stage-runner.ts`. The contracts type already had the fields, so no bump was
+  needed. Counts are omitted rather than zeroed when a provider reports none, so "no usage data" and
+  "genuinely zero" stay distinguishable downstream.
+
+### Fixed
+
+- **`DAHRK_MAX_CONCURRENT_STAGES` reaches a supervised node (#230).** Documented as the concurrency
+  knob since 0.4.5, but the service unit exports a fixed variable set, so it only ever worked for a
+  foreground node. Editing the unit by hand did not stick either: `start` compares the unit on disk
+  against what it would render today and rewrites on any difference, silently dropping the key.
+  It is now snapshot from the environment at install and start time, the same way `PATH` is. Passed
+  through unvalidated on purpose — a non-integer already falls back to the CPU-derived default, so a
+  typo costs the operator their override and nothing more. The existing byte-identical-render test
+  still pins the unit for identical inputs.
+
 ## [0.4.9] - 2026-08-16
 
 ### Fixed
