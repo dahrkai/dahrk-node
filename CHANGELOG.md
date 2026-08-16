@@ -6,16 +6,21 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-08-16
+
+### Added
+
+- A finished stage now reports input, output and cached token counts in its trace metadata alongside the cost figure. (#229)
+
 ### Changed
 
-- The always-on service now carries `DAHRK_MAX_CONCURRENT_STAGES` through from your shell, so a raised stage cap survives a restart.
+- The always-on service now carries `DAHRK_MAX_CONCURRENT_STAGES` through from your shell, so a raised stage cap survives a restart. (#230)
 
 ## [0.4.9] - 2026-08-16
 
 ### Added
 
 - A node's heartbeat now reports which stages it is executing, so a brief disconnection no longer risks a running stage. (#225)
-- A finished stage now reports input, output and cached token counts in its trace metadata alongside the cost figure.
 
 ### Fixed
 
@@ -705,7 +710,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.10...HEAD
+[0.4.10]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/dahrkai/dahrk-node/compare/v0.4.6...v0.4.7
