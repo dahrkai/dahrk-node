@@ -18,8 +18,8 @@
  * import so the build does not hard-depend on a live Pi install.
  */
 import { join } from "node:path";
-import type { JobStatus, Runner, RunnerContext } from "@dahrk/contracts";
-import { consumePiEvent, newPiBufferState, type PiEvent } from "./pi-mappers.js";
+import type { JobStatus, Runner, RunnerContext, TraceMeta } from "@dahrk/contracts";
+import { consumePiEvent, mapUsage, newPiBufferState, type PiEvent } from "./pi-mappers.js";
 import {
   readAuthHint,
   applyApiKeyAuth,
@@ -140,10 +140,13 @@ export interface PiSessionLike {
   /**
    * Aggregate stats over ALL session entries. Pi computes the dollar figure actually billed
    * (`SessionStats.cost`), so the adapter reports it as the stage's `costUsd` rather than the
-   * silent `$0` that leaves the hub's `cost_budget` policy inert (DHK-434). Optional: a minimal
-   * or older session may omit it, in which case no cost is reported (never a fabricated `0`).
+   * silent `$0` that leaves the hub's `cost_budget` policy inert (DHK-434). `tokens` is the aggregate
+   * token breakdown the stage reports as `usage` (DHK-1232). Both optional and read as a structural
+   * forward-compat subset of the real `SessionStats`: a minimal or older session may omit either.
    */
-  getSessionStats?(): { cost?: number } | undefined;
+  getSessionStats?():
+    | { cost?: number; tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
+    | undefined;
   /** Live agent state; `state.tools` is replaced to deny tools for the summarise turn. */
   readonly agent?: { readonly state: { tools: unknown[] } };
   /**
@@ -519,6 +522,12 @@ function makePiRuntimeSession(
     cost(): number | undefined {
       const cost = s.getSessionStats?.()?.cost;
       return typeof cost === "number" ? cost : undefined;
+    },
+    usage(): TraceMeta["usage"] | undefined {
+      // `mapUsage` maps Pi's `cacheWrite` (its cache-creation counter) onto the contract's
+      // `cacheCreate`; absent when the session reports no `tokens` at all (DHK-1232).
+      const tokens = s.getSessionStats?.()?.tokens;
+      return tokens ? mapUsage(tokens) : undefined;
     },
     dispose(): void {
       s.dispose();

@@ -72,12 +72,22 @@ class FakePiSession implements PiSessionLike {
   blocked: { toolName: string; reason?: string }[] = [];
   /** The aggregate session cost Pi would report; `undefined` models a session that cannot price a run. */
   cost: number | undefined;
+  /** The aggregate token counts Pi would report; `undefined` models a session that reports none. */
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined;
   private listeners: Array<(e: PiEvent) => void> = [];
-  constructor(private readonly scripts: ScriptStep[], cost?: number) {
+  constructor(
+    private readonly scripts: ScriptStep[],
+    cost?: number,
+    tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number },
+  ) {
     this.cost = cost;
+    this.tokens = tokens;
   }
-  getSessionStats(): { cost?: number } {
-    return { cost: this.cost };
+  getSessionStats(): {
+    cost?: number;
+    tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  } {
+    return { cost: this.cost, ...(this.tokens ? { tokens: this.tokens } : {}) };
   }
   subscribe(listener: (e: PiEvent) => void): () => void {
     this.listeners.push(listener);
@@ -309,6 +319,28 @@ test("DHK-434 runBatch: a session that cannot price a run omits costUsd (never a
   assert.equal(result.status, "ok");
   assert.equal(result.costUsd, undefined, "no cost is reported rather than a misleading 0");
   assert.ok(!("costUsd" in result), "the key is omitted entirely, so the hub reads 'not reported', not '$0'");
+});
+
+test("DHK-1232 runBatch: reports the session's token usage alongside costUsd", async () => {
+  const fake = new FakePiSession([STAGE_SCRIPT], 0.0421, {
+    input: 120,
+    output: 45,
+    cacheRead: 30,
+    cacheWrite: 12,
+  });
+  const result = await createPiRunner({ createSession: async () => fake }).runBatch(ctx(), () => {});
+  assert.equal(result.status, "ok");
+  assert.equal(result.costUsd, 0.0421, "the cost figure is unchanged");
+  // Pi's cache-creation counter is `cacheWrite`; it maps onto the contract's `cacheCreate`.
+  assert.deepEqual(result.usage, { input: 120, output: 45, cacheRead: 30, cacheCreate: 12 });
+});
+
+test("DHK-1232 runBatch: a session that reports no token counts omits usage entirely", async () => {
+  const fake = new FakePiSession([STAGE_SCRIPT], 0.0421); // tokens undefined
+  const result = await createPiRunner({ createSession: async () => fake }).runBatch(ctx(), () => {});
+  assert.equal(result.status, "ok");
+  assert.equal(result.usage, undefined, "no usage object rather than a fabricated all-zero one");
+  assert.ok(!("usage" in result), "the key is omitted entirely, so absent stays distinct from genuine zero");
 });
 
 test("runBatch: a runtime failure settles status fail with an error event", async () => {

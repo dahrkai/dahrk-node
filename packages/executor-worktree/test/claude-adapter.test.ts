@@ -32,18 +32,24 @@ const cm = (x: unknown): SDKMessage => x as SDKMessage;
 const asst = (text: string, sessionId = "claude-sess-1"): SDKMessage =>
   cm({ type: "assistant", session_id: sessionId, message: { role: "assistant", content: [{ type: "text", text }] } });
 
-/** A turn-settling `result` message: `subtype` decides ok/fail, `total_cost_usd` feeds costUsd, and
- *  `result` is the text the batch `summarise()` reads. */
+/** A turn-settling `result` message: `subtype` decides ok/fail, `total_cost_usd` feeds costUsd,
+ *  `usage` feeds the token breakdown, and `result` is the text the batch `summarise()` reads. */
 const resultMsg = (
-  over: { status?: "ok" | "fail"; cost?: number; sessionId?: string; text?: string } = {},
+  over: {
+    status?: "ok" | "fail";
+    cost?: number;
+    sessionId?: string;
+    text?: string;
+    usage?: Record<string, number>;
+  } = {},
 ): SDKMessage => {
-  const { status = "ok", cost, sessionId = "claude-sess-1", text = "" } = over;
+  const { status = "ok", cost, sessionId = "claude-sess-1", text = "", usage = {} } = over;
   return cm({
     type: "result",
     subtype: status === "ok" ? "success" : "error_during_execution",
     session_id: sessionId,
     ...(cost !== undefined ? { total_cost_usd: cost } : {}),
-    usage: {},
+    usage,
     duration_ms: 1,
     result: text,
   });
@@ -304,6 +310,31 @@ test("runBatch: settles ok and surfaces the session's sessionId and costUsd", as
   assert.equal(out.sessionId, "claude-sess-1");
   assert.equal(out.costUsd, 0.04);
   assert.match(fake.prompts[0] ?? "", /Fix the failing tests\./, "resolveStagePrompt folds in the ticket brief");
+});
+
+test("DHK-1232 runBatch: reports the result message's token usage alongside costUsd", async () => {
+  const fake = new FakeClaudeSession([
+    [
+      asst("Ran the tests."),
+      resultMsg({
+        cost: 0.04,
+        usage: {
+          input_tokens: 120,
+          output_tokens: 45,
+          cache_read_input_tokens: 30,
+          cache_creation_input_tokens: 12,
+        },
+      }),
+    ],
+  ]);
+  const runner = createClaudeRunner({ createSession: (init) => fake.bind(init) });
+
+  const out = await runner.runBatch(ctxBatch(), () => {});
+
+  assert.equal(out.costUsd, 0.04, "the cost figure is unchanged");
+  // The SDK's split cache counters map onto the contract's two fields:
+  // cache_read_input_tokens -> cacheRead, cache_creation_input_tokens -> cacheCreate.
+  assert.deepEqual(out.usage, { input: 120, output: 45, cacheRead: 30, cacheCreate: 12 });
 });
 
 test("summarise: reuses the warm session's id and returns the handoff sentence from the result text", async () => {

@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { ElicitQuestion, HumanTurn, RunnerContext } from "@dahrk/contracts";
+import type { ElicitQuestion, HumanTurn, RunnerContext, TraceMeta } from "@dahrk/contracts";
 import { runInteractiveLoop, runBatchLoop, classifyRuntimeError, REFUSED_CREDENTIAL_SUMMARY } from "../src/turn-loop.js";
 import { ManagedMailbox } from "../src/mailbox.js";
 import type {
@@ -33,10 +33,20 @@ class FakeRuntimeSession implements RuntimeSession {
   private readonly queue: TurnResult[];
   private readonly summaryText: string;
   private readonly costValue: number | undefined;
-  constructor(opts: { results?: TurnResult[]; summary?: string; cost?: number; sessionId?: string } = {}) {
+  private readonly usageValue: TraceMeta["usage"] | undefined;
+  constructor(
+    opts: {
+      results?: TurnResult[];
+      summary?: string;
+      cost?: number;
+      sessionId?: string;
+      usage?: TraceMeta["usage"];
+    } = {},
+  ) {
     this.queue = [...(opts.results ?? [])];
     this.summaryText = opts.summary ?? "(fake summary)";
     this.costValue = opts.cost;
+    this.usageValue = opts.usage;
     this.sessionId = opts.sessionId;
   }
   async sendTurn(text: string): Promise<TurnResult> {
@@ -49,6 +59,9 @@ class FakeRuntimeSession implements RuntimeSession {
   }
   cost(): number | undefined {
     return this.costValue;
+  }
+  usage(): TraceMeta["usage"] | undefined {
+    return this.usageValue;
   }
   dispose(): void {
     this.disposed = true;
@@ -66,6 +79,9 @@ class ThrowingRuntimeSession implements RuntimeSession {
     return "(unused)";
   }
   cost(): number | undefined {
+    return undefined;
+  }
+  usage(): TraceMeta["usage"] | undefined {
     return undefined;
   }
   dispose(): void {}
@@ -214,6 +230,25 @@ test("interactive: an unpriced session omits costUsd entirely (never a fabricate
   assert.ok(!("costUsd" in result));
 });
 
+test("interactive: usage() is surfaced onto the result alongside costUsd", async () => {
+  const usage = { input: 120, output: 45, cacheRead: 30, cacheCreate: 12 };
+  const session = new FakeRuntimeSession({ cost: 0.19, usage });
+  const { value } = opts();
+  const result = await runInteractive(session, ctx(), emptyTurns(), value);
+
+  assert.equal(result.costUsd, 0.19);
+  assert.deepEqual(result.usage, usage);
+});
+
+test("interactive: a session reporting no usage omits usage entirely", async () => {
+  const session = new FakeRuntimeSession(); // usage undefined
+  const { value } = opts();
+  const result = await runInteractive(session, ctx(), emptyTurns(), value);
+
+  assert.equal(result.usage, undefined);
+  assert.ok(!("usage" in result));
+});
+
 test("interactive elicit routing: a session that calls hooks.ask mid-turn reaches the router-backed ask handed in at construction", async () => {
   // Proves the loop assembles the router-backed `ask` and hands it to the session via the factory - the
   // seam that used to be a mutated `hooks.ask` field read lazily by the adapters. The fake raises an
@@ -240,6 +275,7 @@ test("interactive elicit routing: a session that calls hooks.ask mid-turn reache
       return "(fake summary)";
     },
     cost: () => undefined,
+    usage: () => undefined,
     dispose: () => {},
   };
   const { value } = opts();
