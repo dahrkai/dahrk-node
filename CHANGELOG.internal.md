@@ -24,6 +24,33 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A node running as PID 1 waited for ever at the update prompt (DHK-1300, #233).** A managed guest
+  boots with `exec dahrk start` as PID 1 and `console=ttyS0`, so both ends of its stdio are a genuine
+  TTY. `isInteractive` was `stdin.isTTY && stdout.isTTY`, which said a human was watching; nobody was.
+  The node printed `Update now? [Y/n]` and blocked on `rl.question` indefinitely.
+
+  Everything the hub saw followed from that: the guest connected, was welcomed, and its socket died
+  about 36ms later with `closeCode: 1006` when nothing serviced it. The close handler never ran,
+  because startup never got past the prompt, so there was no reconnect. The process stayed alive as
+  PID 1 (a dead PID 1 would have panicked the kernel and rebooted the VM, and the guest console shows
+  one boot and zero panics), it logged nothing further, and the guest's TAP interface stayed flat at
+  28 packets: a TLS handshake, a WebSocket upgrade and a close.
+
+  This took down first-party execution entirely on the harness side, because the platform tenant's
+  only node is such a guest. Five admin/debug runs failed to place in 24 hours, plus two others that
+  hit the dead-dispatch backstop for the same reason.
+
+  Two changes. `isInteractive` now also requires `process.pid !== 1`: an init process is a machine's
+  first process, never an operator's shell, and it is checked in one place so no future prompt has to
+  remember. `confirm` is now bounded (60s, defaulting to "no") because `isInteractive` is a heuristic
+  about the world outside the process and will be wrong again somewhere; unbounded, any such mistake
+  becomes a node that is alive, healthy and inert for ever.
+
+  Adds `apps/edge-node/test/ui.test.ts`. There was no coverage of either function, which is how a
+  prompt that can block for ever reached a daemon; the new `confirm` test hung before the fix.
+
 ## [0.4.10] - 2026-08-16
 
 ### Added

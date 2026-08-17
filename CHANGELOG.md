@@ -6,6 +6,11 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A node running as PID 1, in a container or a microVM, no longer stops at the update prompt. (#233)
+- A confirmation prompt now gives up after a minute and proceeds as if declined. (#233)
+
 ## [0.4.10] - 2026-08-16
 
 ### Added
