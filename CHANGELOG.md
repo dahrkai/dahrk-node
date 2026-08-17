@@ -6,6 +6,13 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-08-17
+
+### Fixed
+
+- A node running as PID 1, in a container or a microVM, no longer stops at the update prompt. (#233)
+- A confirmation prompt now gives up after a minute and proceeds as if declined. (#233)
+
 ## [0.4.10] - 2026-08-16
 
 ### Added
@@ -710,7 +717,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.10...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.11...HEAD
+[0.4.11]: https://github.com/dahrkai/dahrk-node/compare/v0.4.10...v0.4.11
 [0.4.10]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/dahrkai/dahrk-node/compare/v0.4.7...v0.4.8
