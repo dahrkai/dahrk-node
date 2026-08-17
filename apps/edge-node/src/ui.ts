@@ -171,16 +171,49 @@ export const ago = (ms: number): string => (ms < 5000 ? "just now" : `${humanDur
 /** Is there a human at a terminal to answer a question? A piped or redirected command - the curl installer,
  *  a provisioning script, CI - must never block waiting on an answer nobody is there to give. Both streams
  *  are checked: a TTY stdout with a redirected stdin still has nobody to type. */
-export const isInteractive = (): boolean => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+/**
+ * Whether there is an operator at a prompt who could answer a question.
+ *
+ * A TTY on both ends is necessary but NOT sufficient, and the gap is not academic: a node booted as a
+ * microVM's init runs as PID 1 with `console=ttyS0`, so both ends are a genuine TTY and every isTTY test
+ * says a human is watching. Nobody is - there is no keyboard on a serial console in a datacentre. A node
+ * that asked `Update now? [Y/n]` there waited for an answer that could never arrive, and sat alive,
+ * enrolled and serving nothing until somebody looked at the guest's console by hand.
+ *
+ * PID 1 is the honest discriminator. An init process is a machine's first process; it is never an
+ * operator's shell. Checked here rather than at each call site so no future prompt has to remember.
+ */
+export const isInteractive = (): boolean =>
+  Boolean(process.stdin.isTTY && process.stdout.isTTY) && process.pid !== 1;
 
-/** Ask a yes/no question, defaulting to yes on a bare Enter. Only ever call this behind `isInteractive`. */
-export async function confirm(question: string): Promise<boolean> {
+/** How long a prompt waits for a human before deciding there is not one. Generous for somebody reading
+ *  the question, short against a process that would otherwise be stuck for ever. */
+const CONFIRM_TIMEOUT_MS = 60_000;
+
+/**
+ * Ask a yes/no question, defaulting to yes on a bare Enter. Only ever call this behind `isInteractive`.
+ *
+ * Bounded, and that bound is load-bearing rather than tidiness. `isInteractive` is a heuristic about the
+ * world outside the process and will be wrong again somewhere; an unbounded prompt turns any such mistake
+ * into a process that is alive, silent and inert for ever, which is the hardest failure there is to
+ * notice. With a timeout the same mistake costs a minute and answers "no" - the safe reading of an
+ * unanswered question, since anything worth confirming should not proceed unconfirmed.
+ */
+export async function confirm(question: string, opts: { timeoutMs?: number } = {}): Promise<boolean> {
   const { createInterface } = await import("node:readline/promises");
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? CONFIRM_TIMEOUT_MS);
   try {
-    const answer = (await rl.question(`  ${question} ${dim("[Y/n]")} `)).trim().toLowerCase();
+    const answer = (await rl.question(`  ${question} ${dim("[Y/n]")} `, { signal: controller.signal }))
+      .trim()
+      .toLowerCase();
     return answer === "" || answer === "y" || answer === "yes";
+  } catch {
+    // Aborted (nobody answered) or the stream closed under us. Either way there is no yes to act on.
+    return false;
   } finally {
+    clearTimeout(timer);
     rl.close();
   }
 }
