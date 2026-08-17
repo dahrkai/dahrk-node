@@ -24,6 +24,8 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-08-17
+
 ### Fixed
 
 - **A node running as PID 1 waited for ever at the update prompt (DHK-1300, #233).** A managed guest
