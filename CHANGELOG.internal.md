@@ -24,6 +24,15 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A client release notified nothing downstream that builds against it.** The harness-notification
+  step was removed in #218 as having no consumer, which was true at the time: the workflow it
+  dispatched had been deleted with the hub-hosted edge container. The pipeline that replaced that
+  consumer builds on guest-tree changes only, so publishing a release produced nothing built against
+  it, indefinitely. The dispatch is restored (`dahrk-node-released`, non-fatal, alongside the
+  dahrk-web one); the downstream end builds and stops, deliberately - nothing is rolled out by a tag.
+
 ## [0.4.11] - 2026-08-17
 
 ### Fixed
