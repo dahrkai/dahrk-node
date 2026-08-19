@@ -24,6 +24,17 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-08-19
+
+### Changed
+
+- **Restored the release dispatch to the harness repo (#238).** `.github/workflows/release.yml` only;
+  nothing in the client changes. The `dahrk-node-released` dispatch was dropped in #218 as having no
+  consumer, which was true then: the workflow it reached had been deleted, and the replacement builds
+  on its own tree changes only, so publishing a client triggered nothing built against it. Restored
+  alongside the dahrk-web dispatch and non-fatal on failure; the downstream end builds and stops, so a
+  tag rolls nothing out. Needs a `HARNESS_DISPATCH_PAT` repo secret, and the step skips without it.
+
 ## [0.4.12] - 2026-08-19
 
 ### Changed
