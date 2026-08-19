@@ -319,12 +319,30 @@ _Avoid_: Org, team (a team is a subdivision of a workspace).
 
 **AuthProfile**:
 The Tenant-owned record naming a provider and the credential that authenticates **inference** for it.
-The provider decides the runtime: an Anthropic subscription requires Claude Agent SDK; API-key
-profiles and every other provider use Pi. It does **not** name a model; a Model profile does. A Tenant
-may hold several for one provider, because a subscription and a key are two accounts. Onboarding
-establishes the account default, which is what every Role resolves through until a Model profile says
-otherwise.
+The credential decides the runtime: a Claude subscription requires the Claude Agent SDK, and everything
+else runs on Pi. It does **not** name a model; a Model profile does. A Tenant may hold several for one
+provider, because a subscription and a key are two accounts. Onboarding establishes the account
+default, which is what every Role resolves through until a Model profile says otherwise.
 _Avoid_: API key, credential (a credential is what the profile points at), model config, Model profile.
+
+**Auth method**:
+Which *kind* of credential an AuthProfile holds: an **API key** or a **subscription token**. It is the
+question "what can consume this", and it is not answered by where the secret is stored. A Claude
+subscription token is deliberately kept as an ordinary API-key credential, so storage says "API key"
+while the auth method is a subscription token that only the Claude Agent SDK can use. The two can
+therefore disagree, and one is never read as the other: doing so routes a credential to a runtime that
+cannot authenticate with it.
+Reserve **subscription** on its own for the customer's billing relationship, which is a different thing
+entirely.
+_Avoid_: Credential kind (that is the storage question), subscription (ambiguous with billing),
+flavour.
+
+**Preflight**:
+A read-only check that answers "would this actually run", asked **before** the work rather than
+discovered during it. It reads system state and never calls a provider, so a green preflight means the
+work would be dispatched, not that a provider will accept the credential. Two subjects take one: a
+repository and the node that would execute in it, and an AuthProfile on its own.
+_Avoid_: Health check (that is liveness of a running thing), test, validation, dry run.
 
 **Role**:
 The named inference slot a Stage declares: `reasoning`, `coding`, `review`, or `default` when it names
