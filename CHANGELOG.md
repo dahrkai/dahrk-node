@@ -6,6 +6,12 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-08-19
+
+### Changed
+
+- This release carries no user-facing changes; it refreshes the published build.
+
 ## [0.4.12] - 2026-08-19
 
 ### Changed
@@ -723,7 +729,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.12...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.13...HEAD
+[0.4.13]: https://github.com/dahrkai/dahrk-node/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/dahrkai/dahrk-node/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/dahrkai/dahrk-node/compare/v0.4.10...v0.4.11
 [0.4.10]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...v0.4.10
