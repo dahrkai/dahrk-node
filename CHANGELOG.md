@@ -6,6 +6,12 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-08-19
+
+### Changed
+
+- The node now speaks version 0.29.0 of the hub wire protocol. (#235)
+
 ## [0.4.11] - 2026-08-17
 
 ### Fixed
@@ -717,7 +723,8 @@ First published release of the `dahrk-node` edge client.
 - Tag-driven release CI: a `vX.Y.Z` tag publishes to npm, bumps the Homebrew tap formula, and cuts a
   GitHub release.
 
-[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.11...HEAD
+[Unreleased]: https://github.com/dahrkai/dahrk-node/compare/v0.4.12...HEAD
+[0.4.12]: https://github.com/dahrkai/dahrk-node/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/dahrkai/dahrk-node/compare/v0.4.10...v0.4.11
 [0.4.10]: https://github.com/dahrkai/dahrk-node/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/dahrkai/dahrk-node/compare/v0.4.8...v0.4.9
