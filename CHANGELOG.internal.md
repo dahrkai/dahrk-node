@@ -24,6 +24,24 @@ this file is left verbatim.
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-08-19
+
+### Changed
+
+- **`@dahrk/contracts` 0.25.0 -> 0.28.0 (#232), then 0.28.0 -> 0.29.0 (#235).** Catalogue entry in
+  `pnpm-workspace.yaml` plus the lockfile; no source change on this side. Pre-1.0 caret ranges pin to
+  the minor, so `pnpm install` cannot pick these up and the refresh job opens a PR instead. The range
+  covers hub-side protocol additions (per-step timing on the trace envelope, the stage cost record and
+  route/model-profile types, capability-based credential routing); the node compiles against the newer
+  types without behaviour of its own changing. The public note states the protocol version only, since
+  that is the part a self-hoster can act on.
+
+### Documentation
+
+- **Shared-kernel sync (#236).** `CONTEXT.md` only. Adds the **Auth method** and **Preflight** entries
+  and corrects **AuthProfile**: the credential decides the runtime, not the provider. Additions only,
+  mirrored from the workspace-root kernel block.
+
 ## [0.4.11] - 2026-08-17
 
 ### Fixed
