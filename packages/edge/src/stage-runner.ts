@@ -956,11 +956,22 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             writer.append({ seq: 0, ts: nowIso(), type: "state", runtime: traceRuntime, event: "stage-exit", status }),
           );
           const endedAt = nowIso();
+          // The stage's wall-clock elapsed time, from attempt start to this exit, computed from the two
+          // ISO-8601 timestamps already in hand. The portal reads `TraceMeta.durationMs` and rendered a
+          // blank because the finalised meta never carried it (the figure only ever reached the
+          // stage-exit trace *event*, which the reader does not consult). A single uniform source here
+          // populates it for every runtime and for check stages alike, needing no per-adapter plumbing.
+          // `Math.max(0, ...)` guards against a backwards clock; a NaN parse leaves the field absent.
+          const startMs = Date.parse(meta.startedAt);
+          const endMs = Date.parse(endedAt);
+          const durationMs =
+            Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : undefined;
           writer.finalise({
             status,
             endedAt,
             ...(sessionId ? { sessionId } : {}),
             ...(usage !== undefined ? { usage } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
           });
           writeScratchState(ref!, job, attempt, status);
           const finalMeta: TraceMeta = {
@@ -968,6 +979,7 @@ export function createStageRunner(deps: StageRunnerDeps): StageRunner {
             ...(sessionId ? { sessionId } : {}),
             ...(costUsd !== undefined ? { costUsd } : {}),
             ...(usage !== undefined ? { usage } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
           };
           // The single most important best-effort path on the node. If this fails the hub ends up with
           // no finalised trace for the stage - the entire forensic record of what the agent did - and
