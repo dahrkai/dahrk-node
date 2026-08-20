@@ -283,6 +283,45 @@ forBothRuntimes("DHK-1232: a stage whose runner reports no usage leaves usage ab
   }
 });
 
+forBothRuntimes("DHK-1254: a finished stage's finalised trace metadata carries its wall-clock duration", async (runtime) => {
+  const root = mkdtempSync(join(tmpdir(), "dahrk-sr-duration-"));
+  const scratchRoot = join(root, "scratch");
+  let finalised: { meta: TraceMeta } | undefined;
+  const sink: TraceSink = {
+    event: () => undefined,
+    finalised: (f) => void (finalised = { meta: f.meta }),
+    requestBlobUrl: async (req) => ({ key: `k/${req.sha256}` }),
+  };
+  const runner = createStageRunner({
+    gitService: { createWorktree: () => assert.fail("no worktree"), teardownWorktree: async () => undefined } as never,
+    makeRunner: usageReportingRunner(),
+    rules: [],
+    sendProgress: () => undefined,
+    trace: sink,
+    scratchRoot,
+  });
+
+  try {
+    const result = await runner.runJob(usageJob(runtime));
+    assert.equal(result.status, "ok");
+    assert.ok(finalised);
+    // The portal reads `TraceMeta.durationMs`; before DHK-1254 the finalised meta never carried it, so
+    // the stage duration rendered blank. It is now the stage's wall-clock elapsed time, populated for
+    // every runtime (and check stages) regardless of what the runner itself reports.
+    assert.equal(typeof finalised.meta.durationMs, "number", "the shipped trace metadata carries a duration");
+    assert.ok(finalised.meta.durationMs! >= 0, "the duration is a non-negative elapsed time");
+    assert.equal(
+      readMetaJson(scratchRoot, "run-usage-1").durationMs,
+      finalised.meta.durationMs,
+      "the on-disk meta.json carries the same figure",
+    );
+    assert.equal(finalised.meta.costUsd, 0.07, "cost reporting is unchanged");
+    assert.equal(finalised.meta.status, "ok", "status reporting is unchanged");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // Single-runtime (claude-code): the tenant guard fires before the runner is constructed, so the
 // runtime in agentConfig has no effect on the outcome. Running it for both runtimes would add no
 // coverage of the runtime-agnostic layer.

@@ -6,6 +6,10 @@ All notable changes to the `dahrk-node` edge client are documented here. The for
 
 ## [Unreleased]
 
+### Fixed
+
+- A finished stage now reports its wall-clock duration in the trace metadata, so the portal renders the stage's elapsed time.
+
 ## [0.4.13] - 2026-08-19
 
 ### Changed
